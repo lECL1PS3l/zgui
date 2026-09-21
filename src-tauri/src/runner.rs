@@ -341,6 +341,10 @@ pub fn spawn_and_wait_pid(script: &Path, pid_file: &Path, timeout: Duration) -> 
 
 /// Проверяет наличие процесса по PID (без элевации).
 pub fn pid_alive(pid: u32) -> bool {
+    // PID 0 — System Idle Process: `tasklist` его показывает, но это не процесс.
+    if pid == 0 {
+        return false;
+    }
     let out = hidden_command("tasklist.exe")
         .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
         .output();

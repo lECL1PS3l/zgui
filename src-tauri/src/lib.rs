@@ -112,6 +112,13 @@ struct UpdaterView {
 fn collect_warnings(s: &AppState) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     out.push("Не рекомендуется запускать Zapret вместе с VPN".into());
+    if s.external_winws {
+        out.push(
+            "Обход запущен вне программы (winws.exe не через наш GUI). Два winws конфликтуют: \
+             нажмите «Остановить» и запустите стратегию здесь."
+                .into(),
+        );
+    }
 
     for engine in [ENGINE_FLOWSEAL] {
         let Some(root) = s.roots.path(engine) else { continue };
@@ -145,6 +152,8 @@ struct Bootstrap {
     game_filter_ports: (String, String),
     busy: bool,
     elevated: bool,
+    /// Кто держит обход: none|app|service|test|external (единый источник правды).
+    owner: String,
     data_dir: String,
     warnings: Vec<String>,
 }
@@ -156,11 +165,87 @@ fn updater_view(s: &AppState) -> UpdaterView {
     }
 }
 
+// -------------------------------------------------------- владелец обхода
+
+/// Кто прямо сейчас держит обход (winws). Единственный источник правды для
+/// индикаторов запуска и детекта «внешнего» процесса.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WinwsOwner {
+    None,
+    /// Профиль, запущенный самой программой (winws — дочерний процесс GUI).
+    App(String),
+    /// Служба zapret (профиль необязателен: мог не сохраниться).
+    Service(Option<String>),
+    /// Идёт прогон теста — winws управляется тестом, а не пользователем.
+    Test,
+    /// winws нашего движка, поднятый вне программы (ручной .bat).
+    External,
+}
+
+/// Чистое решение без обращений к системе — чтобы покрывать логику тестами.
+fn winws_owner_of(
+    testing: bool,
+    app_profile: Option<&str>,
+    service_running: Option<bool>,
+    service_strategy: Option<&str>,
+    any_winws: bool,
+    own_winws: bool,
+) -> WinwsOwner {
+    if testing {
+        return WinwsOwner::Test;
+    }
+    if let Some(id) = app_profile {
+        return WinwsOwner::App(id.to_string());
+    }
+    if service_running == Some(true) {
+        return WinwsOwner::Service(service_strategy.map(str::to_string));
+    }
+    if any_winws && own_winws {
+        return WinwsOwner::External;
+    }
+    WinwsOwner::None
+}
+
+fn owner_name(o: &WinwsOwner) -> &'static str {
+    match o {
+        WinwsOwner::None => "none",
+        WinwsOwner::App(_) => "app",
+        WinwsOwner::Service(_) => "service",
+        WinwsOwner::Test => "test",
+        WinwsOwner::External => "external",
+    }
+}
+
+/// Текущий владелец обхода. Локи берутся по порядку `testing` → `state`;
+/// не вызывать, уже удерживая `state`, иначе дедлок.
+fn current_owner(g: &Global) -> WinwsOwner {
+    let testing_flag = g.testing.lock().unwrap_or_else(|e| e.into_inner()).running;
+    let s = st(g);
+    let testing = testing_flag || tester::runner_alive(&s.data);
+    let app = s
+        .runtime
+        .as_ref()
+        .filter(|r| rn::pid_alive(r.pid))
+        .map(|r| r.profile_id.as_str());
+    let any = svc::any_winws_running();
+    let own = any && !svc::own_engine_pids(&s.data, None).is_empty();
+    winws_owner_of(
+        testing,
+        app,
+        s.service_running,
+        s.service_strategy.as_deref(),
+        any,
+        own,
+    )
+}
+
 // ---------------------------------------------------------------- корневой
 
 #[tauri::command(async)]
 fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
     let g = ga.inner();
+    // Владельца считаем до захвата state: current_owner сам берёт этот лок.
+    let owner = owner_name(&current_owner(g)).to_string();
     let s = st(g);
     let fs = root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe");
     let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
@@ -182,6 +267,7 @@ fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
         game_filter_ports: (tcp, udp),
         busy: g.is_busy(),
         elevated: rn::is_elevated(),
+        owner,
         data_dir: s.data.to_string_lossy().into_owned(),
         warnings: collect_warnings(&s),
     }
@@ -263,7 +349,7 @@ pub fn heal_orphan_proxy() -> Option<String> {
 
 // ---------------------------------------------------------------- roots
 
-fn seed_flowseal_configs(root: &std::path::Path, data: &std::path::Path) {
+fn seed_flowseal_configs(root: &std::path::Path, data: &std::path::Path, settings: &Settings) {
     let lists = root.join("lists");
     let _ = std::fs::create_dir_all(&lists);
     embedded::copy_tree_missing(&data.join("catalog/flowseal/lists"), &lists);
@@ -278,6 +364,9 @@ fn seed_flowseal_configs(root: &std::path::Path, data: &std::path::Path) {
             let _ = std::fs::write(p, content);
         }
     }
+    // ipset-all.txt: в движке/каталоге лежит заглушка Flowseal — материализуем
+    // реальный список для режима «loaded» (иначе `--ipset=` правила мертвы).
+    up::sync_ipset(root, data, settings);
 }
 
 #[tauri::command(async)]
@@ -295,10 +384,13 @@ fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String)
         return Err(format!("в папке не найден {} — укажите корень распакованного движка", exe_name));
     }
     let root = embedded::engine_root_for_public(&selected).unwrap_or(selected);
-    let data = st(g).data.clone();
+    let (data, settings) = {
+        let s = st(g);
+        (s.data.clone(), s.settings.clone())
+    };
     st(g).roots.set(&engine, Some(root.to_string_lossy().into_owned()));
     embedded::neutralize_author_autoupdate(&root);
-    seed_flowseal_configs(&root, &data);
+    seed_flowseal_configs(&root, &data, &settings);
     let mut s = st(g);
     reload_bats_from_disk(&mut s);
     s.save();
@@ -324,6 +416,14 @@ fn engine_meta(engine: &str) -> Result<EngineMeta, String> {
 fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Option<String>) -> Result<String, String> {
     let meta = engine_meta(&engine)?;
     let g = ga.inner();
+    // Второй запуск поверх первого писал бы в тот же tmp-zip (File::create обрезает
+    // файл) и мог испортить распаковку. busy ставит и авто-проверка конфигов.
+    if g.busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("уже идёт загрузка или проверка обновлений — дождитесь завершения".into());
+    }
     let dest = dest.unwrap_or_else(|| st(g).data.join("engines").join(&engine).to_string_lossy().into_owned());
     let data_dir = st(g).data.clone();
     let app2 = app.clone();
@@ -338,9 +438,10 @@ fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Opt
                 s.roots.set(&engine2, Some(path.clone()));
                 s.engine_version = Some(version.trim_start_matches('v').to_string());
                 cleanup_stale_engine_dirs(std::path::Path::new(&path));
-                seed_flowseal_configs(std::path::Path::new(&path), &s.data);
+                seed_flowseal_configs(std::path::Path::new(&path), &s.data, &s.settings);
                 reload_bats_from_disk(&mut s);
                 s.save();
+                drop(s);
                 logger::log("ok", "engine", &format!("движок {engine2} установлен: {path}"));
                 emit(&app2, "zgui:prog", serde_json::json!({"id": tag, "phase": "done", "msg": format!("{} установлен", engine2), "pct": 100}));
                 emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Движок {} установлен в {}", engine2, path)}));
@@ -352,6 +453,7 @@ fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Opt
                 emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": friendly}));
             }
         }
+        app2.state::<Global>().set_busy(false);
     });
     Ok(format!("загрузка {} началась", engine))
 }
@@ -498,7 +600,7 @@ fn provision_engines(s: &mut AppState) {
                 s.engine_version = engine_version_from_root(&norm)
                     .or_else(|| Some(embedded::ENGINE_VERSION.to_string()));
             }
-            seed_flowseal_configs(&norm, &data);
+            seed_flowseal_configs(&norm, &data, &s.settings);
             reload_bats_from_disk(s);
             return;
         }
@@ -510,7 +612,7 @@ fn provision_engines(s: &mut AppState) {
             if s.engine_version.is_none() {
                 s.engine_version = Some(embedded::ENGINE_VERSION.to_string());
             }
-            seed_flowseal_configs(&path, &data);
+            seed_flowseal_configs(&path, &data, &s.settings);
             reload_bats_from_disk(s);
         }
         Ok(None) => {}
@@ -686,6 +788,12 @@ fn delete_profile(ga: State<'_, Global>, id: String) -> Result<Vec<Profile>, Str
         }
     }
     s.profiles.retain(|p| p.id != id);
+    // Удалили профиль, выбранный для автозапуска, — снимаем устаревшую ссылку.
+    // Задачу планировщика снимет provision_boot при следующем старте GUI.
+    if s.settings.autostart_profile.as_deref() == Some(id.as_str()) {
+        s.settings.autostart_mode = "none".into();
+        s.settings.autostart_profile = None;
+    }
     s.save();
     Ok(s.profiles.clone())
 }
@@ -734,6 +842,12 @@ fn do_stop(app: &AppHandle, g: &Global, silent: bool) -> Result<(), String> {
         };
         if running == Some(true) {
             let _ = stop_service(&data);
+            // Служба осталась установленной, но остановлена — фиксируем сразу,
+            // иначе UI ~10 с показывает «служба запущена» после «Остановить».
+            let mut s = st(g);
+            s.service_running = Some(false);
+            s.save();
+            emit(app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
         }
         if !silent {
             emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text":"всё остановлено"}));
@@ -742,9 +856,46 @@ fn do_stop(app: &AppHandle, g: &Global, silent: bool) -> Result<(), String> {
     }
 }
 
+/// Останавливает ВСЁ, что относится к нашему движку: профиль приложения, нашу
+/// службу и winws, поднятые вне программы (ручной .bat/старая служба).
+/// Без этого второй winws не виден GUI и конфликтует с первым — обход «не работает»,
+/// пока процесс не убьют вручную (жалоба владельца).
+fn stop_all_own(app: &AppHandle, g: &Global) -> Result<(), String> {
+    let r = do_stop(app, g, true);
+    let data = st(g).data.clone();
+    // Кэш состояния мог устареть (GUI перезапускали) — проверяем службу фактом.
+    let (installed, running) = svc::service_state();
+    if installed && running {
+        let _ = stop_service(&data);
+    }
+    let leftovers = if svc::any_winws_running() {
+        svc::own_engine_pids(&data, None)
+    } else {
+        Vec::new()
+    };
+    if !leftovers.is_empty() {
+        logger::log(
+            "warn",
+            "stop",
+            &format!("останавливаю winws вне программы: {:?}", leftovers),
+        );
+        let _ = rn::stop_pids(&leftovers, &data);
+    }
+    {
+        let mut s = st(g);
+        if s.external_winws {
+            s.external_winws = false;
+            s.save();
+        }
+    }
+    r
+}
+
 #[tauri::command(async)]
 fn stop_running(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
-    do_stop(&app, ga.inner(), false)
+    stop_all_own(&app, ga.inner())?;
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"всё остановлено"}));
+    Ok(())
 }
 
 fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
@@ -761,7 +912,7 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
         (p, root, s.settings.clone(), s.data.clone())
     };
 
-    let _ = do_stop(app, g, true);
+    let _ = stop_all_own(app, g);
 
     let exe = locate_exe(&root_path, profile.exe_name()).map_err(|e| {
         logger::log("err", "start", &format!("{}: {e}", profile.name));
@@ -842,6 +993,61 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     Ok(runtime)
 }
 
+/// Запускает профиль без тупиков на настройках: если установлена служба zapret —
+/// переводит её на нужную стратегию (служба остаётся единственным механизмом
+/// обхода), иначе поднимает winws как процесс программы.
+fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
+    // Во время прогона теста запуск запрещён: do_start/stop_all_own убили бы
+    // winws теста. Лок `testing` берём до `state` — иначе дедлок с test_status.
+    let testing = g.testing.lock().unwrap_or_else(|e| e.into_inner()).running;
+    if testing || tester::runner_alive(&st(g).data) {
+        return Err("идёт тест стратегий — дождитесь окончания".into());
+    }
+    // Решаем по факту, а не по записи в state.json: службу могли создать или
+    // удалить извне, и устаревшее состояние повело бы по неверной ветке —
+    // поднялся бы winws как процесс программы рядом со «второй» службой.
+    if !svc::service_state().0 {
+        return do_start(app, g, id);
+    }
+    let (profile, root, args, data) = {
+        let s = st(g);
+        let p = s.profile(id).cloned().ok_or_else(|| "профиль не найден".to_string())?;
+        let root = s
+            .roots
+            .path(&p.engine)
+            .ok_or_else(|| format!("корень «{}» не задан — нажмите «Скачать движок»", p.engine))?;
+        let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
+        (p.clone(), root, pf::apply_game_filter(&p.args, &tcp, &udp), s.data.clone())
+    };
+    // Один живой winws: снимаем процесс программы и старую службу перед пересозданием.
+    let _ = stop_all_own(app, g);
+    svc::install_service(&root, &profile, &args, &data).map_err(|e| {
+        logger::log("err", "service", &format!("переключение службы не удалось: {e}"));
+        human::with_context("не удалось переключить службу на эту стратегию", &e)
+    })?;
+    logger::log(
+        "ok",
+        "service",
+        &format!("служба zapret переключена на «{}»", profile.name),
+    );
+    {
+        let mut s = st(g);
+        s.service_running = Some(true);
+        s.service_strategy = Some(profile.id.clone());
+        s.runtime = None;
+        s.save();
+    }
+    emit(app, "zgui:status", serde_json::json!({"running": true, "pid": null, "profileId": profile.id}));
+    emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Служба переключена на «{}»", profile.name)}));
+    Ok(Runtime {
+        profile_id: profile.id,
+        pid: 0,
+        started_at: now_ts(),
+        via: "service".into(),
+        alive: true,
+    })
+}
+
 #[tauri::command]
 async fn start_profile(app: AppHandle, id: String) -> Result<Runtime, String> {
     // Запуск идёт в отдельном потоке: ожидание UAC (до 60 с) не блокирует UI,
@@ -849,7 +1055,7 @@ async fn start_profile(app: AppHandle, id: String) -> Result<Runtime, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ga = app2.state::<Global>();
-        do_start(&app2, ga.inner(), &id)
+        start_or_switch(&app2, ga.inner(), &id)
     })
     .await
     .map_err(|e| format!("запуск прерван: {}", e))?
@@ -1006,6 +1212,26 @@ fn test_strategies(
 
     let (_plan, script, out_path) = tester::write_test_runner(&data, &steps, &custom, geoblock)?;
     let total = steps.len();
+    // Тест поднимает свои winws: текущий обход (профиль, служба, ручной .bat)
+    // обязан быть остановлен. Иначе winws выходит сразу с «A copy of winws is
+    // already running with the same filter», а проба проходит «чужим» обходом.
+    // Останавливаем ВСЕГДА: внешний winws в runtime не виден, а пустой
+    // stop_all_own стоит копейки (tasklist/sc без запущенных процессов).
+    let (had_runtime, had_service) = {
+        let s = st(g);
+        let (installed, running) = svc::service_state();
+        (s.runtime.clone(), installed && running)
+    };
+    let _ = stop_all_own(&app, g);
+    // Если winws всё ещё жив (чужой движок из другой папки или отказ UAC при
+    // остановке) — тест даст мусор («A copy of winws is already running»).
+    // Лучше честная ошибка, чем «ни одна стратегия не запустилась».
+    if svc::any_winws_running() {
+        logger::log("err", "test", "winws всё ещё запущен — тест отменён до остановки");
+        return Err(
+            "winws всё ещё запущен (обход вне программы или чужой процесс) — остановите его и повторите тест".into(),
+        );
+    }
     logger::log(
         "info",
         "test",
@@ -1177,6 +1403,35 @@ fn test_strategies(
                     critical_ok: false,
                 })
                 .collect();
+        }
+
+        // Диагностика «стратегия не запустилась»: причины уже собраны раннером,
+        // но в журнале их не было — при разборе жалоб не хватало фактов.
+        for r in results.iter().filter(|r| !r.started) {
+            let err: String = r.error.clone().unwrap_or_default().chars().take(300).collect();
+            logger::log("err", "test", &format!("«{}» не запустилась: {}", r.name, err));
+        }
+
+        // Возвращаем обход, который остановили перед тестом: иначе пользователь
+        // остаётся без защиты, а служба — в остановленном состоянии.
+        if let Some(rt) = had_runtime {
+            logger::log(
+                "info",
+                "test",
+                &format!("возвращаю прежнюю стратегию «{}»", rt.profile_id),
+            );
+            if let Err(e) = do_start(&app2, g2, &rt.profile_id) {
+                logger::log("err", "test", &format!("не удалось вернуть прежнюю стратегию: {e}"));
+                emit(
+                    &app2,
+                    "zgui:toast",
+                    serde_json::json!({"kind":"warn","text": format!("прежняя стратегия не вернулась: {e}")}),
+                );
+            }
+        } else if had_service {
+            if let Err(e) = svc::start_service(&data) {
+                logger::log("err", "test", &format!("не удалось вернуть службу zapret: {e}"));
+            }
         }
 
         // Калибровка геоблока: какие домены обходятся Zapret, а какие недоступны.
@@ -1373,21 +1628,96 @@ fn cancel_test(ga: State<'_, Global>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command(async)]
-fn set_best_strategy(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<(), String> {
-    let data = st(ga.inner()).data.clone();
-    if !st(ga.inner()).profiles.iter().any(|p| p.id == id) {
-        return Err("профиль не найден".into());
+/// Одно действие «применить лучшую стратегию»: включить автозапуск И запустить
+/// сейчас. Раньше здесь только писался профиль автостарта — настройка висела
+/// мёртвой (задача не создавалась), и запустить «прямо сейчас» мешал GUI-автозапуск.
+#[tauri::command]
+async fn apply_best_strategy(app: AppHandle, id: String) -> Result<(), String> {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ga = app2.state::<Global>();
+        let g = ga.inner();
+        if !st(g).profiles.iter().any(|p| p.id == id) {
+            return Err("профиль не найден".into());
+        }
+        let data = st(g).data.clone();
+        {
+            let mut s = st(g);
+            s.settings.autostart_mode = "profile".into();
+            s.settings.autostart_profile = Some(id.clone());
+            s.save();
+        }
+        let mut c = tester::TestCache::load(&data);
+        c.best_id = Some(id.clone());
+        c.save(&data);
+        sync_autostart(g);
+        start_or_switch(&app2, g, &id)?;
+        emit(
+            &app2,
+            "zgui:toast",
+            serde_json::json!({"kind":"ok","text":"Лучшая стратегия: автозапуск включён и запущена сейчас"}),
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("применение стратегии прервано: {}", e))?
+}
+
+// -------------------------------------------------------- автозапуск, согласование
+
+/// Валиден ли выбранный профиль автозапуска (существует среди профилей).
+fn have_autostart_profile(s: &AppState) -> bool {
+    s.settings.autostart_mode == "profile"
+        && s
+            .settings
+            .autostart_profile
+            .as_ref()
+            .is_some_and(|id| s.profiles.iter().any(|p| &p.id == id))
+}
+
+/// Чистое решение: задачу планировщика держим только в программном режиме и
+/// когда выбран существующий профиль автозапуска. Служба установлена — задача
+/// не нужна (механизм обхода один).
+fn autostart_wants_task(service_installed: bool, have_profile: bool) -> bool {
+    !service_installed && have_profile
+}
+
+/// Приводит механизм автозапуска к единственному верному состоянию. Тихо и
+/// best-effort: нехватка прав — в журнал, без ошибки-тупика в UI.
+fn sync_autostart(g: &Global) {
+    let (service_installed, have_profile, boot_app, data) = {
+        let s = st(g);
+        (s.service_running.is_some(), have_autostart_profile(&s), s.settings.boot_app, s.data.clone())
+    };
+    let want = autostart_wants_task(service_installed, have_profile);
+    if want == boot_app {
+        return;
     }
-    let mut s = st(ga.inner());
-    s.settings.autostart_mode = "profile".into();
-    s.settings.autostart_profile = Some(id.clone());
-    s.save();
-    let mut c = tester::TestCache::load(&data);
-    c.best_id = Some(id.clone());
-    c.save(&data);
-    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"лучшая стратегия выбрана для автостарта"}));
-    Ok(())
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            logger::log("warn", "boot", &format!("current_exe: {e}"));
+            return;
+        }
+    };
+    match rn::apply_boot_task(want, &exe, &data) {
+        Ok(_) => {
+            rn::remove_legacy_boot();
+            let mut s = st(g);
+            s.settings.boot_app = want;
+            s.save();
+            logger::log(
+                "ok",
+                "boot",
+                if want {
+                    "автозапуск: задача планировщика создана"
+                } else {
+                    "автозапуск: задача планировщика снята"
+                },
+            );
+        }
+        Err(e) => logger::log("warn", "boot", &format!("не удалось согласовать автозапуск: {e}")),
+    }
 }
 
 // ---------------------------------------------------------------- конфликты
@@ -1488,17 +1818,6 @@ fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String>
 #[tauri::command(async)]
 fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<(), String> {
     let g = ga.inner();
-    // Взаимная блокировка механизмов автозапуска: либо служба, либо GUI-автозапуск.
-    {
-        let s = st(g);
-        if s.settings.boot_app {
-            return Err(
-                "обход уже включается сам через программу. Чтобы использовать службу, \
-                 сначала отключите автозапуск: «Настройки» → «Запускать при входе» → «— не запускать —»"
-                    .into(),
-            );
-        }
-    }
     let (profile, root, args, data) = {
         let s = st(g);
         let p = s.profile(&id).cloned().ok_or("профиль не найден")?;
@@ -1512,12 +1831,17 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
             human::with_context("не удалось установить службу", &e)
         })?;
     logger::log("ok", "service", &format!("служба zapret установлена со стратегией «{}»", profile.name));
-    let mut s = st(g);
-    s.service_running = Some(true);
-    s.service_strategy = Some(profile.id.clone());
-    s.settings.autostart_mode = "profile".into();
-    s.settings.autostart_profile = Some(profile.id.clone());
-    s.save();
+    {
+        let mut s = st(g);
+        s.service_running = Some(true);
+        s.service_strategy = Some(profile.id.clone());
+        s.settings.autostart_mode = "profile".into();
+        s.settings.autostart_profile = Some(profile.id.clone());
+        s.save();
+    }
+    // Служба — единственный механизм автозапуска: снимаем задачу планировщика,
+    // если она была (раньше это был тупик с ошибкой «сначала отключите автозапуск»).
+    sync_autostart(g);
     emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"служба zapret установлена и запущена"}));
     Ok(())
 }
@@ -1531,15 +1855,32 @@ fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
         human::with_context("не удалось удалить службу", &e)
     })?;
     logger::log("info", "service", "служба zapret удалена");
-    let mut s = st(g);
-    s.service_running = None;
-    s.service_strategy = None;
-    s.settings.autostart_mode = "none".into();
-    s.settings.autostart_profile = None;
-    s.runtime = None;
-    s.save();
+    let fallback = {
+        let mut s = st(g);
+        s.service_running = None;
+        s.service_strategy = None;
+        s.runtime = None;
+        // Автозапуск не теряем: профиль сохраняем, дальше его подхватит программа.
+        if s.settings.autostart_mode != "profile" {
+            s.settings.autostart_profile = None;
+        }
+        let fallback = s.settings.autostart_mode == "profile";
+        s.save();
+        fallback
+    };
+    if fallback {
+        sync_autostart(g);
+    }
     emit(&app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
-    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"служба zapret удалена"}));
+    emit(
+        &app,
+        "zgui:toast",
+        serde_json::json!({"kind":"ok","text": if fallback {
+            "служба удалена — автозапуск теперь через программу"
+        } else {
+            "служба zapret удалена"
+        }}),
+    );
     Ok(())
 }
 
@@ -1639,6 +1980,13 @@ async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, St
             Err(e) => {
                 logger::log("err", "updates", &format!("проверка обновлений не удалась: {e}"));
                 log_updates(&data, &format!("check error: {}", e));
+                // Событие нужно и при ошибке: фронт снимает им блокировку кнопок
+                // (иначе «Проверить обновления» остаётся серой до таймаута).
+                {
+                    let ga2 = app2.state::<Global>();
+                    let s = st(ga2.inner());
+                    emit(&app2, "zgui:updates", updater_view(&s));
+                }
                 emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось проверить обновления", &e)}));
             }
         }
@@ -1717,6 +2065,11 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
             Err(e) => {
                 logger::log("err", "updates", &format!("применение обновлений не удалось: {e}"));
                 log_updates(&data, &format!("apply error: {}", e));
+                {
+                    let ga2 = app2.state::<Global>();
+                    let s = st(ga2.inner());
+                    emit(&app2, "zgui:updates", updater_view(&s));
+                }
                 emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось применить обновления", &e)}));
             }
         }
@@ -1731,14 +2084,25 @@ fn set_settings(ga: State<'_, Global>, mut settings: Settings) -> Result<(), Str
     // Флаг миграции не приходит с фронта — не сбрасываем его, иначе повторная
     // миграция 6→72 сработает после каждой сохранённой настройки.
     settings.interval_migrated = true;
-    let mut s = st(ga.inner());
-    // Тема меняется только через `set_theme`: форма настроек её не присылает,
-    // иначе сохранение сбрасывало бы выбор на дефолт. Флажок автозапуска GUI
-    // меняется только через `set_boot_app` — здесь его тоже сохраняем.
-    settings.theme = s.settings.theme.clone();
-    settings.boot_app = s.settings.boot_app;
-    s.settings = settings;
-    s.save();
+    let autostart_changed = {
+        let mut s = st(ga.inner());
+        // Тема меняется только через `set_theme`: форма настроек её не присылает,
+        // иначе сохранение сбрасывало бы выбор на дефолт. Флажок автозапуска GUI
+        // задаётся не формой, а `sync_autostart` — здесь его просто сохраняем.
+        settings.theme = s.settings.theme.clone();
+        settings.boot_app = s.settings.boot_app;
+        let changed = s.settings.autostart_mode != settings.autostart_mode
+            || s.settings.autostart_profile != settings.autostart_profile;
+        s.settings = settings;
+        s.save();
+        changed
+    };
+    // Приводим задачу планировщика в соответствие только при смене полей
+    // автозапуска: иначе любое сохранение (DNS, интервал) снова дёргало бы
+    // создание задачи, то есть повторный UAC у не-админа.
+    if autostart_changed {
+        sync_autostart(ga.inner());
+    }
     // Тост здесь не показываем: настройки применяются сразу при изменении поля,
     // и всплывашка на каждое переключение только мешала бы.
     Ok(())
@@ -1855,53 +2219,6 @@ fn open_path(path: String) -> Result<(), String> {
     }
     let _ = std::process::Command::new("explorer.exe").arg(&p).spawn();
     Ok(())
-}
-
-#[tauri::command]
-async fn set_boot_app(app: AppHandle, enabled: bool) -> Result<(), String> {
-    // Создание задачи с уровнем «наивысшие» может потребовать UAC — не блокируем UI.
-    let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let ga = app2.state::<Global>();
-        // Взаимная блокировка: пока установлена служба zapret, GUI-автозапуск не нужен.
-        if enabled {
-            let (installed, _) = svc::service_state();
-            if installed {
-                return Err(
-                    "обход уже включается сам службой. Чтобы запускать через программу, \
-                     сначала удалите службу: профиль → «⋯» → «Автозапуск службой»"
-                        .into(),
-                );
-            }
-        }
-        let data = st(ga.inner()).data.clone();
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        rn::apply_boot_task(enabled, &exe, &data)?;
-        // Старая запись HKCU\...\Run больше не нужна: иначе двойной запуск.
-        rn::remove_legacy_boot();
-        {
-            let mut s = st(ga.inner());
-            s.settings.boot_app = enabled;
-            s.save();
-        }
-        logger::log(
-            "ok",
-            "boot",
-            if enabled {
-                "автозапуск GUI включён: задача планировщика ZapretGUI (уровень «наивысшие», без UAC)"
-            } else {
-                "автозапуск GUI выключен"
-            },
-        );
-        emit(
-            &app2,
-            "zgui:toast",
-            serde_json::json!({"kind":"ok","text": if enabled {"автозапуск GUI при входе включён"} else {"автозапуск GUI отключён"}}),
-        );
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("автозапуск: {}", e))?
 }
 
 #[tauri::command(async)]
@@ -2196,6 +2513,17 @@ fn spawn_watchers(app: AppHandle) {
                     s.save();
                 }
             }
+            // «Запущено вне программы»: winws нашего движка без записи runtime
+            // (ручной .bat). Считаем владельца отдельно — current_owner сам берёт
+            // state, вложенный захват дал бы дедлок. Тест и служба — не «внешние».
+            let external = current_owner(&g) == WinwsOwner::External;
+            {
+                let mut s = st(&g);
+                if s.external_winws != external {
+                    s.external_winws = external;
+                    s.save();
+                }
+            }
 
             // авто-проверка конфигов
             let (interval, last_auto, entries_empty, next_auto, roots, settings, data) = {
@@ -2212,7 +2540,7 @@ fn spawn_watchers(app: AppHandle) {
             };
             if interval > 0 && !g.is_busy() {
                 let now = now_ts();
-                let cooled = next_auto.map_or(true, |t| t <= now);
+                let cooled = next_auto.is_none_or(|t| t <= now);
                 let planned_due = match &last_auto {
                     Some(t) => t.parse::<u64>().unwrap_or(0) + interval as u64 * 3600 <= now,
                     None => true,
@@ -2274,6 +2602,34 @@ fn provision_boot(state: &mut AppState) {
             "boot",
             "найден автозапуск из старой версии (реестр) — переношу в планировщик",
         );
+    }
+    // Профиль автозапуска пропал (вырезанный движок, удалённый профиль): задача
+    // открывала бы GUI впустую при каждом входе. Снимаем её — механизм один.
+    if state.settings.boot_app && !have_autostart_profile(state) {
+        if rn::boot_task_exists() {
+            if rn::is_elevated() {
+                match std::env::current_exe() {
+                    Ok(exe) => match rn::apply_boot_task(false, &exe, &state.data) {
+                        Ok(_) => logger::log("ok", "boot", "задача планировщика снята: профиль автозапуска недоступен"),
+                        Err(e) => logger::log("warn", "boot", &format!("не удалось снять задачу планировщика: {e}")),
+                    },
+                    Err(e) => logger::log("err", "boot", &format!("current_exe: {e}")),
+                }
+            } else {
+                logger::log(
+                    "warn",
+                    "boot",
+                    "автозапуск без выбранного профиля, но задача не снята — запустите GUI от администратора",
+                );
+            }
+        }
+        // Сбрасываем флаг, только если задачи действительно больше нет (иначе
+        // повторим попытку при следующем запуске от администратора).
+        if !rn::boot_task_exists() {
+            state.settings.boot_app = false;
+        }
+        rn::remove_legacy_boot();
+        return;
     }
     if !state.settings.boot_app {
         return;
@@ -2535,7 +2891,7 @@ pub fn run() {
             tg_check_update,
             watchdog_status,
             cancel_test,
-            set_best_strategy,
+            apply_best_strategy,
             install_service,
             remove_service,
             conflict_check,
@@ -2555,7 +2911,6 @@ pub fn run() {
             read_log,
             open_path,
             open_url,
-            set_boot_app,
             ack_boot,
             app_info,
             relaunch_as_admin,
@@ -2570,7 +2925,50 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::local_proxy_port;
+    use super::{autostart_wants_task, local_proxy_port, winws_owner_of, WinwsOwner};
+
+    #[test]
+    fn owner_precedence() {
+        // Тест важнее всего: winws теста не «внешний» и не глушится тулбаром.
+        assert_eq!(
+            winws_owner_of(true, Some("p1"), Some(true), Some("p1"), true, true),
+            WinwsOwner::Test
+        );
+        // Живой процесс программы.
+        assert_eq!(
+            winws_owner_of(false, Some("p1"), None, None, true, true),
+            WinwsOwner::App("p1".into())
+        );
+        // Служба (в т.ч. когда winws ещё не успел появиться).
+        assert_eq!(
+            winws_owner_of(false, None, Some(true), Some("p2"), false, false),
+            WinwsOwner::Service(Some("p2".into()))
+        );
+        // Свой winws вне программы — «внешний».
+        assert_eq!(
+            winws_owner_of(false, None, Some(false), None, true, true),
+            WinwsOwner::External
+        );
+        // Служба установлена, но не запущена — не «внешний».
+        assert_eq!(
+            winws_owner_of(false, None, Some(false), Some("p2"), false, false),
+            WinwsOwner::None
+        );
+        // Чужой winws (не нашего движка) владельцем не считается.
+        assert_eq!(
+            winws_owner_of(false, None, None, None, true, false),
+            WinwsOwner::None
+        );
+    }
+
+    #[test]
+    fn autostart_task_only_in_program_mode() {
+        assert!(autostart_wants_task(false, true));
+        assert!(!autostart_wants_task(false, false));
+        // Служба установлена — задача планировщика не нужна.
+        assert!(!autostart_wants_task(true, true));
+        assert!(!autostart_wants_task(true, false));
+    }
 
     #[test]
     fn local_proxy_port_detects_only_local() {

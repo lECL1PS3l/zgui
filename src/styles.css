@@ -355,6 +355,7 @@ body.fx-paused .topo { animation-play-state: paused; }
 .muted { color: var(--muted); }
 .muted.warn { color: var(--amber); }
 .muted.err { color: var(--red); }
+.muted.ok { color: var(--green); }
 .card-sub { font-size: 12px; margin-bottom: 12px; }
 
 .root-row {

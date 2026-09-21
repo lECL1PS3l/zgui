@@ -298,6 +298,19 @@ impl TestCache {
     }
 }
 
+/// Жив ли фоновый раннер теста: по маркерам `logs/test-runner.pid` и
+/// `logs/test-stop.flag`. Нужен, чтобы watchdog не принял winws теста за
+/// «запущенный вне программы» сразу после старта GUI.
+pub fn runner_alive(data: &Path) -> bool {
+    let pid = data.join("logs/test-runner.pid");
+    let stop = data.join("logs/test-stop.flag");
+    std::fs::read_to_string(&pid)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|p| !stop.exists() && crate::runner::pid_alive(p))
+        .unwrap_or(false)
+}
+
 /// Один запуск на стратегию (используется встроенным PS-раннером).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -367,28 +380,65 @@ $out = $plan.out
 $errDir = Split-Path -Parent $out
 $all = @()
 $i = 0
+# HTTPS probe. TCP connect is not enough: DPI lets the TCP handshake through
+# and cuts TLS by SNI, so a blocked site "passes" while the browser cannot open
+# it. We check the full HTTPS exchange (TLS + HTTP headers), like a browser does.
+# Add-Type is required: in PS 5.1 the type System.Net.Http.HttpClientHandler is
+# not resolved until the System.Net.Http assembly is loaded (checked on Win11).
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Add-Type -AssemblyName System.Net.Http
+function New-ProbeClient {{
+  $h = New-Object System.Net.Http.HttpClientHandler
+  $h.UseProxy = $false
+  $h.AllowAutoRedirect = $false
+  $c = New-Object System.Net.Http.HttpClient -ArgumentList $h
+  $c.Timeout = [TimeSpan]::FromSeconds(6)
+  return $c
+}}
+function Start-Probe($client, $target) {{
+  try {{
+    return $client.GetAsync("https://$target/", [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
+  }} catch {{
+    return $null
+  }}
+}}
+function Finish-Probe($task) {{
+  if ($null -eq $task) {{ return [ordered]@{{ ok = $false; detail = 'request failed' }} }}
+  try {{
+    $resp = $task.GetAwaiter().GetResult()
+    $code = [int]$resp.StatusCode
+    $resp.Dispose()
+    return [ordered]@{{ ok = $true; detail = "http $code" }}
+  }} catch {{
+    $msg = $_.Exception.Message
+    if ($_.Exception.InnerException) {{ $msg = $_.Exception.InnerException.Message }}
+    if (-not $msg) {{ $msg = 'failed' }}
+    return [ordered]@{{ ok = $false; detail = $msg }}
+  }}
+}}
 if ($plan.baseline) {{
   # Baseline probe WITHOUT Zapret: distinguishes "site down / not resolving"
   # from "blocked but bypassable". Written to a separate file.
-  # All connects start at once, then we wait, so N domains cost ~one timeout, not N of them.
-  $baseChecks = @()
-  foreach ($d in $plan.domains) {{
-    $client = New-Object System.Net.Sockets.TcpClient
-    $baseChecks += [pscustomobject]@{{ host = $d.host; client = $client; task = $client.ConnectAsync($d.host, 443) }}
-  }}
+  # Probes run in batches: thousands of geoblock domains must not open all at once.
   $baseOut = @()
+  $baseClient = New-ProbeClient
+  $batchSize = 300
   $bi = 0
-  foreach ($c in $baseChecks) {{
-    $ok = $false
-    try {{ $ok = $c.task.Wait(3000) -and $c.client.Connected }} catch {{ $ok = $false }}
-    $baseOut += [ordered]@{{ host = $c.host; ok = $ok }}
-    $c.client.Close()
-    $bi++
-    if ($bi % 25 -eq 0) {{
-      $state = [ordered]@{{ baseline = [ordered]@{{ done = $bi; total = $baseChecks.Count }}; results = @() }}
-      ($state | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $out -Encoding utf8
+  for ($offset = 0; $offset -lt $plan.domains.Count; $offset += $batchSize) {{
+    $end = [Math]::Min($offset + $batchSize - 1, $plan.domains.Count - 1)
+    $baseChecks = @()
+    foreach ($d in $plan.domains[$offset..$end]) {{
+      $baseChecks += [pscustomobject]@{{ host = $d.host; task = (Start-Probe $baseClient $d.host) }}
     }}
+    foreach ($c in $baseChecks) {{
+      $r = Finish-Probe $c.task
+      $baseOut += [ordered]@{{ host = $c.host; ok = [bool]$r.ok }}
+      $bi++
+    }}
+    $state = [ordered]@{{ baseline = [ordered]@{{ done = $bi; total = $plan.domains.Count }}; results = @() }}
+    ($state | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $out -Encoding utf8
   }}
+  $baseClient.Dispose()
   ($baseOut | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $plan.baselineOut -Encoding utf8
 }}
 foreach ($step in $plan.steps) {{
@@ -410,24 +460,24 @@ foreach ($step in $plan.steps) {{
     Start-Sleep -Milliseconds 1800
     if ($p -and -not $p.HasExited) {{
       $res.started = $true
-      # Start all DNS/TCP probes together: 100 domains should not mean 100 * 3 seconds.
-      $checks = @()
-      foreach ($d in $plan.domains) {{
-        $client = New-Object System.Net.Sockets.TcpClient
-        $checks += [pscustomobject]@{{ key = $d.key; host = $d.host; client = $client; started = [DateTime]::UtcNow; task = $client.ConnectAsync($d.host, 443) }}
-      }}
+      # HTTPS probes in batches: connections inside a batch run in parallel,
+      # timeouts do not add up (100+ domains cost ~one timeout, not a hundred).
       $doms = @()
-      foreach ($c in $checks) {{
-        $ok = $false; $det = ''; $ms = 0
-        try {{
-          $ok = $c.task.Wait(3000) -and $c.client.Connected
-          $det = if ($ok) {{ 'connected' }} else {{ 'timeout' }}
-        }} catch {{ $det = $_.Exception.Message }}
-        $ms = ([DateTime]::UtcNow - $c.started).TotalMilliseconds
-        $domain = $plan.domains | Where-Object {{ $_.host -eq $c.host }} | Select-Object -First 1
-        $doms += [ordered]@{{ key = $c.key; host = $c.host; group = $domain.group; groupLabel = $domain.groupLabel; ok = $ok; ms = [int]$ms; detail = $det }}
-        $c.client.Close()
+      $client = New-ProbeClient
+      $batchSize = 300
+      for ($offset = 0; $offset -lt $plan.domains.Count; $offset += $batchSize) {{
+        $end = [Math]::Min($offset + $batchSize - 1, $plan.domains.Count - 1)
+        $checks = @()
+        foreach ($d in $plan.domains[$offset..$end]) {{
+          $checks += [pscustomobject]@{{ key = $d.key; host = $d.host; group = $d.group; groupLabel = $d.groupLabel; started = [DateTime]::UtcNow; task = (Start-Probe $client $d.host) }}
+        }}
+        foreach ($c in $checks) {{
+          $r = Finish-Probe $c.task
+          $ms = [int]([DateTime]::UtcNow - $c.started).TotalMilliseconds
+          $doms += [ordered]@{{ key = $c.key; host = $c.host; group = $c.group; groupLabel = $c.groupLabel; ok = [bool]$r.ok; ms = $ms; detail = $r.detail }}
+        }}
       }}
+      $client.Dispose()
       $res.domains = $doms
       $res.score = @($doms | Where-Object {{ $_.ok }}).Count
       $groupRows = @()
@@ -447,7 +497,7 @@ foreach ($step in $plan.steps) {{
       $tail = ''
       if (Test-Path $errFile) {{ $tail = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue) }}
       if (-not $tail -and (Test-Path $outFile)) {{ $tail = (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) }}
-      $code = if ($p) {{ $p.ExitCode }} else {{ 'null' }}
+      $code = if ($p) {{ try {{ $p.WaitForExit(); $p.ExitCode }} catch {{ '?' }} }} else {{ 'null' }}
       if (-not $isAdmin) {{
         $res.error = "ADMIN_REQUIRED: winws needs administrator rights - run the GUI as admin (exit $code) " + $tail
       }} else {{
@@ -558,14 +608,28 @@ pub fn group_of(p: &Profile) -> String {
 }
 
 /// Формирует сводку: отсортированные результаты + лучшая стратегия.
+/// При равных очках выигрывает та, что прошла больше критических групп, затем —
+/// с меньшей средней задержкой; имя лишь последний детерминированный tie-break.
+/// (Раньше при равных очках «лучшей» становилась первая по алфавиту — случайность.)
 pub fn summarize(results: &[StrategyResult]) -> (Vec<StrategyResult>, Option<String>) {
     let mut v = results.to_vec();
+    let critical_passed =
+        |r: &StrategyResult| r.groups.iter().filter(|g| g.critical && g.ok).count();
+    let avg_ms = |r: &StrategyResult| -> u64 {
+        if r.domains.is_empty() {
+            u64::MAX
+        } else {
+            r.domains.iter().map(|d| d.ms).sum::<u64>() / r.domains.len() as u64
+        }
+    };
     v.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
+            .then_with(|| critical_passed(b).cmp(&critical_passed(a)))
+            .then_with(|| avg_ms(a).cmp(&avg_ms(b)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    // первая в отсортированном списке с ненулевым счётом — лучшая (детерминированно)
+    // первая в отсортированном списке, прошедшая критические группы — лучшая
     let best = v.iter().find(|r| r.started && r.critical_ok).map(|r| r.id.clone());
     (v, best)
 }
@@ -592,6 +656,47 @@ mod tests {
         let (v, best) = summarize(&[mk("a", "A", 2), mk("b", "B", 5), mk("c", "C", 5)]);
         assert_eq!(best.as_deref(), Some("b"));
         assert_eq!(v[0].score, 5);
+    }
+
+    #[test]
+    fn summarize_breaks_ties_by_critical_groups_then_latency() {
+        let mk = |id: &str, crit_group_ok: bool, ms: u64| StrategyResult {
+            id: id.into(),
+            name: id.into(),
+            engine: "flowseal".into(),
+            group: "flowseal bat".into(),
+            started: true,
+            score: 5,
+            max_score: 5,
+            domains: vec![DomainResult {
+                key: "d".into(),
+                host: "d.example".into(),
+                group: Some("youtube".into()),
+                group_label: Some("YouTube".into()),
+                ok: true,
+                ms,
+                detail: "http 200".into(),
+            }],
+            error: None,
+            groups: vec![GroupResult {
+                id: "youtube".into(),
+                label: "YouTube".into(),
+                passed: 1,
+                total: 1,
+                ok: crit_group_ok,
+                critical: true,
+                priority: 1,
+            }],
+            critical_ok: true,
+        };
+        let (v, best) = summarize(&[
+            mk("slow", true, 900),
+            mk("fast", true, 100),
+            mk("no-critical", false, 10),
+        ]);
+        assert_eq!(best.as_deref(), Some("fast"), "при равных очках выигрывает быстрая");
+        assert_eq!(v[0].id, "fast");
+        assert_eq!(v[2].id, "no-critical", "без критических групп — в конце");
     }
 
     #[test]
@@ -710,7 +815,7 @@ mod tests {
             // процесса и подтверждает корректное quoting в $argLine.
             args: vec!["/c".into(), "ping -n 6 127.0.0.1 >nul".into()],
         }];
-        let domains = vec![("y".to_string(), "www.youtube.com".to_string())];
+        let domains = vec![("y".to_string(), "127.0.0.1".to_string())];
         let (_plan, script, out) = write_test_runner(&tmp, &steps, &domains, false).unwrap();
 
         // Скрипт обязан быть ASCII (BOM допустим) — иначе PS 5.1 ломает кириллицу.
@@ -720,6 +825,10 @@ mod tests {
         let script_text = std::str::from_utf8(body).unwrap();
         assert!(script_text.contains("$argLine"));
         assert!(script_text.contains("if ($a -match '[\\s\"]')"));
+        // Проба — HTTPS (TLS+HTTP), не голый TCP-connect.
+        assert!(script_text.contains("https://$target/"), "проба должна быть HTTPS");
+        assert!(script_text.contains("Add-Type -AssemblyName System.Net.Http"), "нужен Add-Type для PS 5.1");
+        assert!(!script_text.contains("TcpClient"), "TCP-проба не должна вернуться");
 
         let status = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -733,7 +842,11 @@ mod tests {
         let results = v["results"].as_array().unwrap();
         let r: StrategyResult = serde_json::from_value(results[0].clone()).unwrap();
         assert!(r.started, "процесс не запустился: {:?}", r.error);
-        assert_eq!(r.score, 1, "счёт должен равняться числу доступных доменов");
+        // Проба обязана отработать без исключений: 127.0.0.1 просто недоступен.
+        // (Именно так ловится «Не удается найти тип HttpClientHandler» в PS 5.1.)
+        assert!(r.error.is_none(), "проба упала с ошибкой: {:?}", r.error);
+        // 127.0.0.1 без HTTPS-сервера — недоступен: тест герметичен (без интернета).
+        assert_eq!(r.score, 0, "локальный адрес не должен считаться доступным");
         assert_eq!(r.max_score, 1);
 
         let _ = std::fs::remove_dir_all(&tmp);

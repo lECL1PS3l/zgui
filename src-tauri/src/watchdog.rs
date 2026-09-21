@@ -1,5 +1,5 @@
-//! Watchdog: периодически проверяет доступность YouTube и Discord при запущенном
-//! профиле и предупреждает, если обход перестал работать. **Авто-восстановления нет**
+//! Watchdog: периодически проверяет доступность YouTube и Discord при запущенной
+//! стратегии и предупреждает, если она перестала отвечать. **Авто-восстановления нет**
 //! (решение владельца) — только уведомление.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +36,7 @@ pub struct WatchdogStatus {
     pub active: bool,
     /// Подряд идущих неудач.
     pub failures: u32,
-    /// Есть ли сейчас тревога (обход не работает).
+    /// Есть ли сейчас тревога (стратегия не отвечает).
     pub alarm: bool,
     /// Последняя проверка (Unix-время, сек).
     pub checked_at: u64,
@@ -64,21 +64,14 @@ impl WatchdogState {
     }
 }
 
-/// Синхронная TCP-проба (443, fallback 80) с измерением времени.
-fn probe(host: &str) -> (bool, u64) {
-    use std::net::{TcpStream, ToSocketAddrs};
+/// HTTPS-проба (TLS + HTTP-заголовки) с измерением времени.
+/// TCP-connect давал ложное «работает»: DPI пропускает рукопожатие TCP
+/// и режет TLS по SNI, поэтому браузер не открывает сайт, а проба «успешна».
+async fn probe(client: &reqwest::Client, host: &str) -> (bool, u64) {
     let start = std::time::Instant::now();
-    let addrs = (host, 443u16).to_socket_addrs();
-    let owned = match addrs {
-        Ok(it) => it.collect::<Vec<_>>(),
-        Err(_) => return (false, start.elapsed().as_millis() as u64),
-    };
-    for addr in owned {
-        if TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok() {
-            return (true, start.elapsed().as_millis() as u64);
-        }
-    }
-    (false, start.elapsed().as_millis() as u64)
+    let url = format!("https://{}/", host);
+    let ok = client.get(url).send().await.is_ok();
+    (ok, start.elapsed().as_millis() as u64)
 }
 
 /// Запускает фоновый watchdog один раз за процесс.
@@ -86,29 +79,37 @@ pub fn spawn(app: AppHandle, state: Arc<WatchdogState>) {
     if state.running.swap(true, Ordering::SeqCst) {
         return; // уже запущен
     }
+    let client = match reqwest::Client::builder()
+        .timeout(PROBE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            crate::logger::log("warn", "watchdog", &format!("не удалось создать клиент пробы: {e}"));
+            state.running.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
     tauri::async_runtime::spawn(async move {
         let mut failures: u32 = 0;
         let mut alarm = false;
         loop {
             tokio::time::sleep(CHECK_INTERVAL).await;
 
-            // Наблюдаем только когда профиль реально запущен и тест не идёт.
-            let (alive, testing) = {
+            // Наблюдаем только когда стратегия реально запущена (программа или
+            // служба) и не идёт тест — владелец обхода уже учитывает и то, и другое.
+            let owner = {
                 let g = app.state::<crate::Global>();
-                let s = crate::st(&g);
-                let alive = s
-                    .runtime
-                    .as_ref()
-                    .map(|r| crate::runner::pid_alive(r.pid))
-                    .unwrap_or(false);
-                let testing = {
-                    let t = g.testing.lock().unwrap_or_else(|e| e.into_inner());
-                    t.running
-                };
-                (alive, testing)
+                crate::current_owner(&g)
             };
-            if !alive || testing {
-                // Профиль не запущен — сбрасываем тревогу и не шумим.
+            let active = matches!(
+                owner,
+                crate::WinwsOwner::App(_) | crate::WinwsOwner::Service(_)
+            );
+            if !active {
+                // Стратегия не запущена — сбрасываем тревогу и не шумим.
                 failures = 0;
                 alarm = false;
                 state.set(WatchdogStatus {
@@ -119,27 +120,25 @@ pub fn spawn(app: AppHandle, state: Arc<WatchdogState>) {
                 continue;
             }
 
-            let domains: Vec<DomStatus> = WATCH_DOMAINS
-                .iter()
-                .map(|(label, host)| {
-                    let (ok, ms) = probe(host);
-                    DomStatus {
-                        label: label.to_string(),
-                        host: host.to_string(),
-                        ok,
-                        ms,
-                    }
-                })
-                .collect();
+            let mut domains: Vec<DomStatus> = Vec::with_capacity(WATCH_DOMAINS.len());
+            for (label, host) in WATCH_DOMAINS {
+                let (ok, ms) = probe(&client, host).await;
+                domains.push(DomStatus {
+                    label: label.to_string(),
+                    host: host.to_string(),
+                    ok,
+                    ms,
+                });
+            }
             let all_ok = domains.iter().all(|d| d.ok);
             if all_ok {
                 failures = 0;
                 if alarm {
                     alarm = false;
-                    crate::logger::log("ok", "watchdog", "обход снова работает");
+                    crate::logger::log("ok", "watchdog", "стратегия снова отвечает");
                     let _ = app.emit(
                         "zgui:toast",
-                        serde_json::json!({"kind":"ok","text":"обход снова работает"}),
+                        serde_json::json!({"kind":"ok","text":"стратегия снова отвечает"}),
                     );
                 }
             } else {
@@ -151,13 +150,13 @@ pub fn spawn(app: AppHandle, state: Arc<WatchdogState>) {
                     crate::logger::log(
                         "warn",
                         "watchdog",
-                        &format!("обход не работает: не отвечают {}", failed.join(", ")),
+                        &format!("стратегия не отвечает: не отвечают {}", failed.join(", ")),
                     );
                     let _ = app.emit(
                         "zgui:toast",
                         serde_json::json!({
                             "kind":"warn",
-                            "text": format!("обход не работает: не отвечают {}", failed.join(", "))
+                            "text": format!("стратегия не отвечает: не отвечают {}", failed.join(", "))
                         }),
                     );
                 }
@@ -192,11 +191,15 @@ mod tests {
         assert!(!s.is_running());
     }
 
-    #[test]
-    fn probe_localhost_ok() {
-        // Проверяем, что probe вообще умеет возвращать успех/неудачу (не на реальной сети).
-        let (ok, _ms) = probe("localhost");
-        // localhost без слушателя на 443 — ожидаем неудачу; важен факт отсутствия паники.
-        let _ = ok;
+    #[tokio::test]
+    async fn probe_localhost_fails() {
+        // localhost без HTTPS-слушателя — ожидаем неудачу; важен факт отсутствия паники.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(800))
+            .no_proxy()
+            .build()
+            .unwrap();
+        let (ok, _ms) = probe(&client, "localhost").await;
+        assert!(!ok, "на localhost нет HTTPS-сервера");
     }
 }

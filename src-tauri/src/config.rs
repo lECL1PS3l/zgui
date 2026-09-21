@@ -158,6 +158,10 @@ pub struct AppState {
     pub service_strategy: Option<String>,
     #[serde(default)]
     pub boot_pending: bool,
+    /// Обнаружен winws нашего движка, запущенный вне программы (ручной .bat,
+    /// старая служба) — показываем предупреждение и даём остановить.
+    #[serde(default)]
+    pub external_winws: bool,
     /// Версия установленного движка Flowseal (из тега релиза при обновлении
     /// или версия вшитого движка при первом запуске).
     #[serde(default)]
@@ -196,6 +200,7 @@ impl AppState {
                 service_running: None,
                 service_strategy: None,
                 boot_pending: false,
+                external_winws: false,
                 engine_version: None,
             });
         st.data = data;

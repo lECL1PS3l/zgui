@@ -455,7 +455,7 @@ let adminOfferPending = false;
 /// каталог обновлений (иначе рестарт от админа убил бы проверку на середине).
 /// Возвращает true, если предложение показано — проверку конфликтов откладываем.
 async function maybeOfferAdmin() {
-  if (!B || !B.settings || B.settings.adminOnboarded) return false;
+  if (!B || !B.settings || B.settings.admin_onboarded) return false;
   // Уже работаем от администратора — переспрашивать не нужно.
   if (B.elevated) {
     await invoke("mark_admin_onboarded").catch(() => {});
@@ -544,17 +544,45 @@ function renderWarnings() {
 }
 
 function renderRunBar() {
+  const owner = (B && B.owner) || "none";
   const rt = (B || {}).runtime || null;
   const st = $("#runState");
-  const profileName = rt ? (B.profiles.find((p) => p.id === rt.profileId) || {}).name : "";
-  if (rt && rt.alive) {
+  const nameOf = (id) => (B.profiles.find((p) => p.id === id) || {}).name || id || "";
+  const svcStrategy = (B.service && B.service.strategy) || null;
+  if (owner === "test") {
+    // Идёт прогон тестов: winws управляется тестом — останавливать его тулбаром нельзя.
     st.className = "run-state running";
-    st.textContent = profileName || rt.profileId;
+    st.textContent = "идёт тест стратегий";
+  } else if (owner === "app") {
+    st.className = "run-state running";
+    st.textContent = rt ? nameOf(rt.profileId) : "запущено";
+  } else if (owner === "service") {
+    st.className = "run-state running";
+    st.textContent = "служба: " + (svcStrategy ? nameOf(svcStrategy) : "запущена");
+  } else if (owner === "external") {
+    // winws нашего движка поднят вне программы (ручной .bat): показываем и
+    // разрешаем остановить, иначе второй winws конфликтует с запущенным.
+    st.className = "run-state running";
+    st.textContent = "winws запущен вне программы";
   } else {
     st.className = "run-state idle";
     st.textContent = "не запущено";
   }
-  $("#btnStop").disabled = !(rt && rt.alive);
+  $("#btnStop").disabled = !["app", "service", "external"].includes(owner);
+}
+
+/// Индикатор watchdog в шапке: «стратегия активна / не отвечает». Активен только
+/// когда запущена стратегия (watchdog проверяет YouTube/Discord раз в минуту).
+function renderWatchdog(s) {
+  const el = $("#wdState");
+  if (!el) return;
+  if (!s || !s.active) {
+    el.textContent = "";
+    el.className = "muted";
+    return;
+  }
+  el.textContent = s.alarm ? "стратегия не отвечает" : "стратегия активна";
+  el.className = s.alarm ? "muted err" : "muted ok";
 }
 
 function renderEngines() {
@@ -581,8 +609,12 @@ function renderEngines() {
       acts.appendChild(btn("Сменить…", "ghost", async () => {
         const dir = await open({ directory: true });
         if (dir) {
-          await invoke("set_root", { engine: eng, path: dir });
-          await refreshAll();
+          try {
+            await invoke("set_root", { engine: eng, path: dir });
+            await refreshAll();
+          } catch (e) {
+            toast("err", String(e));
+          }
         }
       }));
       acts.appendChild(btn("Обновить движок", "ghost", () => doFetch(eng)));
@@ -597,8 +629,12 @@ function renderEngines() {
       acts.appendChild(btn("Выбрать папку…", "ghost", async () => {
         const dir = await open({ directory: true });
         if (dir) {
-          await invoke("set_root", { engine: eng, path: dir });
-          await refreshAll();
+          try {
+            await invoke("set_root", { engine: eng, path: dir });
+            await refreshAll();
+          } catch (e) {
+            toast("err", String(e));
+          }
         }
       }));
       rootEl.appendChild(acts);
@@ -636,7 +672,19 @@ let saveSettingsTimer = 0;
 
 function renderProfiles() {
   const list = $("#profileList");
-  const sig = JSON.stringify([profileFilter, B.profiles, B.runtime, B.busy, testCache && testCache.bestId]);
+  // Сигнатура — всё, от чего зависят плитки: профили, runtime, busy, настройки
+  // (автозапуск), служба и результаты теста (счёт/«лучшая»). Раньше часть полей
+  // не входила в sig, и чипы «автозапуск»/«служба»/счёт не обновлялись.
+  const sig = JSON.stringify([
+    profileFilter,
+    B.profiles,
+    B.runtime,
+    B.busy,
+    B.settings,
+    B.service,
+    testCache && testCache.bestId,
+    testCache && testCache.testedAt,
+  ]);
   if (sig === sigProfiles) return;
   sigProfiles = sig;
   list.innerHTML = "";
@@ -650,7 +698,9 @@ function renderProfiles() {
   for (const p of profs) {
     const tile = document.createElement("div");
     tile.className = "profile";
-    const isRun = B.runtime && B.runtime.alive && B.runtime.profileId === p.id;
+    const isRun =
+      (B.runtime && B.runtime.alive && B.runtime.profileId === p.id) ||
+      (B.service && B.service.running === true && B.service.strategy === p.id);
     if (isRun) tile.classList.add("running");
     if (bestId === p.id) tile.classList.add("best");
 
@@ -761,7 +811,8 @@ function closeProfileModal() {
 // ------------------------------------------------------------- test
 
 function flowsealProfiles() {
-  return (B.profiles || []).filter((p) => p.engine === "flowseal");
+  // B может быть null в момент перезагрузки (zgui:updates) — не роняем рендер.
+  return ((B && B.profiles) || []).filter((p) => p.engine === "flowseal");
 }
 
 function renderTestCard() {
@@ -862,13 +913,16 @@ function renderTestResults() {
     t.className = "test-best-title";
     t.textContent = `Лучшая стратегия: ${testState.bestName}`;
     bestBox.appendChild(t);
-    const b = btn("Сделать автостартом", "primary small", async () => {
+    const b = btn("Применить: автозапуск + запустить сейчас", "primary small", async () => {
+      btnBusy(b, true);
       try {
-        await invoke("set_best_strategy", { id: testState.bestId });
-        toast("ok", "автостарт настроен на лучшую стратегию");
+        await invoke("apply_best_strategy", { id: testState.bestId });
+        toast("ok", "готово: автозапуск включён, стратегия запущена");
       } catch (e) {
         toast("err", String(e));
       }
+      btnBusy(b, false);
+      await refreshAll();
     });
     bestBox.appendChild(b);
   } else {
@@ -1274,16 +1328,16 @@ function renderAutostart() {
     }
     sel.value = prev;
   }
-  sel.disabled = svcInstalled;
-  sel.title = svcInstalled ? "Обход уже включается службой — сначала выключите её" : "";
+  // Профиль автозапуска можно менять и в режиме службы: служба переключится
+  // (см. обработчик ниже). Блокировать выбор незачем.
+  sel.disabled = false;
+  sel.title = "";
 
   const chosen = sel.value;
   if (box) {
     box.checked = svcInstalled;
-    // Доступно, как только выбран профиль: при включении сами снимем
-    // автозапуск через программу (механизмы несовместимы).
     box.disabled = !svcInstalled && !chosen;
-    box.title = !chosen ? "Сначала выберите профиль" : "";
+    box.title = !svcInstalled && !chosen ? "Сначала выберите профиль" : "";
   }
 
   const chip = $("#bootStateChip");
@@ -1297,14 +1351,14 @@ function renderAutostart() {
     const profile = (B.profiles || []).find((p) => p.id === s.autostart_profile);
     if (svcInstalled) {
       note.textContent =
-        "Сейчас обход включается сам службой — работает без программы." +
+        "Обход включается сам службой — программа для запуска не нужна." +
         (profile ? ` Профиль «${profile.name}».` : "");
     } else if (bootOn && profile) {
       note.textContent = `Автозапуск включён: при входе в Windows обход запустится сам — «${profile.name}».`;
     } else if (bootOn && !profile) {
-      note.textContent = "Выберите профиль — иначе автозапуск не сработает.";
+      note.textContent = "Автозапуск включён, но профиль не выбран — выберите профиль.";
     } else if (profile) {
-      note.textContent = "Автозапуск не включился — попробуйте ещё раз.";
+      note.textContent = `При входе будет запускаться «${profile.name}». Если не сработало — запустите программу от администратора.`;
     } else {
       note.textContent = "Автозапуск выключен.";
     }
@@ -1706,7 +1760,11 @@ function bindStatic() {
   $("#btnCheck").addEventListener("click", doCheck);
   $("#btnApplyAll").addEventListener("click", () => doApply([]));
   $("#btnApplySel").addEventListener("click", () => {
-    const ids = $$("#updList input[type=checkbox]:checked").map((c) => c.dataset.id);
+    // Отключённые строки (уже «ок»/«skip-user») не отправляем: иначе повторное
+    // «Применить выбранное» заново качает и перезаписывает уже применённое.
+    const ids = $$("#updList input[type=checkbox]:checked")
+      .filter((c) => !c.disabled)
+      .map((c) => c.dataset.id);
     if (!ids.length) {
       toast("warn", "Ничего не выбрано");
       return;
@@ -1733,19 +1791,28 @@ function bindStatic() {
   $("#cfAutostart").addEventListener("change", async () => {
     const val = $("#cfAutostart").value;
     const svcInstalled = !!(B.service && B.service.installed);
-    const wasBoot = !!(B.settings && B.settings.boot_app);
     const sel = $("#cfAutostart");
     sel.disabled = true;
     try {
-      await invoke("set_settings", { settings: collectSettings() });
-      if (!svcInstalled) {
-        if (val && !wasBoot) {
-          await invoke("set_boot_app", { enabled: true });
-          toast("ok", "готово: обход будет включаться сам при входе в Windows");
-        } else if (!val && wasBoot) {
-          await invoke("set_boot_app", { enabled: false });
+      if (svcInstalled) {
+        // Служба — механизм обхода: смена профиля переключает саму службу.
+        if (val) {
+          await invoke("install_service", { id: val });
+          toast("ok", "служба переключена на выбранную стратегию");
+        } else {
+          // Сначала сбрасываем автозапуск, иначе remove_service сохранит профиль
+          // и переведёт обход на программный автозапуск — «выключено» не сработает.
+          const s = collectSettings();
+          s.autostart_mode = "none";
+          s.autostart_profile = null;
+          await invoke("set_settings", { settings: s });
+          await invoke("remove_service");
           toast("ok", "автозапуск выключен");
         }
+      } else {
+        // Профиль сохранён — задачу планировщика согласует бэкенд (sync_autostart).
+        await invoke("set_settings", { settings: collectSettings() });
+        toast("ok", val ? "готово: обход будет включаться сам при входе в Windows" : "автозапуск выключен");
       }
     } catch (e) {
       toast("err", String(e));
@@ -1763,14 +1830,7 @@ function bindStatic() {
     try {
       if (want) {
         if (!id) throw "сначала выберите профиль";
-        if (B.settings && B.settings.boot_app) {
-          // Снимаем автозапуск через программу и очищаем выбор профиля.
-          const s = collectSettings();
-          s.autostart_mode = "none";
-          s.autostart_profile = null;
-          await invoke("set_settings", { settings: s });
-          await invoke("set_boot_app", { enabled: false });
-        }
+        // Программный автозапуск снимется сам (бэкенд согласует механизмы).
         toast("info", "Ставлю службу — Windows запросит права администратора для её создания");
         await invoke("install_service", { id });
         toast("ok", "готово: обход будет включаться службой — программа не нужна");
@@ -1975,7 +2035,12 @@ async function showAdapters() {
 async function wireEvents() {
   await listen("zgui:toast", (ev) => toast((ev.payload || {}).kind || "info", (ev.payload || {}).text || ""));
   await listen("zgui:log", (ev) => logPush(ev.payload));
-  await listen("zgui:status", async () => refreshAll());
+  await listen("zgui:status", async () => {
+    // Стратегию остановили/запустили — гасим старый индикатор watchdog сразу,
+    // не ждём следующей минуты (иначе «активна» висит после выключения).
+    renderWatchdog(null);
+    refreshAll();
+  });
   await listen("zgui:updates", async () => {
     clearUpdatesBusy();
     B = null;
@@ -1989,13 +2054,19 @@ async function wireEvents() {
     testState = ev.payload;
     renderTestProgress();
     renderTestResults();
+    // Пока идёт тест — тулбар показывает «идёт тест», «Остановить» заблокирована.
+    renderRunBar();
     if (testState && testState.done) {
       btnBusy($("#btnRunTest"), false);
       btnBusy($("#btnRunGeoblock"), false);
+      // Перечитываем tests.json: иначе счёт/«лучшая» на плитках остаются от
+      // прошлого прогона до перезапуска программы.
+      loadTestCache();
       renderTestCard();
       refreshAll();
     }
   });
+  await listen("zgui:watchdog", (ev) => renderWatchdog(ev.payload));
 }
 
 initTheme();

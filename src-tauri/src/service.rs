@@ -259,6 +259,43 @@ fn is_own_engine(path: &Path, data_dir: &Path) -> bool {
     p.starts_with(&prefix)
 }
 
+/// PID-ы winws/winws2, запущенных из наших данных (движок GUI или нашей службы).
+/// Нужны, чтобы находить обход, поднятый ВНЕ программы (ручной запуск .bat,
+/// старая служба): GUI его не видит и может запустить второй winws — два
+/// фильтра WinDivert дерутся, и обход перестаёт работать.
+pub fn own_engine_pids(data_dir: &Path, exclude: Option<u32>) -> Vec<u32> {
+    let mut pids: Vec<u32> = process_image_paths(&["winws.exe", "winws2.exe"])
+        .into_iter()
+        .filter(|(pid, p)| Some(*pid) != exclude && is_own_engine(p, data_dir))
+        .map(|(pid, _)| pid)
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// Дешёвая проверка: запущен ли хоть один winws/winws2 (без WMI).
+pub fn any_winws_running() -> bool {
+    !list_processes(|n| {
+        n.eq_ignore_ascii_case("winws.exe") || n.eq_ignore_ascii_case("winws2.exe")
+    })
+    .is_empty()
+}
+
+/// Запускает установленную службу zapret (нужна после теста, который её глушил).
+pub fn start_service(data_dir: &Path) -> Result<(), String> {
+    let script = data_dir.join("logs").join(format!("svc_start_{}.ps1", std::process::id()));
+    let body = format!(
+        "{}\nnet start {} 2>$null | Out-Null\nexit 0",
+        crate::runner::PS_HEADER,
+        SERVICE_NAME
+    );
+    crate::runner::write_ps1(&script, &body)?;
+    let r = run_elevated_script(&script);
+    let _ = fs::remove_file(&script);
+    r.map(|_| ())
+}
+
 /// Гасит чужие процессы и VPN (taskkill от админа). Свои pid-ы не трогает.
 pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &Path) -> Result<(), String> {
     let mut pids: Vec<u32> = report

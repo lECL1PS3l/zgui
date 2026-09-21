@@ -53,11 +53,21 @@ pub fn collect_entries(data: &Path, roots: &Roots, _settings: &Settings) -> Resu
             "list-google.txt",
             "list-exclude.txt",
             "ipset-exclude.txt",
-            "ipset-all.txt",
         ] {
             let dest = root.join("lists").join(f);
             push("flowseal lists", f, raw("Flowseal/zapret-discord-youtube", "main", &format!("lists/{}", f)), dest, false);
         }
+        // ipset-all.txt: в GitHub лежит заглушка «none» (203.0.113.113/32), реальный
+        // список — в .service/ipset-service.txt (так его же качает и service.bat).
+        // Раньше GUI перетирал живой ipset заглушкой: все `--ipset=` правила не
+        // совпадали ни с чем (QUIC/UDP YouTube и IP-правила переставали работать).
+        push(
+            "flowseal lists",
+            "ipset-all.txt",
+            raw("Flowseal/zapret-discord-youtube", "main", ".service/ipset-service.txt"),
+            root.join("lists").join("ipset-all.txt"),
+            false,
+        );
     }
 
     // flowseal: служебные данные для движка. Системный hosts GUI не применяет.
@@ -332,6 +342,36 @@ pub fn apply_updates(data: &Path, roots: &Roots, settings: &Settings, ids: Vec<S
     Ok(out)
 }
 
+/// Заглушка Flowseal для режима ipset «none» (по ней service.bat определяет режим).
+pub const IPSET_PLACEHOLDER: &str = "203.0.113.113/32\n";
+
+/// Приводит `lists/ipset-all.txt` движка к выбранному режиму ipset:
+/// - «loaded» — реальный список из `catalog/.service/ipset-service.txt`
+///   (фолбэк: `lists/ipset-all.txt.backup` из архива движка);
+/// - «none» — заглушка (ipset-правила отключены);
+/// - «any» — пустой файл (правила по любому IP).
+///
+/// Без этого GUI оставлял заглушку из GitHub и `--ipset=ipset-all.txt`
+/// не совпадал ни с одним адресом.
+pub fn sync_ipset(root: &Path, data: &Path, settings: &Settings) {
+    let dest = root.join("lists").join("ipset-all.txt");
+    let body: Option<Vec<u8>> = match settings.ipset_mode.as_str() {
+        "any" => Some(Vec::new()),
+        "none" => Some(IPSET_PLACEHOLDER.as_bytes().to_vec()),
+        _ => {
+            let service = data.join("catalog/flowseal/.service/ipset-service.txt");
+            let backup = root.join("lists/ipset-all.txt.backup");
+            fs::read(&service).ok().or_else(|| fs::read(&backup).ok())
+        }
+    };
+    // В «loaded» источника может не быть (нет ни catalog, ни backup) — файл не трогаем.
+    let Some(bytes) = body else { return };
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = crate::config::atomic_write(&dest, &bytes);
+}
+
 /// Реестр применённых хэшей (что конкретно мы записали).
 #[derive(Clone, Default)]
 pub struct UpdArchive {
@@ -498,5 +538,40 @@ mod tg_tests {
         assert!(!version_is_newer("2.3.4", "2.3.4-zui.2"));
         assert!(version_is_newer("2.3.4-zui.3", "2.3.4-zui.2"));
         assert!(!version_is_newer("2.3.4-zui.2", "2.3.4-zui.2"));
+    }
+
+    #[test]
+    fn sync_ipset_materializes_loaded_list() {
+        let base = std::env::temp_dir().join(format!("zgui-ipset-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let data = base.join("data");
+        let root = base.join("engine");
+        fs::create_dir_all(data.join("catalog/flowseal/.service")).unwrap();
+        fs::create_dir_all(root.join("lists")).unwrap();
+        let real = vec![b'1'; 4096];
+        fs::write(data.join("catalog/flowseal/.service/ipset-service.txt"), &real).unwrap();
+        fs::write(root.join("lists/ipset-all.txt"), IPSET_PLACEHOLDER).unwrap();
+
+        let mut settings = Settings { ipset_mode: "loaded".into(), ..Default::default() };
+        sync_ipset(&root, &data, &settings);
+        assert_eq!(fs::read(root.join("lists/ipset-all.txt")).unwrap(), real, "loaded: должен быть реальный список");
+
+        // loaded без источника — файл не трогаем.
+        fs::remove_file(data.join("catalog/flowseal/.service/ipset-service.txt")).unwrap();
+        sync_ipset(&root, &data, &settings);
+        assert_eq!(fs::read(root.join("lists/ipset-all.txt")).unwrap(), real);
+
+        settings.ipset_mode = "none".into();
+        sync_ipset(&root, &data, &settings);
+        assert_eq!(
+            String::from_utf8(fs::read(root.join("lists/ipset-all.txt")).unwrap()).unwrap(),
+            IPSET_PLACEHOLDER
+        );
+
+        settings.ipset_mode = "any".into();
+        sync_ipset(&root, &data, &settings);
+        assert!(fs::read(root.join("lists/ipset-all.txt")).unwrap().is_empty(), "any: пустой файл");
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
