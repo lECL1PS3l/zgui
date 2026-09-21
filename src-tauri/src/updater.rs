@@ -1,6 +1,7 @@
 use crate::config::{Roots, Settings, UpdEntry};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -244,15 +245,29 @@ fn check_entry(cli: &reqwest::blocking::Client, e: &CatEntry, settings: &Setting
     u
 }
 
-/// Проверяет все конфиги из каталога.
+/// Проверяет все конфиги из каталога. Записи проверяются параллельно
+/// (45+ сетевых запросов), порядок в результате сохраняется исходный.
 pub fn check_all(data: &Path, roots: &Roots, settings: &Settings) -> Result<Vec<UpdEntry>, String> {
-    let cli = client()?;
-    let archive = UpdArchive::load(data);
+    let cli = Arc::new(client()?);
+    let archive = Arc::new(UpdArchive::load(data));
     let entries = collect_entries(data, roots, settings)?;
-    Ok(entries
-        .into_iter()
-        .map(|e| check_entry(&cli, &e, settings, &archive))
-        .collect())
+    let settings = Arc::new(settings.clone());
+    let mut out: Vec<(usize, UpdEntry)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let (cli, settings, archive) = (cli.clone(), settings.clone(), archive.clone());
+                scope.spawn(move || (i, check_entry(&cli, &e, &settings, &archive)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or((0, UpdEntry::default())))
+            .collect()
+    });
+    out.sort_by_key(|(i, _)| *i);
+    Ok(out.into_iter().map(|(_, u)| u).collect())
 }
 
 /// Применяет выбранные обновления (ид-ы или все доступные).

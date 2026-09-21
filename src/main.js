@@ -370,7 +370,7 @@ let conflictKilling = false;
 // ---- своё окно подтверждения (системный confirm() в WebView не показывается) ----
 let cmResolve = null;
 
-function showConfirm({ title, html, okLabel = "Продолжить", cancelLabel = "Отмена", danger = false }) {
+function showConfirm({ title, html, okLabel = "Продолжить", cancelLabel = "Отмена", danger = false, delaySec = 0 }) {
   return new Promise((resolve) => {
     cmResolve = resolve;
     $("#cmTitle").textContent = title;
@@ -380,6 +380,7 @@ function showConfirm({ title, html, okLabel = "Продолжить", cancelLabe
     ok.className = "btn " + (danger ? "danger" : "primary");
     $("#cmCancel").textContent = cancelLabel;
     $("#confirmModal").classList.remove("hidden");
+    if (delaySec > 0) lockBtnWithCountdown(ok, delaySec);
   });
 }
 
@@ -450,6 +451,8 @@ let adminOfferPending = false;
 
 /// При первом входе предлагаем включить «Всегда запускать от администратора» и
 /// перезапуститься: иначе каждое действие запрашивает права отдельно (5+ окон).
+/// Модалку показываем не сразу — ждём, пока стартовый авто-прогон заполнит
+/// каталог обновлений (иначе рестарт от админа убил бы проверку на середине).
 /// Возвращает true, если предложение показано — проверку конфликтов откладываем.
 async function maybeOfferAdmin() {
   if (!B || !B.settings || B.settings.adminOnboarded) return false;
@@ -457,6 +460,12 @@ async function maybeOfferAdmin() {
   if (B.elevated) {
     await invoke("mark_admin_onboarded").catch(() => {});
     return false;
+  }
+  const t0 = Date.now();
+  while (Date.now() - t0 < 12000) {
+    const entries = (B && B.updates && B.updates.entries) || [];
+    if (entries.length) break;
+    await new Promise((r) => setTimeout(r, 400));
   }
   adminOfferPending = true;
   $("#adminModal").classList.remove("hidden");
@@ -468,12 +477,36 @@ function hideAdminOffer() {
   $("#adminModal").classList.add("hidden");
 }
 
+/// Блокирует кнопку на `secs` секунд и показывает рядом маленький таймер.
+/// Нужно, чтобы фоновый авто-прогон конфигов успел начаться до перезапуска.
+function lockBtnWithCountdown(btn, secs) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const timer = document.createElement("span");
+  timer.className = "countdown-timer";
+  const update = () => {
+    timer.textContent = `…${secs}с`;
+    if (secs <= 0) {
+      clearInterval(iv);
+      timer.remove();
+      btn.disabled = false;
+    }
+  };
+  const iv = setInterval(() => {
+    secs--;
+    update();
+  }, 1000);
+  btn.after(timer);
+  update();
+}
+
 /// Перезапуск от администратора — общий диалог для первого запуска, чекбокса
 /// в «Настройках» и кнопки «Перезапустить от админа».
 async function askRestartAdmin() {
   const ok = await showConfirm({
     title: "Перезапуск от администратора",
     okLabel: "Перезапустить",
+    delaySec: 3,
     html: `<p>Программа будет перезапущена с правами администратора.</p>
            <p class="sub">Текущее окно закроется, откроется новое. Один раз подтвердите запрос Windows.</p>`,
   });
@@ -1079,7 +1112,10 @@ function renderUpdates(mode) {
   upd.innerHTML = "";
 
   if (!entries.length) {
-    upd.innerHTML = '<div class="empty">Каталог пуст. Сначала установите движки, затем «Проверить обновления».</div>';
+    const emptyText = (B.updates || {}).lastCheck
+      ? "Каталог пуст. Сначала установите движки, затем «Проверить обновления»."
+      : "Каталог загружается автоматически при старте…";
+    upd.innerHTML = `<div class="empty">${emptyText}</div>`;
     return;
   }
   for (const [group, items] of Object.entries(groups)) {
@@ -1767,6 +1803,7 @@ function bindStatic() {
   $("#btnElevateNow").addEventListener("click", askRestartAdmin);
 
   // Первый запуск: предложение «Всегда запускать от администратора».
+  lockBtnWithCountdown($("#adminEnable"), 3);
   $("#adminEnable").addEventListener("click", async () => {
     const btn = $("#adminEnable");
     btnBusy(btn, true);

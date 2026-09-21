@@ -626,6 +626,7 @@ select option:hover {
 .warn-list li { font-size: 12px; color: var(--text); }
 
 .settings-admin { margin: 4px 0 12px; }
+.countdown-timer { margin-left: 8px; font-size: 12px; color: var(--muted); }
 .dns-info { min-height: 20px; margin: 2px 0 12px; font-size: 12px; }.dns-desc {
   font-size: 12px;
   line-height: 1.5;

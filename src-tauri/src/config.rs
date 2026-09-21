@@ -130,6 +130,10 @@ pub struct UpdaterCache {
     pub last_check: Option<String>,
     pub entries: Vec<UpdEntry>,
     pub last_auto: Option<String>,
+    /// Кулдаун следующей автопроверки (epoch-сек): ставится перед запуском
+    /// фоновой проверки, чтобы неудачная попытка повторялась не каждые 2 с.
+    #[serde(default)]
+    pub next_auto: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]

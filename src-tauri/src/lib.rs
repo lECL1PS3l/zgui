@@ -1630,6 +1630,7 @@ async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, St
                     last_check: Some(crate::profiles::now_str()),
                     entries,
                     last_auto: s.updater.last_auto.clone(),
+                    next_auto: s.updater.next_auto,
                 };
                 s.save();
                 emit(&app2, "zgui:updates", updater_view(&s));
@@ -2157,6 +2158,7 @@ async fn dns_benchmark(ids: Option<Vec<String>>) -> Vec<dns::DnsPing> {
 fn spawn_watchers(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_svc: u64 = 0;
+        let mut startup_check = true;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let g = app.state::<Global>();
@@ -2196,30 +2198,62 @@ fn spawn_watchers(app: AppHandle) {
             }
 
             // авто-проверка конфигов
-            let (interval, last_auto, roots, settings, data) = {
+            let (interval, last_auto, entries_empty, next_auto, roots, settings, data) = {
                 let s = st(&g);
-                (s.settings.update_interval_hours, s.updater.last_auto.clone(), s.roots.clone(), s.settings.clone(), s.data.clone())
+                (
+                    s.settings.update_interval_hours,
+                    s.updater.last_auto.clone(),
+                    s.updater.entries.is_empty(),
+                    s.updater.next_auto,
+                    s.roots.clone(),
+                    s.settings.clone(),
+                    s.data.clone(),
+                )
             };
             if interval > 0 && !g.is_busy() {
-                let due = match &last_auto {
-                    Some(t) => t.parse::<u64>().unwrap_or(0) + interval as u64 * 3600 <= now_ts(),
+                let now = now_ts();
+                let cooled = next_auto.map_or(true, |t| t <= now);
+                let planned_due = match &last_auto {
+                    Some(t) => t.parse::<u64>().unwrap_or(0) + interval as u64 * 3600 <= now,
                     None => true,
                 };
+                // Пустой каталог: игнорируем расписание (interval) и ждём только короткий
+                // кулдаун повторной попытки, чтобы каталог заполнился сам при старте.
+                let due = if startup_check {
+                    // Первый тик после старта — один автоматический прогон (как кнопка).
+                    true
+                } else if entries_empty {
+                    // Пустой каталог: игнорируем расписание и ждём короткий кулдаун
+                    // повторной попытки, чтобы каталог заполнился сам.
+                    cooled
+                } else {
+                    cooled && planned_due
+                };
                 if due {
+                    startup_check = false;
                     g.set_busy(true);
                     let app2 = app.clone();
                     let mut s2 = st(&g);
-                    s2.updater.last_auto = Some(crate::profiles::now_str());
+                    let retry_secs = if entries_empty { 60 } else { 15 * 60 };
+                    s2.updater.next_auto = Some(now + retry_secs);
                     s2.save();
                     drop(s2);
                     std::thread::spawn(move || {
                         let r = up::check_all(&data, &roots, &settings);
-                        if let Ok(entries) = r {
-                            let ga3 = app2.state::<Global>();
-                            let mut s3 = ga3.state.lock().unwrap();
-                            s3.updater.entries = entries;
-                            let _ = app2.emit("zgui:updates", updater_view(&s3));
-                            let _ = app2.emit("zgui:toast", serde_json::json!({"kind":"info","text":"автопроверка обновлений конфигов завершена"}));
+                        let ga3 = app2.state::<Global>();
+                        let mut s3 = ga3.state.lock().unwrap();
+                        match r {
+                            Ok(entries) => {
+                                s3.updater.entries = entries;
+                                s3.updater.last_check = Some(crate::profiles::now_str());
+                                s3.updater.last_auto = Some(crate::profiles::now_str());
+                                s3.save();
+                                let _ = app2.emit("zgui:updates", updater_view(&s3));
+                                let _ = app2.emit("zgui:toast", serde_json::json!({"kind":"info","text":"автопроверка обновлений конфигов завершена"}));
+                            }
+                            Err(e) => {
+                                logger::log("warn", "updates", &format!("автопроверка не удалась: {e}"));
+                            }
                         }
                         app2.state::<Global>().set_busy(false);
                     });
