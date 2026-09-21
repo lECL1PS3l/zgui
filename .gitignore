@@ -1,0 +1,31 @@
+# Node / Vite
+/node_modules/
+/dist/
+/.vite/
+
+# Rust / Tauri
+/src-tauri/gen/
+**/target/
+
+# Сборки, пакеты и релизы
+/release/
+/github pre release/
+
+# Внутренние журналы (не публикуются)
+/progress.md
+/docs/design.md
+/docs/feedback.md
+/docs/TODO.md
+/docs/feature-spec-forks.md
+
+# Данные приложения
+/data/
+**/data/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Прочее
+*.log
+.DS_Store

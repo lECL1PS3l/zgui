@@ -1,0 +1,2552 @@
+use crate::config::{
+    AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL, SERVICE_NAME,
+};
+use crate::profiles as pf;
+use crate::runner as rn;
+use crate::service as svc;
+use crate::updater as up;
+use serde::Serialize;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+pub mod config;
+mod dns;
+mod embedded;
+mod human;
+mod logger;
+mod netreset;
+mod profiles;
+mod runner;
+mod service;
+mod telegram;
+mod tester;
+mod updater;
+mod watchdog;
+
+pub struct Global {
+    pub state: Mutex<AppState>,
+    pub busy: AtomicBool,
+    pub testing: Mutex<tester::TestProgress>,
+    pub telegram: telegram::TgState,
+    pub watchdog: std::sync::Arc<watchdog::WatchdogState>,
+}
+
+impl Global {
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+    pub fn set_busy(&self, b: bool) {
+        self.busy.store(b, Ordering::SeqCst);
+    }
+}
+
+fn st(g: &Global) -> MutexGuard<'_, AppState> {
+    g.state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn now_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
+    let _ = app.emit(event, payload);
+}
+
+fn log_updates(data: &std::path::Path, msg: &str) {
+    use std::io::Write;
+    let p = data.join("logs").join("updates.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = writeln!(f, "[{}] {}", crate::profiles::now_str(), msg);
+    }
+}
+
+// ---------------------------------------------------------------- DTO
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RootInfo {
+    path: Option<String>,
+    exe: Option<String>,
+    ready: bool,
+}
+
+fn root_info(roots: &Roots, engine: &str, exe_name: &str) -> RootInfo {
+    match roots.path(engine) {
+        Some(p) => {
+            let root = PathBuf::from(&p);
+            let exe = crate::config::find_exe(&root, exe_name);
+            let ready = exe.is_some();
+            RootInfo {
+                path: Some(p.to_string_lossy().into_owned()),
+                exe,
+                ready,
+            }
+        }
+        None => RootInfo { path: None, exe: None, ready: false },
+    }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ServiceInfo {
+    installed: bool,
+    running: Option<bool>,
+    strategy: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UpdaterView {
+    last_check: Option<String>,
+    entries: Vec<crate::config::UpdEntry>,
+}
+
+/// Формирует предупреждения (не блокирующие) для UI.
+fn collect_warnings(s: &AppState) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    out.push("Не рекомендуется запускать Zapret вместе с VPN".into());
+
+    for engine in [ENGINE_FLOWSEAL] {
+        let Some(root) = s.roots.path(engine) else { continue };
+        let original_bats = std::fs::read_dir(&root)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+                    n.ends_with(".bat") && !n.starts_with("service")
+                })
+            })
+            .unwrap_or(false);
+        if original_bats {
+            out.push(format!(
+                "В корне {} найдены оригинальные .bat/.lua автора — отключите их автозапуск (службу/планировщик), иначе они будут конфликтовать с нашей программой.",
+                engine
+            ));
+        }
+    }
+    out
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Bootstrap {
+    flowseal: RootInfo,
+    settings: Settings,
+    profiles: Vec<Profile>,
+    runtime: Option<Runtime>,
+    service: ServiceInfo,
+    updates: UpdaterView,
+    game_filter_ports: (String, String),
+    busy: bool,
+    elevated: bool,
+    data_dir: String,
+    warnings: Vec<String>,
+}
+
+fn updater_view(s: &AppState) -> UpdaterView {
+    UpdaterView {
+        last_check: s.updater.last_check.clone(),
+        entries: s.updater.entries.clone(),
+    }
+}
+
+// ---------------------------------------------------------------- корневой
+
+#[tauri::command(async)]
+fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
+    let g = ga.inner();
+    let s = st(g);
+    let fs = root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe");
+    let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
+    let runtime = s.runtime.clone().map(|mut r| {
+        r.alive = rn::pid_alive(r.pid);
+        r
+    });
+    Bootstrap {
+        flowseal: fs,
+        settings: s.settings.clone(),
+        profiles: s.profiles.clone(),
+        runtime,
+        service: ServiceInfo {
+            installed: s.service_running.is_some(),
+            running: s.service_running,
+            strategy: s.service_strategy.clone(),
+        },
+        updates: updater_view(&s),
+        game_filter_ports: (tcp, udp),
+        busy: g.is_busy(),
+        elevated: rn::is_elevated(),
+        data_dir: s.data.to_string_lossy().into_owned(),
+        warnings: collect_warnings(&s),
+    }
+}
+
+// ------------------------------------------------------------- orphan proxy
+
+/// Проверяет системный прокси: если он включён, указывает на локальный адрес
+/// (127.0.0.1/localhost), но на этом порту никто не слушает — значит, остался
+/// «осиротевшим» от выгруженного VPN/обходчика, и браузер шлёт трафик в никуда
+/// (`ERR_PROXY_CONNECTION_FAILED`). Тогда сбрасываем прокси автоматически.
+/// Корпоративные/внешние прокси НЕ трогаем.
+/// Возвращает описание сброшенного прокси, если что-то починили.
+/// Извлекает локальный (127.*/localhost) порт из значения `ProxyServer`.
+/// Возвращает `None` для внешних/корпоративных прокси — их нельзя трогать.
+fn local_proxy_port(server: &str) -> Option<u16> {
+    let addr = server
+        .split(';')
+        .find_map(|p| p.split('=').nth(1).or(Some(p)))
+        .unwrap_or(server)
+        .trim();
+    match addr.rsplit_once(':') {
+        Some((host, p)) if host.starts_with("127.") || host.eq_ignore_ascii_case("localhost") => {
+            p.trim().parse::<u16>().ok()
+        }
+        _ => None,
+    }
+}
+
+pub fn heal_orphan_proxy() -> Option<String> {
+    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+    let read = |name: &str| -> Option<String> {
+        let out = rn::hidden_command("reg")
+            .args(["query", key, "/v", name])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines()
+            .find(|l| l.contains(name))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .map(|v| v.to_string())
+    };
+    let enabled = read("ProxyEnable").map(|v| v.trim() == "0x1" || v.trim() == "1").unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let server = read("ProxyServer")?;
+    let server = server.trim();
+    // Берём только локальные прокси (127.0.0.1 / localhost), возможно с префиксом «http=».
+    let port = local_proxy_port(server)?;
+    // Кто-то реально слушает порт (живой VPN/прокси) — не вмешиваемся.
+    let listening = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(250),
+    )
+    .is_ok();
+    if listening {
+        return None;
+    }
+    // Порт мёртв — сбрасываем системный прокси на «прямое подключение».
+    let _ = rn::hidden_command("reg")
+        .args([
+            "add",
+            key,
+            "/v",
+            "ProxyEnable",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ])
+        .output();
+    let _ = rn::hidden_command("reg")
+        .args(["delete", key, "/v", "ProxyServer", "/f"])
+        .output();
+    Some(server.to_string())
+}
+
+// ---------------------------------------------------------------- roots
+
+fn seed_flowseal_configs(root: &std::path::Path, data: &std::path::Path) {
+    let lists = root.join("lists");
+    let _ = std::fs::create_dir_all(&lists);
+    embedded::copy_tree_missing(&data.join("catalog/flowseal/lists"), &lists);
+    let seeds: [(&str, &str); 3] = [
+        ("ipset-exclude-user.txt", "203.0.113.113/32\n"),
+        ("list-general-user.txt", "# Never leave this file empty\ndomain.example.abc\n"),
+        ("list-exclude-user.txt", "domain.example.abc\n"),
+    ];
+    for (f, content) in seeds {
+        let p = lists.join(f);
+        if !p.exists() {
+            let _ = std::fs::write(p, content);
+        }
+    }
+}
+
+#[tauri::command(async)]
+fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String) -> Result<RootInfo, String> {
+    let g = ga.inner();
+    let selected = PathBuf::from(&path);
+    if !selected.is_dir() {
+        return Err("указанная папка не существует".into());
+    }
+    if engine != ENGINE_FLOWSEAL {
+        return Err("поддерживается только движок Flowseal (winws)".into());
+    }
+    let exe_name = "winws.exe";
+    if crate::config::find_exe(&selected, exe_name).is_none() {
+        return Err(format!("в папке не найден {} — укажите корень распакованного движка", exe_name));
+    }
+    let root = embedded::engine_root_for_public(&selected).unwrap_or(selected);
+    let data = st(g).data.clone();
+    st(g).roots.set(&engine, Some(root.to_string_lossy().into_owned()));
+    embedded::neutralize_author_autoupdate(&root);
+    seed_flowseal_configs(&root, &data);
+    let mut s = st(g);
+    reload_bats_from_disk(&mut s);
+    s.save();
+    let info = root_info(&s.roots, &engine, exe_name);
+    logger::log("ok", "engine", &format!("корень {engine} задан: {}", root.display()));
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("{}: корень задан ({})", engine, root.display())}));
+    Ok(info)
+}
+
+struct EngineMeta {
+    repo: &'static str,
+    exe: &'static str,
+}
+
+fn engine_meta(engine: &str) -> Result<EngineMeta, String> {
+    match engine {
+        ENGINE_FLOWSEAL => Ok(EngineMeta { repo: "Flowseal/zapret-discord-youtube", exe: "winws.exe" }),
+        _ => Err("поддерживается только движок Flowseal (winws)".into()),
+    }
+}
+
+#[tauri::command]
+fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Option<String>) -> Result<String, String> {
+    let meta = engine_meta(&engine)?;
+    let g = ga.inner();
+    let dest = dest.unwrap_or_else(|| st(g).data.join("engines").join(&engine).to_string_lossy().into_owned());
+    let data_dir = st(g).data.clone();
+    let app2 = app.clone();
+    let engine2 = engine.clone();
+    std::thread::spawn(move || {
+        let tag = format!("fetch:{}", engine2);
+        emit(&app2, "zgui:prog", serde_json::json!({"id": tag, "phase": "meta", "msg": "получаю информацию о последнем релизе", "pct": 0}));
+        match fetch_engine_impl(&app2, &meta, &dest, &data_dir, &engine2) {
+            Ok((path, version)) => {
+                let ga2 = app2.state::<Global>();
+                let mut s = ga2.state.lock().unwrap();
+                s.roots.set(&engine2, Some(path.clone()));
+                s.engine_version = Some(version.trim_start_matches('v').to_string());
+                cleanup_stale_engine_dirs(std::path::Path::new(&path));
+                seed_flowseal_configs(std::path::Path::new(&path), &s.data);
+                reload_bats_from_disk(&mut s);
+                s.save();
+                logger::log("ok", "engine", &format!("движок {engine2} установлен: {path}"));
+                emit(&app2, "zgui:prog", serde_json::json!({"id": tag, "phase": "done", "msg": format!("{} установлен", engine2), "pct": 100}));
+                emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Движок {} установлен в {}", engine2, path)}));
+            }
+            Err(e) => {
+                let friendly = human::with_context(&format!("не удалось установить движок {engine2}"), &e);
+                logger::log("err", "engine", &format!("установка {engine2} не удалась: {e}"));
+                emit(&app2, "zgui:prog", serde_json::json!({"id": tag, "phase": "error", "msg": friendly.clone(), "pct": -1}));
+                emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": friendly}));
+            }
+        }
+    });
+    Ok(format!("загрузка {} началась", engine))
+}
+
+fn fetch_engine_impl(app: &AppHandle, meta: &EngineMeta, dest: &str, data: &std::path::Path, engine: &str) -> Result<(String, String), String> {
+    let cli = up::client()?;
+    let tag = format!("fetch:{}", engine);
+
+    let api_url = format!("https://api.github.com/repos/{}/releases/latest", meta.repo);
+    let resp = cli.get(&api_url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API: HTTP {}", resp.status()));
+    }
+    let rel: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    let tag_name = rel["tag_name"].as_str().unwrap_or("unknown").to_string();
+    let asset_url = rel["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"].as_str().map(|n| n.ends_with(".zip")).unwrap_or(false)))
+        .map(|x| x["browser_download_url"].as_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    if asset_url.is_empty() {
+        return Err("в релизе не найден zip-архив".into());
+    }
+
+    let tmp_zip = data.join("tmp").join(format!("{}-{}.zip", engine, tag_name));
+    let mut resp = cli.get(&asset_url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("скачивание: HTTP {}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+    let mut f = std::fs::File::create(&tmp_zip).map_err(|e| e.to_string())?;
+    let mut downloaded: u64 = 0;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        downloaded += n as u64;
+        if total > 0 {
+            let pct = ((downloaded as f64 / total as f64) * 100.0) as i32;
+            emit(app, "zgui:prog", serde_json::json!({"id": tag, "phase": "download", "msg": format!("скачиваю {} ({}%)", tag_name, pct), "pct": pct}));
+        }
+    }
+    drop(f);
+
+    let _ = std::fs::create_dir_all(dest);
+    emit(app, "zgui:prog", serde_json::json!({"id": tag, "phase": "unzip", "msg": "распаковываю…", "pct": 90}));
+    unzip(&tmp_zip, std::path::Path::new(dest)).map_err(|e| format!("распаковка: {}", e))?;
+    let _ = std::fs::remove_file(&tmp_zip);
+
+    let rootdir = PathBuf::from(dest);
+    let actual_root = embedded::engine_root_for_public(&rootdir)
+        .ok_or_else(|| format!("не найден {} в распакованном архиве", meta.exe))?;
+    embedded::neutralize_author_autoupdate(&actual_root);
+    Ok((actual_root.to_string_lossy().into_owned(), tag_name))
+}
+
+/// Удаляет оставшиеся вложенные каталоги релиза (например,
+/// `zapret-discord-youtube-1.10.2` внутри корня после обновления на 1.10.3).
+fn cleanup_stale_engine_dirs(root: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir && name.starts_with("zapret-discord-youtube-") {
+            let _ = std::fs::remove_dir_all(e.path());
+            logger::log("info", "engine", &format!("удалён устаревший каталог движка: {name}"));
+        }
+    }
+}
+
+fn unzip(zip_path: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    let mut top: Option<String> = None;
+    for i in 0..archive.len() {
+        let name = archive.by_index(i).map_err(|e| e.to_string())?.name().to_string();
+        let trimmed = name.trim_end_matches('/');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let first = trimmed.split('/').next().unwrap_or("").to_string();
+        top = Some(match top {
+            None => first,
+            Some(t) if t == first => t,
+            Some(_) => return Err("архив с неоднородной структурой".into()),
+        });
+    }
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        let is_dir = entry.is_dir();
+        let mut rel = name.clone();
+        if let Some(t) = &top {
+            if rel == *t || rel.starts_with(&format!("{}/", t)) {
+                rel = rel.trim_start_matches(t).trim_start_matches('/').to_string();
+            }
+        }
+        if rel.is_empty() {
+            continue;
+        }
+        if rel.split(['/', '\\']).any(|p| p == "..") {
+            continue;
+        }
+        let out = dest.join(&rel);
+        if !out.starts_with(dest) {
+            continue;
+        }
+        if is_dir {
+            let _ = std::fs::create_dir_all(&out);
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut f = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- профили
+
+/// Первый запуск без движка: распаковывает встроенный релиз Flowseal,
+/// чтобы GUI работал полностью автономно (движок уже внутри exe).
+fn provision_engines(s: &mut AppState) {
+    let engine = ENGINE_FLOWSEAL;
+    let data = s.data.clone();
+    // Нормализуем уже заданный корень (мог быть записан как engines/flowseal — каталог-обёртка).
+    if let Some(p) = s.roots.path(engine) {
+        let cur = PathBuf::from(&p);
+        if let Some(norm) = embedded::engine_root_for_public(&cur) {
+            embedded::neutralize_author_autoupdate(&norm);
+            if norm != cur {
+                s.roots.set(engine, Some(norm.to_string_lossy().into_owned()));
+            }
+            cleanup_stale_engine_dirs(&norm);
+            // Версию могли не сохранить в старых сборках — восстанавливаем.
+            if s.engine_version.is_none() {
+                s.engine_version = engine_version_from_root(&norm)
+                    .or_else(|| Some(embedded::ENGINE_VERSION.to_string()));
+            }
+            seed_flowseal_configs(&norm, &data);
+            reload_bats_from_disk(s);
+            return;
+        }
+    }
+    // Корня нет или он не содержит движок — распаковываем встроенный.
+    match embedded::ensure_embedded_engine(&data) {
+        Ok(Some(path)) => {
+            s.roots.set(engine, Some(path.to_string_lossy().into_owned()));
+            if s.engine_version.is_none() {
+                s.engine_version = Some(embedded::ENGINE_VERSION.to_string());
+            }
+            seed_flowseal_configs(&path, &data);
+            reload_bats_from_disk(s);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            log_updates(&data, &format!("embedded engine {}: {}", engine, e));
+        }
+    }
+}
+
+fn ensure_presets(s: &mut AppState) {
+    if !s
+        .profiles
+        .iter()
+        .any(|p| p.engine == ENGINE_FLOWSEAL && p.source.as_deref().is_some_and(|x| x.starts_with("preset:")))
+    {
+        let mut presets = pf::builtin_flowseal_presets();
+        s.profiles.append(&mut presets);
+    }
+}
+
+/// Миграция после удаления движка zapret2 (winws2): профили winws2 больше не
+/// поддерживаются — убираем их и сбрасываем автостарт, если он указывал на них.
+fn migrate_removed_engine(s: &mut AppState) {
+    let before = s.profiles.len();
+    s.profiles.retain(|p| p.engine == ENGINE_FLOWSEAL);
+    if s.profiles.len() != before {
+        logger::log(
+            "info",
+            "profiles",
+            &format!("удалено профилей вырезанного движка winws2: {}", before - s.profiles.len()),
+        );
+    }
+    if let Some(pid) = s.settings.autostart_profile.clone() {
+        if !s.profiles.iter().any(|p| p.id == pid) {
+            s.settings.autostart_mode = "none".into();
+            s.settings.autostart_profile = None;
+            logger::log("info", "profiles", "автостарт сброшен: профиль удалён");
+        }
+    }
+    // Чистим данные вырезанного движка: движки, конфиги и служебные каталоги.
+    for dir in [
+        s.data.join("engines/zapret2"),
+        s.data.join("catalog/zapret2"),
+        s.data.join("catalog/sources/zapret2"),
+    ] {
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+            logger::log("info", "profiles", &format!("удалён каталог вырезанного движка: {}", dir.display()));
+        }
+    }
+    // Старый кэш обновлений в state.json: группы zapret2 больше не существуют,
+    // но записи прошлой проверки продолжали показываться на экране «Обновления».
+    let stale = s.updater.entries.len();
+    s.updater.entries.retain(|e| !e.group.starts_with("zapret2"));
+    if s.updater.entries.len() != stale {
+        logger::log(
+            "info",
+            "updates",
+            &format!("удалено записей каталога вырезанного движка: {}", stale - s.updater.entries.len()),
+        );
+    }
+    let mut archive = up::UpdArchive::load(&s.data);
+    let purged = archive.purge_prefix("zapret2");
+    if purged > 0 {
+        archive.save(&s.data);
+        logger::log("info", "updates", &format!("очищено applied.json: {} записей", purged));
+    }
+}
+
+fn is_author_profile(p: &Profile) -> bool {
+    p.builtin
+        || p.source.as_deref().is_some_and(|source| {
+            source.starts_with("preset:") || source.to_ascii_lowercase().ends_with(".bat")
+        })
+}
+
+#[tauri::command(async)]
+fn refresh_catalog(app: AppHandle, ga: State<'_, Global>) -> Result<Vec<Profile>, String> {
+    let g = ga.inner();
+    let mut s = st(g);
+    let raw = s.raw_strategies_dir();
+    let root = s.roots.path(ENGINE_FLOWSEAL);
+    let existing = s.profiles.clone();
+    if let Some(r) = root {
+        let mut bats = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&raw) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.to_lowercase().ends_with(".bat") {
+                    if let Ok(bytes) = std::fs::read(e.path()) {
+                        bats.push((name, pf::decode_strategy_bytes(&bytes)));
+                    }
+                }
+            }
+        }
+        let imported = pf::import_bat_profiles(&r, &bats, &existing);
+        let imported_ids: std::collections::HashSet<String> = imported.iter().map(|p| p.id.clone()).collect();
+        // держим ручные (custom) профили, убираем потерянные импортированные
+        s.profiles.retain(|p| {
+            !(p.engine == ENGINE_FLOWSEAL && p.source.is_some() && !p.builtin && !imported_ids.contains(&p.id))
+        });
+        for p in imported {
+            if p.builtin {
+                continue;
+            }
+            if let Some(ex) = s.profiles.iter_mut().find(|x| x.id == p.id) {
+                if !ex.builtin {
+                    ex.args = p.args.clone();
+                    ex.updated_at = p.updated_at.clone();
+                }
+            } else {
+                s.profiles.push(p);
+            }
+        }
+    }
+    ensure_presets(&mut s);
+    s.save();
+    let out = s.profiles.clone();
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"каталог стратегий синхронизирован"}));
+    Ok(out)
+}
+
+#[tauri::command(async)]
+fn save_profile(ga: State<'_, Global>, id: Option<String>, name: String, engine: String, args: Vec<String>) -> Result<Vec<Profile>, String> {
+    let g = ga.inner();
+    let mut s = st(g);
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("укажите название стратегии".into());
+    }
+    if args.is_empty() {
+        return Err("список аргументов пуст — нечего сохранять".into());
+    }
+    // Дубли имён путают: в списке и в автозапуске две записи выглядят одинаково.
+    if s.profiles
+        .iter()
+        .any(|p| p.id != id.clone().unwrap_or_default() && p.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(format!("стратегия с названием «{name}» уже есть — выберите другое имя"));
+    }
+    match id {
+        None => s.profiles.push(Profile {
+            id: pf::make_id("custom"),
+            name,
+            engine,
+            args,
+            builtin: false,
+            source: None,
+            updated_at: Some(pf::now_str()),
+        }),
+        Some(pid) => {
+            if let Some(p) = s.profiles.iter_mut().find(|p| p.id == pid) {
+                p.name = name;
+                p.builtin = false;
+                p.args = args;
+                p.updated_at = Some(pf::now_str());
+            } else {
+                return Err("профиль не найден".into());
+            }
+        }
+    }
+    s.save();
+    Ok(s.profiles.clone())
+}
+
+#[tauri::command(async)]
+fn delete_profile(ga: State<'_, Global>, id: String) -> Result<Vec<Profile>, String> {
+    let g = ga.inner();
+    let mut s = st(g);
+    if let Some(p) = s.profiles.iter().find(|p| p.id == id) {
+        if is_author_profile(p) {
+            return Ok(s.profiles.clone());
+        }
+    }
+    s.profiles.retain(|p| p.id != id);
+    s.save();
+    Ok(s.profiles.clone())
+}
+
+// ---------------------------------------------------------------- запуск
+
+fn locate_exe(root: &std::path::Path, exe_name: &str) -> Result<PathBuf, String> {
+    crate::config::find_exe(root, exe_name)
+        .map(|rel| root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
+        .ok_or_else(|| format!("не найден {} в корне движка", exe_name))
+}
+
+fn stop_service(data: &std::path::Path) -> Result<(), String> {
+    let p = data.join("logs").join(format!("svc_stop_{}.ps1", std::process::id()));
+    std::fs::write(&p, format!("{}\nnet stop {} 2>$null | Out-Null\nexit 0", rn::PS_HEADER, SERVICE_NAME))
+        .map_err(|e| e.to_string())?;
+    let r = rn::run_elevated_script(&p);
+    let _ = std::fs::remove_file(&p);
+    r.map(|_| ())
+}
+
+fn do_stop(app: &AppHandle, g: &Global, silent: bool) -> Result<(), String> {
+    let (rt, data) = {
+        let s = st(g);
+        (s.runtime.clone(), s.data.clone())
+    };
+    if let Some(rt) = rt {
+        st(g).runtime = None;
+        st(g).save();
+        if rt.via == "service" {
+            let _ = stop_service(&data);
+        } else if rn::pid_alive(rt.pid) {
+            let _ = rn::stop_pid(rt.pid, &data);
+        }
+        logger::log("info", "stop", &format!("остановлено: {} (pid {}, через {})", rt.profile_id, rt.pid, rt.via));
+        emit(app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
+        if !silent {
+            emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text":"запрет остановлен"}));
+        }
+        Ok(())
+    } else {
+        // возможно работает служба — глушим её процесс
+        let (running, data) = {
+            let s = st(g);
+            (s.service_running, s.data.clone())
+        };
+        if running == Some(true) {
+            let _ = stop_service(&data);
+        }
+        if !silent {
+            emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text":"всё остановлено"}));
+        }
+        Ok(())
+    }
+}
+
+#[tauri::command(async)]
+fn stop_running(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
+    do_stop(&app, ga.inner(), false)
+}
+
+fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
+    let (profile, root_path, settings, data) = {
+        let s = st(g);
+        let p = s.profile(id).cloned().ok_or_else(|| {
+            logger::log("err", "start", &format!("профиль {id} не найден"));
+            "профиль не найден — возможно, он был удалён в другой копии программы".to_string()
+        })?;
+        let root = s.roots.path(&p.engine).ok_or_else(|| {
+            logger::log("warn", "start", &format!("корень движка «{}» не задан", p.engine));
+            format!("корень «{}» не задан — нажмите «Скачать движок» на вкладке «Стратегии»", p.engine)
+        })?;
+        (p, root, s.settings.clone(), s.data.clone())
+    };
+
+    let _ = do_stop(app, g, true);
+
+    let exe = locate_exe(&root_path, profile.exe_name()).map_err(|e| {
+        logger::log("err", "start", &format!("{}: {e}", profile.name));
+        human::humanize(&e)
+    })?;
+    let (tcp, udp) = pf::game_filter_ports(&settings.game_filter);
+    let args = pf::apply_game_filter(&profile.args, &tcp, &udp);
+
+    let logs = data.join("logs");
+    let _ = std::fs::create_dir_all(&logs);
+    let out_log = logs.join(format!("stdout-{}.txt", profile.id));
+    let err_log = logs.join(format!("stderr-{}.txt", profile.id));
+    let pid_file = logs.join(format!("pid-{}.txt", profile.id));
+
+    let wd = root_path.join("bin");
+
+    // Чистим старые логи: иначе при мгновенном выходе процесса в ошибку попадёт
+    // содержимое прошлого запуска (в т.ч. в другой кодировке).
+    let _ = std::fs::remove_file(&out_log);
+    let _ = std::fs::remove_file(&err_log);
+
+    // Если GUI уже запущен от администратора — стартуем winws НАПРЯМУЮ:
+    // мгновенно, с логами и корректным квотингом, без UAC и launcher-скриптов.
+    // Иначе — элевированный launcher (один UAC), логи в этом пути не собираются.
+    let pid = if rn::is_elevated() {
+        let pid = rn::spawn_direct(&exe, &wd, &args, &out_log, &err_log)?;
+        std::thread::sleep(Duration::from_millis(900));
+        pid
+    } else {
+        let launcher = rn::write_launcher(&exe, &wd, &args, &out_log, &err_log, &pid_file);
+        let pid = rn::spawn_and_wait_pid(&launcher, &pid_file, Duration::from_secs(60))?;
+        let _ = std::fs::remove_file(&launcher);
+        pid
+    };
+
+    if !rn::pid_alive(pid) {
+        // Показываем и stderr, и stdout: winws пишет диагностику в оба потока.
+        let err = rn::tail(&err_log, 2000);
+        let out = rn::tail(&out_log, 2000);
+        let msg = [err, out]
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        logger::log(
+            "err",
+            "start",
+            &format!("«{}» сразу завершился: {}", profile.name, msg.trim()),
+        );
+        let hint = if rn::is_elevated() {
+            "стратегия сразу завершилась — подробности в «Журнале»"
+        } else {
+            "для запуска обхода нужен запрос прав администратора — включите «Всегда запускать программу от администратора» в «Настройках»"
+        };
+        return Err(if msg.trim().is_empty() {
+            format!("{hint} (движок не выдал ни одной строки вывода)")
+        } else {
+            format!("{hint}. Последние строки движка:\n{}", msg.trim())
+        });
+    }
+
+    let runtime = Runtime {
+        profile_id: profile.id.clone(),
+        pid,
+        started_at: now_ts(),
+        via: "app".into(),
+        alive: true,
+    };
+    st(g).runtime = Some(runtime.clone());
+    st(g).save();
+    logger::log(
+        "ok",
+        "start",
+        &format!("запущена стратегия «{}» ({}, pid {})", profile.name, profile.engine, pid),
+    );
+    emit(app, "zgui:status", serde_json::json!({"running": true, "pid": pid, "profileId": profile.id}));
+    emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Запущена стратегия «{}»", profile.name)}));
+    Ok(runtime)
+}
+
+#[tauri::command]
+async fn start_profile(app: AppHandle, id: String) -> Result<Runtime, String> {
+    // Запуск идёт в отдельном потоке: ожидание UAC (до 60 с) не блокирует UI,
+    // окно остаётся отзывчивым и показывает спиннер на кнопке.
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ga = app2.state::<Global>();
+        do_start(&app2, ga.inner(), &id)
+    })
+    .await
+    .map_err(|e| format!("запуск прерван: {}", e))?
+}
+
+#[tauri::command(async)]
+fn current_status(ga: State<'_, Global>) -> Result<Option<Runtime>, String> {
+    let s = st(ga.inner());
+    Ok(s.runtime.clone().map(|mut r| {
+        r.alive = rn::pid_alive(r.pid);
+        r
+    }))
+}
+
+// ---------------------------------------------------------------- тесты стратегий
+
+fn test_marker(data: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
+    (
+        data.join("logs/test-stop.flag"),
+        data.join("logs/test-runner.pid"),
+        data.join("logs/test-current.pid"),
+    )
+}
+
+fn set_test(app: &AppHandle, g: &Global, p: tester::TestProgress) {
+    *g.testing.lock().unwrap_or_else(|e| e.into_inner()) = p.clone();
+    emit(app, "zgui:test", p);
+}
+
+#[tauri::command(async)]
+fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
+    let g = ga.inner();
+    let mut cur = g.testing.lock().unwrap_or_else(|e| e.into_inner());
+    if cur.running {
+        return cur.clone();
+    }
+    // Подхват теста, оставленного предыдущей сессией: раннер живёт в фоне.
+    let data = st(g).data.clone();
+    let (flag, run_pid, _win_pid) = test_marker(&data);
+    let alive = std::fs::read_to_string(&run_pid)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(rn::pid_alive)
+        .unwrap_or(false);
+    if alive && !flag.exists() {
+        *cur = tester::TestProgress {
+            running: true,
+            phase: "resume".into(),
+            current_id: None,
+            current_name: None,
+            index: 0,
+            total: 0,
+            pct: 0,
+            msg: "тест продолжается в фоне — его можно остановить".into(),
+            results: Vec::new(),
+            best_id: None,
+            best_name: None,
+            done: false,
+        };
+    }
+    cur.clone()
+}
+
+/// Запускает каждую выбранную стратегию по очереди, проверяет контрольные домены
+/// и определяет лучшую (аналог теста стратегий в GUI Flowseal).
+/// `mode`: "main" — ручной список (выбирает лучшую), "geoblock" — онлайн-списки (диагностика).
+#[tauri::command(async)]
+fn test_strategies(
+    app: AppHandle,
+    ga: State<'_, Global>,
+    ids: Vec<String>,
+    domains_limit: Option<usize>,
+    mode: Option<String>,
+) -> Result<bool, String> {
+    let _ = domains_limit;
+    let geoblock = mode.as_deref() == Some("geoblock");
+    let g = ga.inner();
+    {
+        let cur = g.testing.lock().unwrap_or_else(|e| e.into_inner());
+        if cur.running {
+            return Err("тест уже выполняется".into());
+        }
+    }
+    let (profiles, data, roots_ok) = {
+        let s = st(g);
+        let all = s.profiles.clone();
+        let selected: Vec<Profile> = if ids.is_empty() {
+            all.iter()
+                .filter(|p| p.engine == ENGINE_FLOWSEAL)
+                .cloned()
+                .collect()
+        } else {
+            all.iter().filter(|p| ids.contains(&p.id)).cloned().collect()
+        };
+        (selected, s.data.clone(), s.roots.clone())
+    };
+    if profiles.is_empty() {
+        return Err("нет стратегий для теста".into());
+    }
+    // VPN мешает тесту — просим выгрузить (фронт показывает окно и вызывает kill_conflicts).
+    let vpn = svc::detect_vpn();
+    if !vpn.is_empty() {
+        return Err(format!("VPN_RUNNING:{}", vpn.len()));
+    }
+    for p in &profiles {
+        if roots_ok.path(&p.engine).is_none() {
+            return Err(format!("для «{}» не задан корень движка", p.name));
+        }
+    }
+
+    // Основной тест идёт ровно по ручному списку (обязательные + вшитые) — без геоблока.
+    // Если есть калибровка geoblock-теста, недоступные домены (не обходятся Zapret) отсекаем,
+    // но обязательные критические группы не трогаем.
+    // Диагностический геоблок-тест берёт ВЕСЬ онлайн-список (без лимита) + базовую пробу.
+    let custom = if geoblock {
+        tester::load_geoblock_domains(&data, usize::MAX)
+    } else {
+        let mut list = tester::load_domains_from_lists(&data, usize::MAX);
+        // Вырезаем ТОЛЬКО те домены, что калибровка отметила как «требует VPN»
+        // (недоступны через Zapret). Reachable-список НЕ используется как белый:
+        // иначе домены ручного списка, которых нет в онлайн-геоблоке, выпадали бы.
+        // Обязательные критические группы не трогаем никогда.
+        let vpn_only = tester::load_vpn_only(&data);
+        if !vpn_only.is_empty() {
+            let req: std::collections::HashSet<String> =
+                tester::REQUIRED_DOMAINS.iter().map(|h| h.to_string()).collect();
+            list.retain(|(_, host)| !vpn_only.contains(host) || req.contains(host));
+        }
+        list
+    };
+    if custom.is_empty() {
+        return Err("нет доменов для теста (списки пусты)".into());
+    }
+
+    // Готовим шаги: exe, рабочий каталог, аргументы с game-filter.
+    let (tcp, udp) = pf::game_filter_ports(&st(g).settings.game_filter);
+    let mut steps: Vec<tester::TestStep> = Vec::new();
+    for p in &profiles {
+        let root = st(g).roots.path(&p.engine).ok_or_else(|| {
+            format!("для «{}» не задан корень движка", p.name)
+        })?;
+        let exe = locate_exe(&root, p.exe_name())?;
+        let wd = root.join("bin");
+        steps.push(tester::TestStep {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            engine: p.engine.clone(),
+            group: tester::group_of(p),
+            exe: exe.to_string_lossy().into_owned(),
+            workdir: wd.to_string_lossy().into_owned(),
+            args: pf::apply_game_filter(&p.args, &tcp, &udp),
+        });
+    }
+
+    let (_plan, script, out_path) = tester::write_test_runner(&data, &steps, &custom, geoblock)?;
+    let total = steps.len();
+    logger::log(
+        "info",
+        "test",
+        &format!(
+            "старт теста: {} стратегий, {} доменов{}",
+            total,
+            custom.len(),
+            if geoblock { " (диагностика геоблока)" } else { "" }
+        ),
+    );
+
+    // Если GUI уже запущен от администратора — не гоняем UAC-обёртку: она может
+    // не стартовать дочерний процесс, и тест «зависает» на фазе запуска.
+    let elevated = rn::is_elevated();
+
+    let initial = tester::TestProgress {
+        running: true,
+        phase: "launch".into(),
+        current_id: None,
+        current_name: None,
+        index: 0,
+        total,
+        pct: 0,
+        msg: if elevated {
+            "запускаю тест".into()
+        } else {
+            "запускаю тест (подтвердите права администратора один раз)".into()
+        },
+        results: Vec::new(),
+        best_id: None,
+        best_name: None,
+        done: false,
+    };
+    {
+        let mut cur = g.testing.lock().unwrap_or_else(|e| e.into_inner());
+        *cur = initial.clone();
+    }
+    emit(&app, "zgui:test", initial);
+
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let ga2 = app2.state::<Global>();
+        let g2 = ga2.inner();
+
+        // Один UAC на весь тест: скрипт выполняет все стратегии внутри.
+        // Если GUI уже админ — запускаем напрямую (без Start-Process -Verb RunAs).
+        let launch = if elevated {
+            rn::spawn_script_direct(&script).map(|_| ())
+        } else {
+            rn::spawn_elevated_script(&script)
+        };
+        if let Err(e) = launch {
+            logger::log("err", "test", &format!("раннер теста не стартовал: {e}"));
+            set_test(
+                &app2,
+                g2,
+                tester::TestProgress {
+                    running: false,
+                    phase: "done".into(),
+                    msg: format!("не удалось запустить тест: {}", e),
+                    total,
+                    results: Vec::new(),
+                    done: true,
+                    ..Default::default()
+                },
+            );
+            return;
+        }
+
+        // Поллим промежуточный JSON, пока раннер пишет результаты.
+        let mut results: Vec<tester::StrategyResult> = Vec::new();
+        let started = std::time::Instant::now();
+        loop {
+            if test_marker(&data).0.exists() {
+                break;
+            }
+            if let Some(v) = tester::read_test_progress(&out_path) {
+                // Фаза базовой пробы геоблок-теста (без Zapret): показываем прогресс,
+                // иначе UI выглядит «замершим» до первого winws.
+                if let Some(b) = v.get("baseline") {
+                    let bd = b["done"].as_u64().unwrap_or(0);
+                    let bt = b["total"].as_u64().unwrap_or(0);
+                    let prog = tester::TestProgress {
+                        running: true,
+                        phase: "baseline".into(),
+                        current_id: None,
+                        current_name: None,
+                        index: 0,
+                        total,
+                        pct: 0,
+                        msg: format!("базовая проба (без Zapret): {}/{}", bd, bt),
+                        results: Vec::new(),
+                        best_id: None,
+                        best_name: None,
+                        done: false,
+                    };
+                    set_test(&app2, g2, prog);
+                    std::thread::sleep(Duration::from_millis(700));
+                    continue;
+                }
+                let idx = v["index"].as_u64().unwrap_or(0) as usize;
+                let cur_id = v["currentId"].as_str().map(|s| s.to_string());
+                let cur_name = v["currentName"].as_str().map(|s| s.to_string());
+                if let Some(arr) = v["results"].as_array() {
+                    results = arr
+                        .iter()
+                        .filter_map(|r| serde_json::from_value::<tester::StrategyResult>(r.clone()).ok())
+                        .collect();
+                }
+                let done = idx >= total && results.len() >= total;
+                let prog = tester::TestProgress {
+                    running: !done,
+                    phase: if done { "done".into() } else { "probe".into() },
+                    current_id: cur_id,
+                    current_name: cur_name.clone(),
+                    index: idx,
+                    total,
+                    pct: ((idx as f64 / total.max(1) as f64) * 100.0) as i32,
+                    msg: cur_name
+                        .as_ref()
+                        .map(|n| format!("тестирую «{}»", n))
+                        .unwrap_or_else(|| "тест завершён".into()),
+                    results: results.clone(),
+                    best_id: None,
+                    best_name: None,
+                    done,
+                };
+                set_test(&app2, g2, prog);
+                if done {
+                    break;
+                }
+            } else {
+                // Вотчдог запуска: если PID раннера так и не появился — не висим 120 с,
+                // а выходим с понятной ошибкой. PID есть, но нет вывода — ждём дольше.
+                let pid_seen = data.join("logs/test-runner.pid").exists();
+                let limit = if pid_seen {
+                    Duration::from_secs(120)
+                } else {
+                    Duration::from_secs(20)
+                };
+                if started.elapsed() > limit {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(700));
+        }
+        let stopped = test_marker(&data).0.exists();
+        let _ = std::fs::remove_file(&out_path);
+
+        // Если раннер не оставил результатов — вероятнее всего UAC отклонён.
+        if results.is_empty() {
+            results = steps
+                .iter()
+                .map(|s| tester::StrategyResult {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    engine: s.engine.clone(),
+                    group: s.group.clone(),
+                    started: false,
+                    score: 0,
+                    max_score: custom.len() as u32,
+                    domains: Vec::new(),
+                    error: Some(if elevated {
+                        "тест не запустился — раннер не стартовал (см. logs/test-runner.ps1 и run-*.err.txt)".into()
+                    } else {
+                        "тест не запустился — подтверждение прав администратора отклонено или раннер не стартовал".into()
+                    }),
+                    groups: Vec::new(),
+                    critical_ok: false,
+                })
+                .collect();
+        }
+
+        // Калибровка геоблока: какие домены обходятся Zapret, а какие недоступны.
+        if geoblock && !stopped {
+            let mut passed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for r in &results {
+                for d in &r.domains {
+                    if d.ok {
+                        passed.insert(d.host.clone());
+                    }
+                }
+            }
+            let all_hosts: Vec<String> = custom.iter().map(|(_, h)| h.clone()).collect();
+            let reachable: Vec<String> = passed.iter().cloned().collect();
+            // «Недоступные» — не прошли НИ У ОДНОЙ стратегии (для них Zapret не помогает,
+            // нужен VPN или сайт мёртв). Их вырезаем фильтром из основного теста.
+            // Если прогон не дал ни одного успеха (тест не отработал) — ничего не помечаем,
+            // иначе при сбое сети весь список стал бы «недоступным».
+            let vpn_only: Vec<String> = if passed.is_empty() {
+                Vec::new()
+            } else {
+                all_hosts
+                    .iter()
+                    .filter(|h| !passed.contains(*h))
+                    .cloned()
+                    .collect()
+            };
+            tester::save_reachability(&data, &reachable, &vpn_only);
+            let msg = format!(
+                "калибровка: обходится {} доменов, недоступны (только VPN) — {}",
+                reachable.len(),
+                vpn_only.len()
+            );
+            emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": msg}));
+        }
+
+        let (sorted, best) = tester::summarize(&results);
+        let best_name = best
+            .as_ref()
+            .and_then(|id| results.iter().find(|r| &r.id == id))
+            .map(|r| r.name.clone());
+        // Диагностический геоблок-тест не влияет на «лучшую стратегию»/автостарт.
+        let (best, best_name) = if geoblock { (None, None) } else { (best, best_name) };
+        if stopped {
+            logger::log("warn", "test", "тест остановлен пользователем");
+            // Пользователь резко остановил тест: частичные результаты не считаем итоговыми.
+            let msg = "тест остановлен пользователем".to_string();
+            set_test(
+                &app2,
+                g2,
+                tester::TestProgress {
+                    running: false,
+                    phase: "done".into(),
+                    current_id: None,
+                    current_name: None,
+                    index: 0,
+                    total,
+                    pct: 0,
+                    msg: msg.clone(),
+                    results: Vec::new(),
+                    best_id: None,
+                    best_name: None,
+                    done: true,
+                },
+            );
+            emit(
+                &app2,
+                "zgui:toast",
+                serde_json::json!({"kind":"info","text": msg}),
+            );
+            return;
+        }
+        if !geoblock {
+            let cache = tester::TestCache {
+                tested_at: Some(now_ts().to_string()),
+                best_id: best.clone(),
+                results: sorted.clone(),
+            };
+            cache.save(&data);
+        }
+        let msg = if geoblock {
+            "диагностика геоблок-списков завершена".to_string()
+        } else {
+            match &best_name {
+                Some(n) => format!("лучшая стратегия: «{}»", n),
+                None => "ни одна стратегия не набрала очков".to_string(),
+            }
+        };
+        logger::log(
+            if best_name.is_some() || geoblock { "ok" } else { "warn" },
+            "test",
+            &format!("тест завершён: {msg} (стратегий: {total})"),
+        );
+        set_test(
+            &app2,
+            g2,
+            tester::TestProgress {
+                running: false,
+                phase: "done".into(),
+                current_id: None,
+                current_name: None,
+                index: total,
+                total,
+                pct: 100,
+                msg: msg.clone(),
+                results: sorted,
+                best_id: best,
+                best_name,
+                done: true,
+            },
+        );
+        emit(
+            &app2,
+            "zgui:toast",
+            serde_json::json!({"kind":"ok","text": msg}),
+        );
+    });
+    Ok(true)
+}
+
+#[tauri::command(async)]
+fn test_cache(ga: State<'_, Global>) -> tester::TestCache {
+    tester::TestCache::load(&st(ga.inner()).data)
+}
+
+// ---------------------------------------------------------------- telegram
+
+#[tauri::command(async)]
+fn tg_status(ga: State<'_, Global>) -> telegram::TgStatus {
+    ga.inner().telegram.status()
+}
+
+#[tauri::command(async)]
+fn tg_stats(ga: State<'_, Global>) -> String {
+    ga.inner().telegram.stats()
+}
+
+#[tauri::command]
+async fn tg_start(app: AppHandle, ga: State<'_, Global>, port: Option<u16>) -> Result<telegram::TgStatus, String> {
+    let st = ga.inner().telegram.clone();
+    let port = port.unwrap_or(1443);
+    let result = st.start(port, None).await;
+    match &result {
+        Ok(_) => {
+            logger::log("ok", "telegram", &format!("прокси запущен на порту {port}"));
+            emit(&app, "zgui:tg", serde_json::json!({"running": true}));
+        }
+        Err(e) => logger::log("err", "telegram", &format!("не удалось запустить прокси на порту {port}: {e}")),
+    }
+    result
+}
+
+#[tauri::command(async)]
+fn tg_stop(app: AppHandle, ga: State<'_, Global>) -> telegram::TgStatus {
+    ga.inner().telegram.stop();
+    logger::log("info", "telegram", "прокси остановлен");
+    emit(&app, "zgui:tg", serde_json::json!({"running": false}));
+    ga.inner().telegram.status()
+}
+
+/// Проверка обновления встроенного Telegram-моста (версия ZUI + коммиты Flowseal).
+#[tauri::command(async)]
+fn tg_check_update() -> updater::TgBridgeInfo {
+    updater::check_tg_bridge()
+}
+
+/// Текущее состояние watchdog (обход YouTube/Discord).
+#[tauri::command(async)]
+fn watchdog_status(ga: State<'_, Global>) -> watchdog::WatchdogStatus {
+    ga.inner().watchdog.status()
+}
+
+/// Резко останавливает тест стратегий: стоп-флаг для раннера + мгновенный
+/// kill деревьев (elevated раннер и активный winws) через один UAC.
+#[tauri::command(async)]
+fn cancel_test(ga: State<'_, Global>) -> Result<(), String> {
+    let data = st(ga.inner()).data.clone();
+    let (flag, run_pid, win_pid) = test_marker(&data);
+    let read_pid = |p: &PathBuf| -> Vec<u32> {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .into_iter()
+            .collect()
+    };
+    // Сначала маркер — поллер/раннер корректно завершат рабочий цикл сами.
+    std::fs::write(&flag, now_ts().to_string()).map_err(|e| e.to_string())?;
+    let mut pids = read_pid(&run_pid);
+    pids.extend(read_pid(&win_pid));
+    pids.dedup();
+    if !pids.is_empty() {
+        rn::stop_pids(&pids, &data)?;
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn set_best_strategy(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<(), String> {
+    let data = st(ga.inner()).data.clone();
+    if !st(ga.inner()).profiles.iter().any(|p| p.id == id) {
+        return Err("профиль не найден".into());
+    }
+    let mut s = st(ga.inner());
+    s.settings.autostart_mode = "profile".into();
+    s.settings.autostart_profile = Some(id.clone());
+    s.save();
+    let mut c = tester::TestCache::load(&data);
+    c.best_id = Some(id.clone());
+    c.save(&data);
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"лучшая стратегия выбрана для автостарта"}));
+    Ok(())
+}
+
+// ---------------------------------------------------------------- конфликты
+
+#[tauri::command(async)]
+fn conflict_check(ga: State<'_, Global>) -> svc::ConflictReport {
+    let s = st(ga.inner());
+    let our_pid = s.runtime.as_ref().map(|r| r.pid);
+    svc::detect_conflicts(&s.data, our_pid)
+}
+
+#[tauri::command(async)]
+fn vpn_check() -> svc::ConflictReport {
+    svc::ConflictReport {
+        vpn: svc::detect_vpn(),
+        ..Default::default()
+    }
+}
+
+/// Полный безопасный сброс сети: снимает конфликты (zapret/VPN/WinDivert/прокси)
+/// и восстанавливает интернет. Wi-Fi-пароли и настройки провайдера не трогаются.
+/// Требует перезагрузку (winsock/int ip reset).
+#[tauri::command(async)]
+fn net_reset(ga: State<'_, Global>) -> Result<netreset::NetResetResult, String> {
+    let data = st(ga.inner()).data.clone();
+    logger::log("warn", "netreset", "запущено восстановление сети");
+    match netreset::reset(&data) {
+        Ok(r) => {
+            logger::log("ok", "netreset", "восстановление сети завершено");
+            Ok(r)
+        }
+        Err(e) => {
+            logger::log("err", "netreset", &format!("восстановление сети не удалось: {e}"));
+            Err(human::with_context("не удалось восстановить сеть", &e))
+        }
+    }
+}
+
+/// Создаёт точку восстановления Windows перед сбросом сети (не чаще раза в сутки).
+#[tauri::command(async)]
+fn net_create_restore_point(ga: State<'_, Global>) -> Result<String, String> {
+    let data = st(ga.inner()).data.clone();
+    netreset::create_restore_point(&data)
+}
+
+/// Список виртуальных сетевых адаптеров (только для информации — не удаляются).
+#[tauri::command(async)]
+fn virtual_adapters() -> Vec<String> {
+    netreset::list_virtual_adapters()
+}
+
+/// Перезагрузка компьютера (с задержкой 5 с, чтобы успеть сохранить работу).
+#[tauri::command(async)]
+fn reboot_now() -> Result<(), String> {
+    rn::hidden_command("shutdown")
+        .args(["/r", "/t", "5"])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String> {
+    let g = ga.inner();
+    let (data, our_pid) = {
+        let s = st(g);
+        (s.data.clone(), s.runtime.as_ref().map(|r| r.pid))
+    };
+    let report = svc::detect_conflicts(&data, our_pid);
+    if !report.has_conflicts() {
+        return Ok(false);
+    }
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let r = svc::kill_conflicts(&report, our_pid, &data);
+        // После выгрузки VPN его системный прокси часто остаётся «висеть» —
+        // чиним сразу, чтобы у пользователя не пропал интернет.
+        let healed = heal_orphan_proxy();
+        let (kind, text) = match r {
+            Ok(_) => ("ok", "конфликтующие процессы выгружены".to_string()),
+            Err(e) => ("err", format!("не удалось выгрузить: {}", e)),
+        };
+        emit(&app2, "zgui:toast", serde_json::json!({"kind": kind, "text": text}));
+        if let Some(proxy) = healed {
+            emit(
+                &app2,
+                "zgui:toast",
+                serde_json::json!({"kind": "ok", "text": format!("сброшен нерабочий системный прокси {}", proxy)}),
+            );
+        }
+        emit(&app2, "zgui:conflict", serde_json::json!({}));
+    });
+    Ok(true)
+}
+
+// ---------------------------------------------------------------- служба
+
+#[tauri::command(async)]
+fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<(), String> {
+    let g = ga.inner();
+    // Взаимная блокировка механизмов автозапуска: либо служба, либо GUI-автозапуск.
+    {
+        let s = st(g);
+        if s.settings.boot_app {
+            return Err(
+                "обход уже включается сам через программу. Чтобы использовать службу, \
+                 сначала отключите автозапуск: «Настройки» → «Запускать при входе» → «— не запускать —»"
+                    .into(),
+            );
+        }
+    }
+    let (profile, root, args, data) = {
+        let s = st(g);
+        let p = s.profile(&id).cloned().ok_or("профиль не найден")?;
+        let root = s.roots.path(&p.engine).ok_or("корень движка не задан — нажмите «Скачать движок»")?;
+        let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
+        (p.clone(), root, pf::apply_game_filter(&p.args, &tcp, &udp), s.data.clone())
+    };
+    svc::install_service(&root, &profile, &args, &data)
+        .map_err(|e| {
+            logger::log("err", "service", &format!("установка службы не удалась: {e}"));
+            human::with_context("не удалось установить службу", &e)
+        })?;
+    logger::log("ok", "service", &format!("служба zapret установлена со стратегией «{}»", profile.name));
+    let mut s = st(g);
+    s.service_running = Some(true);
+    s.service_strategy = Some(profile.id.clone());
+    s.settings.autostart_mode = "profile".into();
+    s.settings.autostart_profile = Some(profile.id.clone());
+    s.save();
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"служба zapret установлена и запущена"}));
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
+    let g = ga.inner();
+    let data = st(g).data.clone();
+    svc::remove_service(&data).map_err(|e| {
+        logger::log("err", "service", &format!("удаление службы не удалось: {e}"));
+        human::with_context("не удалось удалить службу", &e)
+    })?;
+    logger::log("info", "service", "служба zapret удалена");
+    let mut s = st(g);
+    s.service_running = None;
+    s.service_strategy = None;
+    s.settings.autostart_mode = "none".into();
+    s.settings.autostart_profile = None;
+    s.runtime = None;
+    s.save();
+    emit(&app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"служба zapret удалена"}));
+    Ok(())
+}
+
+// ---------------------------------------------------------------- обновления
+
+/// Версия установленного движка Flowseal — из имени каталога релиза
+/// (`zapret-discord-youtube-1.10.2`).
+fn engine_version_from_root(root: &std::path::Path) -> Option<String> {
+    root.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.rsplit_once('-').map(|(_, v)| v.to_string()))
+        .filter(|v| v.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EngineUpdateInfo {
+    installed: Option<String>,
+    latest: Option<String>,
+    up_to_date: bool,
+    error: Option<String>,
+}
+
+/// Проверка обновления движка: сравнение установленного релиза с последним на GitHub.
+#[tauri::command(async)]
+fn engine_check_update(ga: State<'_, Global>) -> EngineUpdateInfo {
+    let (stored, root) = {
+        let s = st(ga.inner());
+        (
+            s.engine_version.clone(),
+            s.roots.path(ENGINE_FLOWSEAL),
+        )
+    };
+    let installed = stored.or_else(|| root.as_ref().and_then(|r| engine_version_from_root(r)));
+    match up::check_engine_latest() {
+        Ok(latest) => {
+            let up_to_date = installed.as_deref() == Some(latest.as_str());
+            logger::log(
+                "info",
+                "engine",
+                &format!(
+                    "проверка обновления движка: установлен {}, последний {}",
+                    installed.as_deref().unwrap_or("неизвестно"),
+                    latest
+                ),
+            );
+            EngineUpdateInfo {
+                installed,
+                latest: Some(latest),
+                up_to_date,
+                error: None,
+            }
+        }
+        Err(e) => {
+            logger::log("warn", "engine", &format!("проверка обновления движка: {e}"));
+            EngineUpdateInfo {
+                installed,
+                latest: None,
+                up_to_date: false,
+                error: Some(e),
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String> {
+    let (data, roots, settings) = {
+        let s = st(ga.inner());
+        (s.data.clone(), s.roots.clone(), s.settings.clone())
+    };
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        match up::check_all(&data, &roots, &settings) {
+            Ok(entries) => {
+                let changed = entries
+                    .iter()
+                    .filter(|e| e.status == "avail" || e.status == "new")
+                    .count();
+                logger::log(
+                    "info",
+                    "updates",
+                    &format!("проверка обновлений: {} файлов, требуют обновления {changed}", entries.len()),
+                );
+                let ga2 = app2.state::<Global>();
+                let mut s = ga2.state.lock().unwrap();
+                s.updater = UpdaterCache {
+                    last_check: Some(crate::profiles::now_str()),
+                    entries,
+                    last_auto: s.updater.last_auto.clone(),
+                };
+                s.save();
+                emit(&app2, "zgui:updates", updater_view(&s));
+                emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text":"проверка обновлений конфигов завершена"}));
+            }
+            Err(e) => {
+                logger::log("err", "updates", &format!("проверка обновлений не удалась: {e}"));
+                log_updates(&data, &format!("check error: {}", e));
+                emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось проверить обновления", &e)}));
+            }
+        }
+    });
+    Ok(true)
+}
+
+fn reload_bats_from_disk(s: &mut AppState) {
+    let raw = s.raw_strategies_dir();
+    let root = s.roots.path(ENGINE_FLOWSEAL);
+    let existing = s.profiles.clone();
+    if let Some(r) = root {
+        let mut bats = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&raw) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.to_lowercase().ends_with(".bat") {
+                    if let Ok(bytes) = std::fs::read(e.path()) {
+                        bats.push((name, pf::decode_strategy_bytes(&bytes)));
+                    }
+                }
+            }
+        }
+        let imported = pf::import_bat_profiles(&r, &bats, &existing);
+        for p in imported {
+            if let Some(ex) = s.profiles.iter_mut().find(|x| x.id == p.id) {
+                if !ex.builtin {
+                    ex.args = p.args;
+                    ex.name = p.name;
+                    ex.source = p.source;
+                    ex.updated_at = p.updated_at;
+                }
+            } else {
+                s.profiles.push(p);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) -> Result<bool, String> {
+    let (data, roots, settings) = {
+        let s = st(ga.inner());
+        (s.data.clone(), s.roots.clone(), s.settings.clone())
+    };
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        match up::apply_updates(&data, &roots, &settings, ids) {
+            Ok(entries) => {
+                let ga2 = app2.state::<Global>();
+                let mut s = ga2.state.lock().unwrap();
+                for e in &entries {
+                    if let Some(old) = s.updater.entries.iter_mut().find(|x| x.id == e.id) {
+                        *old = e.clone();
+                    }
+                }
+                if entries.iter().any(|e| e.group.starts_with("flowseal strategies") && e.status == "ok") {
+                    reload_bats_from_disk(&mut s);
+                }
+                s.updater.last_check = Some(crate::profiles::now_str());
+                s.save();
+                emit(&app2, "zgui:updates", updater_view(&s));
+                let ok_count = entries.iter().filter(|e| e.status == "ok").count();
+                let failed: Vec<String> = entries
+                    .iter()
+                    .filter(|e| e.status == "err")
+                    .map(|e| format!("{}: {}", e.label, e.error.clone().unwrap_or_default()))
+                    .collect();
+                logger::log(
+                    if failed.is_empty() { "ok" } else { "warn" },
+                    "updates",
+                    &format!("обновлено файлов: {ok_count}{}", if failed.is_empty() { String::new() } else { format!(", ошибки: {}", failed.join("; ")) }),
+                );
+                emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("обновлено файлов: {}", ok_count)}));
+            }
+            Err(e) => {
+                logger::log("err", "updates", &format!("применение обновлений не удалось: {e}"));
+                log_updates(&data, &format!("apply error: {}", e));
+                emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось применить обновления", &e)}));
+            }
+        }
+    });
+    Ok(true)
+}
+
+// ---------------------------------------------------------------- настройки
+
+#[tauri::command(async)]
+fn set_settings(ga: State<'_, Global>, mut settings: Settings) -> Result<(), String> {
+    // Флаг миграции не приходит с фронта — не сбрасываем его, иначе повторная
+    // миграция 6→72 сработает после каждой сохранённой настройки.
+    settings.interval_migrated = true;
+    let mut s = st(ga.inner());
+    // Тема меняется только через `set_theme`: форма настроек её не присылает,
+    // иначе сохранение сбрасывало бы выбор на дефолт. Флажок автозапуска GUI
+    // меняется только через `set_boot_app` — здесь его тоже сохраняем.
+    settings.theme = s.settings.theme.clone();
+    settings.boot_app = s.settings.boot_app;
+    s.settings = settings;
+    s.save();
+    // Тост здесь не показываем: настройки применяются сразу при изменении поля,
+    // и всплывашка на каждое переключение только мешала бы.
+    Ok(())
+}
+
+/// Первый запуск (или повторное включение): «всегда от администратора» + фиксируем,
+/// что предложение показано.
+#[tauri::command(async)]
+fn set_admin_prefs(ga: State<'_, Global>, always: bool) -> Result<(), String> {
+    let mut s = st(ga.inner());
+    s.settings.always_admin = always;
+    s.settings.admin_onboarded = true;
+    s.save();
+    logger::log(
+        "ok",
+        "admin",
+        if always {
+            "включено «всегда запускать от администратора»"
+        } else {
+            "«всегда от администратора» выключено"
+        },
+    );
+    Ok(())
+}
+
+/// Первый запуск: пользователь отложил выбор — больше не показываем предложение.
+#[tauri::command(async)]
+fn mark_admin_onboarded(ga: State<'_, Global>) {
+    let mut s = st(ga.inner());
+    s.settings.admin_onboarded = true;
+    s.save();
+}
+
+#[tauri::command(async)]
+fn set_theme(ga: State<'_, Global>, theme: String) -> Result<(), String> {
+    let theme = match theme.as_str() {
+        "grey" | "dark" | "light" => theme,
+        other => return Err(format!("неизвестная тема: {}", other)),
+    };
+    let mut s = st(ga.inner());
+    s.settings.theme = theme;
+    s.save();
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn read_log(ga: State<'_, Global>, kind: String, tail: usize) -> Result<String, String> {
+    let s = st(ga.inner());
+    let data = s.data.clone();
+    let profile = s.runtime.as_ref().map(|r| r.profile_id.clone());
+    let path = match kind.as_str() {
+        "stdout" => profile.as_ref().map(|p| data.join("logs").join(format!("stdout-{}.txt", p))),
+        "stderr" => profile.as_ref().map(|p| data.join("logs").join(format!("stderr-{}.txt", p))),
+        "updates" => Some(data.join("logs").join("updates.log")),
+        _ => None,
+    };
+    match path {
+        Some(p) if p.exists() => Ok(crate::config::tail_file(&p, tail)),
+        Some(_) => Ok(String::new()),
+        None => Err("нет активной стратегии".into()),
+    }
+}
+
+#[tauri::command(async)]
+fn open_url(url: String) -> Result<(), String> {
+    // Открываем только протокольные ссылки Telegram — не превращаем команду в «открой что угодно».
+    if !url.starts_with("tg://") {
+        return Err("разрешены только ссылки tg://".into());
+    }
+    // ВАЖНО: `cmd /c start` и `rundll32 url.dll` портят query-строку с `&`
+    // (Telegram показывает «Некорректная ссылка»). ShellExecuteW передаёт URL
+    // как есть — проверено вручную.
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = std::ffi::OsStr::new(&url)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let op: Vec<u16> = std::ffi::OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let h = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, // SW_SHOWNORMAL
+            )
+        };
+        // ShellExecuteW возвращает значение > 32 при успехе.
+        if (h as isize) <= 32 {
+            return Err(format!("не удалось открыть ссылку (код {})", h as isize));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn open_path(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Ok(());
+    }
+    let _ = std::process::Command::new("explorer.exe").arg(&p).spawn();
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_boot_app(app: AppHandle, enabled: bool) -> Result<(), String> {
+    // Создание задачи с уровнем «наивысшие» может потребовать UAC — не блокируем UI.
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ga = app2.state::<Global>();
+        // Взаимная блокировка: пока установлена служба zapret, GUI-автозапуск не нужен.
+        if enabled {
+            let (installed, _) = svc::service_state();
+            if installed {
+                return Err(
+                    "обход уже включается сам службой. Чтобы запускать через программу, \
+                     сначала удалите службу: профиль → «⋯» → «Автозапуск службой»"
+                        .into(),
+                );
+            }
+        }
+        let data = st(ga.inner()).data.clone();
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        rn::apply_boot_task(enabled, &exe, &data)?;
+        // Старая запись HKCU\...\Run больше не нужна: иначе двойной запуск.
+        rn::remove_legacy_boot();
+        {
+            let mut s = st(ga.inner());
+            s.settings.boot_app = enabled;
+            s.save();
+        }
+        logger::log(
+            "ok",
+            "boot",
+            if enabled {
+                "автозапуск GUI включён: задача планировщика ZapretGUI (уровень «наивысшие», без UAC)"
+            } else {
+                "автозапуск GUI выключен"
+            },
+        );
+        emit(
+            &app2,
+            "zgui:toast",
+            serde_json::json!({"kind":"ok","text": if enabled {"автозапуск GUI при входе включён"} else {"автозапуск GUI отключён"}}),
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("автозапуск: {}", e))?
+}
+
+#[tauri::command(async)]
+fn ack_boot(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
+    let g = ga.inner();
+    let (pending, mode, profile) = {
+        let s = st(g);
+        (
+            s.boot_pending,
+            s.settings.autostart_mode.clone(),
+            s.settings.autostart_profile.clone(),
+        )
+    };
+    if !pending {
+        return Ok(());
+    }
+    {
+        let mut s = st(g);
+        s.boot_pending = false;
+        s.save();
+    }
+    if mode != "profile" {
+        return Ok(());
+    }
+    let Some(pid) = profile else { return Ok(()) };
+    // Если служба zapret установлена — обход при входе поднимает она.
+    // Без этой проверки do_start() глушил службу (do_stop) и стартовал winws
+    // как процесс приложения: «автозапуск службы» выглядел как «служба не работает».
+    let (svc_installed, svc_running) = svc::service_state();
+    if svc_installed {
+        {
+            let mut s = st(g);
+            s.service_running = Some(svc_running);
+            s.save();
+        }
+        logger::log(
+            "info",
+            "boot",
+            if svc_running {
+                "автозапуск: обход поднимает служба zapret — GUI-старт профиля пропущен"
+            } else {
+                "автозапуск: служба zapret установлена, но не запущена — GUI-старт профиля пропущен"
+            },
+        );
+        return Ok(());
+    }
+    if !rn::is_elevated() {
+        logger::log(
+            "warn",
+            "boot",
+            "автозапуск без прав администратора — стратегия может не подняться",
+        );
+    }
+    logger::log("info", "boot", &format!("автозапуск: старт профиля {pid}"));
+    match do_start(&app, g, &pid) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            logger::log("err", "boot", &format!("автозапуск стратегии не удался: {e}"));
+            emit(
+                &app,
+                "zgui:toast",
+                serde_json::json!({"kind":"err","text": format!("автозапуск стратегии не удался: {e}")}),
+            );
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command(async)]
+fn app_info() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Zapret GUI",
+        "version": env!("CARGO_PKG_VERSION"),
+        "portable": true,
+        "elevated": rn::is_elevated(),
+        "bundledConfigs": embedded::SNAPSHOT_INFO,
+        "bundledEngines": embedded::ENGINE_INFO
+    })
+}
+
+#[tauri::command(async)]
+fn relaunch_as_admin(app: AppHandle) -> Result<(), String> {
+    if rn::relaunch_as_admin()? {
+        app.exit(0);
+        Ok(())
+    } else {
+        logger::log("warn", "app", "запрос прав администратора отклонён");
+        Err("запрос прав администратора отклонён — программа продолжает работу без прав".into())
+    }
+}
+
+// ---------------------------------------------------------------- журнал
+
+#[tauri::command(async)]
+fn log_entries(after: u64) -> Vec<logger::Entry> {
+    logger::entries(after)
+}
+
+/// Запись в журнал из интерфейса (ошибки команд, действия пользователя).
+#[tauri::command(async)]
+fn log_write(level: String, scope: String, msg: String) {
+    logger::log(&level, &scope, &msg);
+}
+
+#[tauri::command(async)]
+fn log_clear() {
+    logger::clear();
+    logger::log("info", "log", "журнал очищен");
+}
+
+#[tauri::command(async)]
+fn log_dir_open() -> Result<String, String> {
+    let dir = logger::dir().ok_or("журнал ещё не инициализирован")?;
+    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// Сохраняет текстовый отчёт о состоянии рядом с журналом и возвращает путь.
+#[tauri::command(async)]
+fn report_save(ga: State<'_, Global>) -> Result<String, String> {
+    let s = st(ga.inner());
+    let dir = logger::dir().unwrap_or_else(|| s.data.join("logs"));
+    std::fs::create_dir_all(&dir).map_err(|e| human::with_context("не удалось создать папку отчёта", &e.to_string()))?;
+    let path = dir.join(format!("отчёт-{}.txt", logger::now_stamp()));
+
+    let fs = root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe");
+    let runtime = match &s.runtime {
+        Some(r) => format!("{} (pid {}, через {})", r.profile_id, r.pid, r.via),
+        None => "не запущено".into(),
+    };
+    let service = match s.service_running {
+        Some(true) => "установлена и работает",
+        Some(false) => "установлена, остановлена",
+        None => "не проверялась / не установлена",
+    };
+    let win = rn::hidden_command("cmd.exe")
+        .args(["/c", "ver"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "неизвестно".into());
+
+    let body = format!(
+        "Zapret GUI — отчёт о состоянии\r\n\
+         ============================================================\r\n\
+         Версия программы : {ver}\r\n\
+         Время отчёта     : {time}\r\n\
+         Система          : {win}\r\n\
+         Права админа     : {adm}\r\n\
+         Папка программы  : {exe}\r\n\
+         Папка данных     : {data}\r\n\
+         ------------------------------------------------------------\r\n\
+         Движок Flowseal  : {fs_root} (winws.exe: {fs_exe})\r\n\
+         Профилей         : {total}\r\n\
+         Сейчас запущено  : {runtime}\r\n\
+         Служба Windows   : {service}\r\n\
+         ------------------------------------------------------------\r\n\
+         Настройки:\r\n\
+           тема                : {theme}\r\n\
+           автозапуск GUI      : {boot_gui} (задача планировщика {boot_task})\r\n\
+           интервал обновлений : каждые {interval} ч\r\n\
+           игровой фильтр      : {game}\r\n\
+           режим ipset         : {ipset}\r\n\
+           автозапуск движка   : {autostart} (профиль: {autostart_profile})\r\n\
+           всегда от админа    : {always_admin}\r\n\
+           Telegram-прокси     : порт {tg_port}, автозапуск: {tg_auto}\r\n\
+         ============================================================\r\n\
+         ЖУРНАЛ (последние {count} записей)\r\n\
+         ============================================================\r\n\
+         {log}\r\n",
+        ver = env!("CARGO_PKG_VERSION"),
+        time = logger::stamp(
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        ),
+        win = win,
+        adm = if rn::is_elevated() { "да" } else { "НЕТ" },
+        exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        data = s.data.display(),
+        fs_root = fs.path.clone().unwrap_or_else(|| "не указан".into()),
+        fs_exe = if fs.exe.is_some() { "есть" } else { "НЕТ" },
+        total = s.profiles.len(),
+        runtime = runtime,
+        service = service,
+        theme = s.settings.theme,
+        boot_gui = if s.settings.boot_app { "включён" } else { "выключен" },
+        boot_task = if rn::boot_task_exists() { "найдена" } else { "НЕ найдена" },
+        interval = s.settings.update_interval_hours,
+        game = s.settings.game_filter,
+        ipset = s.settings.ipset_mode,
+        autostart = s.settings.autostart_mode,
+        autostart_profile = s.settings.autostart_profile.clone().unwrap_or_else(|| "нет".into()),
+        always_admin = if s.settings.always_admin { "да" } else { "нет" },
+        tg_port = s.settings.tg_port,
+        tg_auto = if s.settings.tg_autostart { "да" } else { "нет" },
+        count = logger::entries(0).len(),
+        log = logger::dump(),
+    );
+
+    std::fs::write(&path, body).map_err(|e| human::with_context("не удалось сохранить отчёт", &e.to_string()))?;
+    logger::log("ok", "report", &format!("отчёт сохранён: {}", path.display()));
+    let _ = std::process::Command::new("explorer.exe").arg(&path).spawn();
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command(async)]
+fn dns_providers() -> Vec<dns::DnsProvider> {
+    dns::providers().to_vec()
+}
+
+#[tauri::command(async)]
+fn apply_dns(ga: State<'_, Global>, provider: String, adapter: Option<String>) -> Result<String, String> {
+    let data = st(ga.inner()).data.clone();
+    match dns::apply(&data, &provider, adapter.as_deref()) {
+        Ok(msg) => {
+            logger::log("ok", "dns", &format!("применён DNS {provider}: {msg}"));
+            Ok(msg)
+        }
+        Err(e) => {
+            logger::log("err", "dns", &format!("не удалось применить DNS {provider}: {e}"));
+            Err(human::with_context("не удалось применить DNS", &e))
+        }
+    }
+}
+
+#[tauri::command(async)]
+fn reset_dns(ga: State<'_, Global>, adapter: Option<String>) -> Result<String, String> {
+    let data = st(ga.inner()).data.clone();
+    match dns::reset(&data, adapter.as_deref()) {
+        Ok(msg) => {
+            logger::log("info", "dns", "DNS возвращён на автоматический");
+            Ok(msg)
+        }
+        Err(e) => {
+            logger::log("err", "dns", &format!("не удалось сбросить DNS: {e}"));
+            Err(human::with_context("не удалось вернуть стандартный DNS", &e))
+        }
+    }
+}
+
+/// Замеряет время отклика DNS-серверов (медиана из 3 UDP-запросов на адрес).
+/// Выполняется в отдельном потоке, чтобы не блокировать UI.
+#[tauri::command]
+async fn dns_benchmark(ids: Option<Vec<String>>) -> Vec<dns::DnsPing> {
+    tokio::task::spawn_blocking(move || dns::benchmark(ids))
+        .await
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------- фон
+
+fn spawn_watchers(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut last_svc: u64 = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let g = app.state::<Global>();
+
+            let mut changed = false;
+            {
+                let mut s = st(&g);
+                if let Some(rt) = s.runtime.clone() {
+                    if rt.via == "app" {
+                        let alive = rn::pid_alive(rt.pid);
+                        if !alive {
+                            s.runtime = None;
+                            changed = true;
+                            let _ = app.emit("zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
+                            let _ = app.emit("zgui:toast", serde_json::json!({"kind":"warn","text":"процесс запрета завершился — смотрите журнал"}));
+                        }
+                    }
+                }
+                if now_ts() - last_svc > 10 {
+                    last_svc = now_ts();
+                    let (installed, running) = svc::service_state();
+                    let service_running = installed.then_some(running);
+                    let strat = if installed {
+                        svc::service_strategy(&s.data)
+                    } else {
+                        None
+                    };
+                    if s.service_running != service_running || s.service_strategy != strat {
+                        s.service_running = service_running;
+                        s.service_strategy = strat;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    s.save();
+                }
+            }
+
+            // авто-проверка конфигов
+            let (interval, last_auto, roots, settings, data) = {
+                let s = st(&g);
+                (s.settings.update_interval_hours, s.updater.last_auto.clone(), s.roots.clone(), s.settings.clone(), s.data.clone())
+            };
+            if interval > 0 && !g.is_busy() {
+                let due = match &last_auto {
+                    Some(t) => t.parse::<u64>().unwrap_or(0) + interval as u64 * 3600 <= now_ts(),
+                    None => true,
+                };
+                if due {
+                    g.set_busy(true);
+                    let app2 = app.clone();
+                    let mut s2 = st(&g);
+                    s2.updater.last_auto = Some(crate::profiles::now_str());
+                    s2.save();
+                    drop(s2);
+                    std::thread::spawn(move || {
+                        let r = up::check_all(&data, &roots, &settings);
+                        if let Ok(entries) = r {
+                            let ga3 = app2.state::<Global>();
+                            let mut s3 = ga3.state.lock().unwrap();
+                            s3.updater.entries = entries;
+                            let _ = app2.emit("zgui:updates", updater_view(&s3));
+                            let _ = app2.emit("zgui:toast", serde_json::json!({"kind":"info","text":"автопроверка обновлений конфигов завершена"}));
+                        }
+                        app2.state::<Global>().set_busy(false);
+                    });
+                }
+            }
+        }
+    });
+}
+
+/// Переносит старый автозапуск (HKCU\...\Run, версии ≤ 1.0.0) в задачу
+/// планировщика и досоздаёт задачу, если автозапуск включён, а задачи нет.
+/// Тихо, без UAC — досоздание возможно только при запуске от администратора.
+fn provision_boot(state: &mut AppState) {
+    if rn::legacy_boot_registered() && !state.settings.boot_app {
+        state.settings.boot_app = true;
+        logger::log(
+            "info",
+            "boot",
+            "найден автозапуск из старой версии (реестр) — переношу в планировщик",
+        );
+    }
+    if !state.settings.boot_app {
+        return;
+    }
+    if !rn::boot_task_exists() {
+        if rn::is_elevated() {
+            match std::env::current_exe() {
+                Ok(exe) => match rn::apply_boot_task(true, &exe, &state.data) {
+                    Ok(_) => logger::log("ok", "boot", "задача планировщика ZapretGUI создана"),
+                    Err(e) => logger::log(
+                        "err",
+                        "boot",
+                        &format!("не удалось создать задачу планировщика: {e}"),
+                    ),
+                },
+                Err(e) => logger::log("err", "boot", &format!("current_exe: {e}")),
+            }
+        } else {
+            logger::log(
+                "warn",
+                "boot",
+                "автозапуск включён, но задача планировщика не найдена — запустите GUI от администратора",
+            );
+        }
+    }
+    // Старая запись реестра больше не нужна: иначе двойной запуск.
+    rn::remove_legacy_boot();
+}
+
+/// Ставит окну «нативную» иконку из ресурсов exe — ту же, что видит Проводник.
+///
+/// Зачем: Tauri-кодоген берёт для окна **первый кадр** `icon.ico`
+/// (`tauri-codegen/src/image.rs`: `icon_dir.entries()[0]`), а в нашем ICO первым
+/// лежит 16×16. Панель задач рисует кнопку 24–48 px и растягивала этот 16-кадр —
+/// отсюда «мыльная» иконка (жалоба владельца). Здесь Windows сама выбирает кадр
+/// из группы иконок exe (как это делает Проводник): `LoadIconWithScaleDown`
+/// (comctl32 v6, включён фичей `common-controls-v6`) + `WM_SETICON`.
+/// Сам `icon.ico` при этом не меняется.
+#[cfg(windows)]
+fn apply_native_window_icon(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Controls::LoadIconWithScaleDown;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        LoadImageW, SendMessageW, HICON, ICON_BIG, ICON_SMALL, IMAGE_ICON, WM_SETICON,
+    };
+
+    // ID группы иконок, который встраивает tauri-build (проверено в собранном exe:
+    // RT_GROUP_ICON = 32512).
+    const ICON_GROUP_ID: usize = 32512;
+    // Панель задач рисует 24–48 px: уменьшение всегда чётче растяжения.
+    const TASKBAR_ICON_SIZE: i32 = 48;
+
+    let hwnd = match window.hwnd() {
+        Ok(h) => h.0,
+        Err(e) => {
+            logger::log("warn", "icon", &format!("не удалось получить HWND окна: {e}"));
+            return;
+        }
+    };
+    let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
+    if hinst.is_null() {
+        logger::log("warn", "icon", "не удалось получить HINSTANCE процесса");
+        return;
+    }
+    // MAKEINTRESOURCE(32512): имя ресурса — число, упакованное в указатель.
+    let name = ICON_GROUP_ID as *const u16;
+    let mut hicon: HICON = std::ptr::null_mut();
+    let hr = unsafe {
+        LoadIconWithScaleDown(hinst, name, TASKBAR_ICON_SIZE, TASKBAR_ICON_SIZE, &mut hicon)
+    };
+    if hr < 0 || hicon.is_null() {
+        // Фолбэк: LoadImage выберет ближайший кадр из группы.
+        hicon = unsafe {
+            LoadImageW(hinst, name, IMAGE_ICON, TASKBAR_ICON_SIZE, TASKBAR_ICON_SIZE, 0) as HICON
+        };
+    }
+    if hicon.is_null() {
+        logger::log("warn", "icon", "иконка из ресурсов не загрузилась — оставляю иконку Tauri");
+        return;
+    }
+    unsafe {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, hicon as isize);
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, hicon as isize);
+    }
+    logger::log("info", "icon", "окну поставлена нативная иконка 48×48 из ресурсов exe");
+}
+
+#[cfg(not(windows))]
+fn apply_native_window_icon(_window: &tauri::WebviewWindow) {}
+
+// ---------------------------------------------------------------- builder
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    logger::install_panic_hook();
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data = crate::config::portable_data_dir()?;
+            let mut state = AppState::load(data);
+            {
+                // Логгер не знает про tauri — отдаём ему канал доставки в UI.
+                let h = app.handle().clone();
+                logger::init(
+                    &state.data,
+                    std::sync::Arc::new(move |e: logger::Entry| {
+                        let _ = h.emit("zgui:log", &e);
+                    }),
+                );
+            }
+            logger::log(
+                "info",
+                "app",
+                &format!(
+                    "запуск Zapret GUI {} (админ: {}, портативно: {})",
+                    env!("CARGO_PKG_VERSION"),
+                    if rn::is_elevated() { "да" } else { "нет" },
+                    state.data.display()
+                ),
+            );
+            let elevated_flag = std::env::args().any(|a| a == "--elevated");
+            let mut uac_declined = false;
+            if state.settings.always_admin && !elevated_flag && !rn::is_elevated() {
+                // Пользователь просил всегда работать от админа — перезапускаемся с UAC.
+                // Если UAC отклонён, НЕ закрываем программу: работаем без прав и предупреждаем.
+                match rn::relaunch_as_admin() {
+                    Ok(true) => std::process::exit(0),
+                    Ok(false) => {
+                        uac_declined = true;
+                        logger::log("warn", "app", "запрос прав администратора отклонён — запуск без прав");
+                    }
+                    Err(e) => {
+                        uac_declined = true;
+                        logger::log("err", "app", &format!("перезапуск от админа не удался: {e}"));
+                    }
+                }
+            }
+            // Защита от двух копий: вторая копия может перетереть state.json.
+            // Не блокируем запуск (файл-замок может остаться от убитого процесса),
+            // но предупреждаем пользователя.
+            let lock_path = state.data.join("zgui.lock");
+            let mut second_instance = false;
+            if let Some(pid) = std::fs::read_to_string(&lock_path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                if pid != std::process::id() && rn::pid_alive(pid) {
+                    second_instance = true;
+                    logger::log(
+                        "warn",
+                        "app",
+                        &format!("обнаружена уже запущенная копия программы (pid {pid})"),
+                    );
+                }
+            }
+            let _ = std::fs::write(&lock_path, std::process::id().to_string());
+            embedded::seed_catalog(&state.data)?;
+            provision_engines(&mut state);
+            ensure_presets(&mut state);
+            migrate_removed_engine(&mut state);
+            state.save();
+            provision_boot(&mut state);
+            // Чиним «осиротевший» системный прокси (остался от выгруженного VPN).
+            let healed = heal_orphan_proxy();
+            let webview_data = state.data.join("webview");
+            let global = Global {
+                state: Mutex::new(state),
+                busy: AtomicBool::new(false),
+                testing: Mutex::new(tester::TestProgress::default()),
+                telegram: telegram::TgState::default(),
+                watchdog: std::sync::Arc::new(watchdog::WatchdogState::default()),
+            };
+            app.manage(global);
+            // Автозапуск Telegram-прокси, если включён в настройках.
+            {
+                let g = app.state::<Global>();
+                let (auto, port, tg) = {
+                    let s = st(g.inner());
+                    (s.settings.tg_autostart, s.settings.tg_port, g.inner().telegram.clone())
+                };
+                if auto {
+                    tauri::async_runtime::spawn(async move {
+                        let _ = tg.start(port, None).await;
+                    });
+                }
+            }
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .ok_or("не найдена конфигурация главного окна")?;
+            let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .data_directory(webview_data)
+                .build()?;
+            apply_native_window_icon(&window);
+            let handle = app.handle().clone();
+            spawn_watchers(handle.clone());
+            watchdog::spawn(app.handle().clone(), app.state::<Global>().watchdog.clone());
+            if let Some(proxy) = healed {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(2500));
+                    emit(
+                        &h,
+                        "zgui:toast",
+                        serde_json::json!({
+                            "kind": "ok",
+                            "text": format!("сброшен нерабочий системный прокси {}", proxy)
+                        }),
+                    );
+                });
+            }
+            if uac_declined || second_instance {
+                let h = handle.clone();
+                let text = if second_instance {
+                    "уже запущена другая копия программы — закройте её, иначе настройки могут конфликтовать"
+                } else {
+                    "права администратора не получены — часть функций (запуск стратегий, тесты) недоступна"
+                };
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(2500));
+                    emit(
+                        &h,
+                        "zgui:toast",
+                        serde_json::json!({ "kind": "warn", "text": text }),
+                    );
+                });
+            }
+            let boot = std::env::args().any(|a| a == "--boot");
+            if boot {
+                app.state::<Global>().state.lock().unwrap().boot_pending = true;
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            bootstrap,
+            log_entries,
+            log_write,
+            log_clear,
+            log_dir_open,
+            report_save,
+            set_root,
+            fetch_engine,
+            refresh_catalog,
+            save_profile,
+            delete_profile,
+            start_profile,
+            stop_running,
+            current_status,
+            test_strategies,
+            test_status,
+            test_cache,
+            tg_status,
+            tg_stats,
+            tg_start,
+            tg_stop,
+            tg_check_update,
+            watchdog_status,
+            cancel_test,
+            set_best_strategy,
+            install_service,
+            remove_service,
+            conflict_check,
+            kill_conflicts,
+            vpn_check,
+            net_reset,
+            net_create_restore_point,
+            virtual_adapters,
+            reboot_now,
+            check_updates,
+            apply_updates,
+            engine_check_update,
+            set_settings,
+            set_theme,
+            set_admin_prefs,
+            mark_admin_onboarded,
+            read_log,
+            open_path,
+            open_url,
+            set_boot_app,
+            ack_boot,
+            app_info,
+            relaunch_as_admin,
+            dns_providers,
+            apply_dns,
+            reset_dns,
+            dns_benchmark
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running zgui");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_proxy_port;
+
+    #[test]
+    fn local_proxy_port_detects_only_local() {
+        assert_eq!(local_proxy_port("127.0.0.1:10809"), Some(10809));
+        assert_eq!(local_proxy_port("localhost:8080"), Some(8080));
+        assert_eq!(local_proxy_port("http=127.0.0.1:1080;https=127.0.0.1:1080"), Some(1080));
+        // Внешние/корпоративные прокси не трогаем.
+        assert_eq!(local_proxy_port("proxy.corp.example:3128"), None);
+        assert_eq!(local_proxy_port("10.0.0.1:8080"), None);
+        assert_eq!(local_proxy_port("nonsense"), None);
+    }
+}
+

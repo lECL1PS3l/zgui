@@ -1,0 +1,741 @@
+use crate::config::Profile;
+use std::path::{Path, PathBuf};
+
+const BUILTIN_TEST_DOMAINS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/test-domains-russia.lst"));
+
+#[cfg(test)]
+use std::net::TcpStream;
+#[cfg(test)]
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DomainGroup {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub critical: bool,
+    pub priority: u8,
+}
+
+pub const GROUP_YOUTUBE: DomainGroup = DomainGroup { id: "youtube", label: "YouTube", critical: true, priority: 1 };
+pub const GROUP_YOUTUBE_MUSIC: DomainGroup = DomainGroup { id: "youtube-music", label: "YouTube Music", critical: true, priority: 1 };
+pub const GROUP_DISCORD: DomainGroup = DomainGroup { id: "discord", label: "Discord", critical: true, priority: 1 };
+pub const GROUP_MICROSOFT_XBOX: DomainGroup = DomainGroup { id: "microsoft-xbox", label: "Microsoft / Xbox", critical: false, priority: 2 };
+pub const GROUP_GOOGLE: DomainGroup = DomainGroup { id: "google", label: "Google", critical: false, priority: 2 };
+pub const GROUP_CLOUDFLARE: DomainGroup = DomainGroup { id: "cloudflare", label: "Cloudflare", critical: false, priority: 2 };
+pub const GROUP_OTHER: DomainGroup = DomainGroup { id: "other", label: "Дополнительные домены", critical: false, priority: 3 };
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupResult {
+    pub id: String,
+    pub label: String,
+    pub passed: u32,
+    pub total: u32,
+    pub ok: bool,
+    pub critical: bool,
+    pub priority: u8,
+}
+
+pub fn classify_domain(host: &str) -> DomainGroup {
+    let h = host.to_ascii_lowercase();
+    if h == "music.youtube.com" {
+        return GROUP_YOUTUBE_MUSIC;
+    }
+    if ["youtube.com", "www.youtube.com", "youtu.be", "youtube-nocookie.com", "youtube.googleapis.com", "youtubei.googleapis.com", "googlevideo.com", "ytimg.com", "ytimg.l.google.com", "yt3.googleusercontent.com"].contains(&h.as_str()) || h.ends_with(".youtube.com") {
+        return GROUP_YOUTUBE;
+    }
+    if ["discord.com", "discord.gg", "discord.media", "discordapp.com", "discordapp.net", "discordapp.io", "discordapp.org", "discordstatus.com", "discord.status", "gateway.discord.gg", "dl.discordapp.net", "images.discordapp.net", "status.discordapp.com"].contains(&h.as_str()) || h.ends_with(".discord.com") || h.ends_with(".discordapp.com") {
+        return GROUP_DISCORD;
+    }
+    if ["login.live.com", "account.live.com", "microsoft.com", "www.microsoft.com", "xbox.com", "www.xbox.com", "xboxlive.com", "xboxservices.com"].contains(&h.as_str()) || h.ends_with(".xbox.com") || h.ends_with(".xboxlive.com") || h.ends_with(".xboxservices.com") {
+        return GROUP_MICROSOFT_XBOX;
+    }
+    // Google AI projects are intentionally not part of the Google secondary group.
+    if h.contains("gemini") || h.contains("aistudio") || h.contains("notebooklm") || h.ends_with(".ai.google") || h.contains("labs.google") {
+        return GROUP_OTHER;
+    }
+    if h == "google.com" || h.ends_with(".google.com") || h.ends_with(".googleusercontent.com") || h.ends_with(".googleapis.com") {
+        return GROUP_GOOGLE;
+    }
+    if h == "cloudflare.com" || h.ends_with(".cloudflare.com") || h.ends_with(".cloudflare.net") || h == "cloudflare-dns.com" || h == "one.one.one.one" {
+        return GROUP_CLOUDFLARE;
+    }
+    GROUP_OTHER
+}
+
+#[cfg(test)]
+pub fn critical_group_ok(group: &DomainGroup, passed: u32, total: u32) -> bool {
+    if group.id == GROUP_YOUTUBE_MUSIC.id {
+        return total > 0 && passed > 0;
+    }
+    !group.critical || (total > 0 && passed * 2 >= total)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainResult {
+    pub key: String,
+    pub host: String,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub group_label: Option<String>,
+    pub ok: bool,
+    pub ms: u64,
+    pub detail: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyResult {
+    pub id: String,
+    pub name: String,
+    pub engine: String,
+    pub group: String,
+    pub started: bool,
+    pub score: u32,
+    pub max_score: u32,
+    pub domains: Vec<DomainResult>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<GroupResult>,
+    #[serde(default)]
+    pub critical_ok: bool,
+}
+
+#[derive(serde::Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TestProgress {
+    pub running: bool,
+    pub phase: String,
+    pub current_id: Option<String>,
+    pub current_name: Option<String>,
+    pub index: usize,
+    pub total: usize,
+    pub pct: i32,
+    pub msg: String,
+    pub results: Vec<StrategyResult>,
+    pub best_id: Option<String>,
+    pub best_name: Option<String>,
+    pub done: bool,
+}
+
+/// TCP-connect с таймаутом (используется в юнит-тесте и как быстрый probe).
+#[cfg(test)]
+fn probe_tcp(host: &str, port: u16, timeout: Duration) -> (bool, u64, String) {
+    let start = Instant::now();
+    let addr = match std::net::ToSocketAddrs::to_socket_addrs(&(host, port)) {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None => return (false, 0, "DNS: пусто".into()),
+        },
+        Err(e) => return (false, 0, format!("DNS: {}", e)),
+    };
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(stream) => {
+            let ms = start.elapsed().as_millis() as u64;
+            drop(stream);
+            (true, ms, "подключено".into())
+        }
+        Err(e) => {
+            let ms = start.elapsed().as_millis() as u64;
+            let detail = match e.kind() {
+                std::io::ErrorKind::TimedOut => "таймаут".to_string(),
+                std::io::ErrorKind::ConnectionRefused => "отказ".to_string(),
+                _ => e.to_string(),
+            };
+            (false, ms, detail)
+        }
+    }
+}
+
+/// Отсекает мусорные строки из .lst: `.ua`, IP-адреса, `*.domain`, ведущие/хвостовые точки.
+fn usable_test_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || host.contains('*') || host.contains("..") {
+        return false;
+    }
+    if host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    let has_alpha = host.chars().any(|c| c.is_ascii_alphabetic());
+    let labels: Vec<&str> = host.split('.').collect();
+    has_alpha
+        && labels.len() >= 2
+        && labels
+            .iter()
+            .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+/// Готовит список доменов из geoblock-списка (RAW .lst: по строке на домен).
+/// Разбор одной строки .lst в домен (отбрасывает комментарии, пути и мусор).
+fn parse_rule_line(raw: &str, seen: &mut std::collections::HashSet<String>) -> Option<(String, String)> {
+    let line = raw.trim();
+    if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+        return None;
+    }
+    let host = line
+        .split(['/', ' ', '\t'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if !usable_test_host(&host) {
+        return None;
+    }
+    if !seen.insert(host.clone()) {
+        return None;
+    }
+    let key = host.split('.').next().unwrap_or(&host).to_string();
+    Some((key, host))
+}
+
+/// Обязательные проверки — всегда в тесте. YouTube Music скрыт в UI,
+/// но остаётся жёстким требованием к успешной стратегии.
+pub const REQUIRED_DOMAINS: &[&str] = &[
+    "www.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+    "googlevideo.com",
+    "ytimg.com",
+    "discord.com",
+    "discord.gg",
+    "discordapp.com",
+    "gateway.discord.gg",
+    "login.live.com",
+    "account.live.com",
+    "microsoft.com",
+    "xbox.com",
+    "xboxlive.com",
+    "xboxservices.com",
+    "www.google.com",
+    "google.com",
+    "www.cloudflare.com",
+    "cloudflare.com",
+];
+
+/// Основной тест: обязательные + ручной вшитый список.
+/// Онлайн-геоблок сюда НЕ попадает — для него есть отдельный `load_geoblock_domains`.
+pub fn load_domains_from_lists(_data: &Path, limit: usize) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for host in REQUIRED_DOMAINS {
+        let host = host.to_string();
+        seen.insert(host.clone());
+        out.push((host.split('.').next().unwrap_or(&host).to_string(), host));
+    }
+    if out.len() >= limit {
+        out.truncate(limit);
+        return out;
+    }
+
+    let text = String::from_utf8_lossy(BUILTIN_TEST_DOMAINS);
+    for raw in text.lines() {
+        if let Some(d) = parse_rule_line(raw, &mut seen) {
+            out.push(d);
+            if out.len() >= limit {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Онлайн-списки геоблока — отдельный диагностический тест (лимит задаёт UI).
+pub fn load_geoblock_domains(data: &Path, limit: usize) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let dir = data.join("catalog/geoblock");
+    let files = [
+        "allow-domains-russia-inside.lst",
+        "allow-domains-geoblock.lst",
+        "allow-domains-youtube.lst",
+        "allow-domains-discord.lst",
+        "allow-domains-news.lst",
+        "allow-domains-telegram.lst",
+        "allow-domains-twitter.lst",
+        "allow-domains-meta.lst",
+        "allow-domains-block.lst",
+    ];
+    for f in files {
+        let p = dir.join(f);
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        for raw in text.lines() {
+            if let Some(d) = parse_rule_line(raw, &mut seen) {
+                out.push(d);
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Запоминает, какие стратегии уже тестировались (id → ok).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCache {
+    pub tested_at: Option<String>,
+    pub best_id: Option<String>,
+    pub results: Vec<StrategyResult>,
+}
+
+impl TestCache {
+    pub fn load(data: &Path) -> Self {
+        let p = data.join("tests.json");
+        std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    pub fn save(&self, data: &Path) {
+        let p = data.join("tests.json");
+        if let Ok(s) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+/// Один запуск на стратегию (используется встроенным PS-раннером).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TestStep {
+    pub id: String,
+    pub name: String,
+    pub engine: String,
+    pub group: String,
+    pub exe: String,
+    pub workdir: String,
+    pub args: Vec<String>,
+}
+
+/// Пишет план теста и PowerShell-раннер, который выполнит ВСЕ стратегии
+/// в одном элевированном процессе (один UAC-запрос на весь тест).
+pub fn write_test_runner(
+    data: &Path,
+    steps: &[TestStep],
+    domains: &[(String, String)],
+    baseline: bool,
+) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    let plan_path = data.join("logs/test-plan.json");
+    let out_path = data.join("logs/test-out.json");
+    let baseline_path = data.join("logs/test-baseline.json");
+    let script_path = data.join("logs/test-runner.ps1");
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&baseline_path);
+    // Ступ-маркеры «резкого останова»: флаг + PID раннера + PID активного winws.
+    let stop_flag = data.join("logs/test-stop.flag");
+    let run_pid = data.join("logs/test-runner.pid");
+    let win_pid = data.join("logs/test-current.pid");
+    for f in [&stop_flag, &run_pid, &win_pid] {
+        let _ = std::fs::remove_file(f);
+    }
+
+    let plan = serde_json::json!({
+        "steps": steps,
+        "domains": domains.iter().map(|(k, h)| {
+            let group = classify_domain(h);
+            serde_json::json!({
+                "key": k,
+                "host": h,
+                "group": group.id,
+                "groupLabel": group.label,
+                "critical": group.critical,
+                "priority": group.priority,
+            })
+        }).collect::<Vec<_>>(),
+        "out": out_path.to_string_lossy(),
+        "baselineOut": baseline_path.to_string_lossy(),
+        "baseline": baseline,
+        "pid": run_pid.to_string_lossy(),
+        "winPid": win_pid.to_string_lossy(),
+        "flag": stop_flag.to_string_lossy(),
+    });
+    let plan_json = serde_json::to_string(&plan).map_err(|e| e.to_string())?;
+    crate::runner::write_utf8_bom(&plan_path, plan_json.as_bytes())?;
+
+    let script = format!(
+        r#"{header}
+$ErrorActionPreference = 'Continue'
+$stopRun = $false
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$plan = Get-Content -Raw -Encoding UTF8 -LiteralPath {plan} | ConvertFrom-Json
+$PID | Out-File -LiteralPath $plan.pid -Encoding ascii
+$out = $plan.out
+$errDir = Split-Path -Parent $out
+$all = @()
+$i = 0
+if ($plan.baseline) {{
+  # Baseline probe WITHOUT Zapret: distinguishes "site down / not resolving"
+  # from "blocked but bypassable". Written to a separate file.
+  # All connects start at once, then we wait, so N domains cost ~one timeout, not N of them.
+  $baseChecks = @()
+  foreach ($d in $plan.domains) {{
+    $client = New-Object System.Net.Sockets.TcpClient
+    $baseChecks += [pscustomobject]@{{ host = $d.host; client = $client; task = $client.ConnectAsync($d.host, 443) }}
+  }}
+  $baseOut = @()
+  $bi = 0
+  foreach ($c in $baseChecks) {{
+    $ok = $false
+    try {{ $ok = $c.task.Wait(3000) -and $c.client.Connected }} catch {{ $ok = $false }}
+    $baseOut += [ordered]@{{ host = $c.host; ok = $ok }}
+    $c.client.Close()
+    $bi++
+    if ($bi % 25 -eq 0) {{
+      $state = [ordered]@{{ baseline = [ordered]@{{ done = $bi; total = $baseChecks.Count }}; results = @() }}
+      ($state | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $out -Encoding utf8
+    }}
+  }}
+  ($baseOut | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $plan.baselineOut -Encoding utf8
+}}
+foreach ($step in $plan.steps) {{
+  if (Test-Path -LiteralPath $plan.flag) {{ $stopRun = $true; break }}
+  $i++
+  $res = [ordered]@{{ id = $step.id; name = $step.name; engine = $step.engine; group = $step.group; started = $false; score = 0; maxScore = $plan.domains.Count; domains = @(); groups = @(); criticalOk = $false; error = $null }}
+  $safe = ($step.id -replace '[^A-Za-z0-9._-]', '_')
+  $errFile = Join-Path $errDir ("run-$safe.err.txt")
+  $outFile = Join-Path $errDir ("run-$safe.out.txt")
+  try {{
+    # Start-Process joins string arrays without quoting values containing spaces.
+    # Every path below can contain spaces, so create one correctly quoted command line.
+    $argLine = @($step.args | ForEach-Object {{
+      $a = [string]$_
+      if ($a -match '[\s"]') {{ '"' + $a.Replace('"', '\"') + '"' }} else {{ $a }}
+    }}) -join ' '
+    $p = Start-Process -FilePath $step.exe -WorkingDirectory $step.workdir -WindowStyle Hidden -ArgumentList $argLine -PassThru -RedirectStandardError $errFile -RedirectStandardOutput $outFile
+      $p.Id | Out-File -LiteralPath $plan.winPid -Encoding ascii
+    Start-Sleep -Milliseconds 1800
+    if ($p -and -not $p.HasExited) {{
+      $res.started = $true
+      # Start all DNS/TCP probes together: 100 domains should not mean 100 * 3 seconds.
+      $checks = @()
+      foreach ($d in $plan.domains) {{
+        $client = New-Object System.Net.Sockets.TcpClient
+        $checks += [pscustomobject]@{{ key = $d.key; host = $d.host; client = $client; started = [DateTime]::UtcNow; task = $client.ConnectAsync($d.host, 443) }}
+      }}
+      $doms = @()
+      foreach ($c in $checks) {{
+        $ok = $false; $det = ''; $ms = 0
+        try {{
+          $ok = $c.task.Wait(3000) -and $c.client.Connected
+          $det = if ($ok) {{ 'connected' }} else {{ 'timeout' }}
+        }} catch {{ $det = $_.Exception.Message }}
+        $ms = ([DateTime]::UtcNow - $c.started).TotalMilliseconds
+        $domain = $plan.domains | Where-Object {{ $_.host -eq $c.host }} | Select-Object -First 1
+        $doms += [ordered]@{{ key = $c.key; host = $c.host; group = $domain.group; groupLabel = $domain.groupLabel; ok = $ok; ms = [int]$ms; detail = $det }}
+        $c.client.Close()
+      }}
+      $res.domains = $doms
+      $res.score = @($doms | Where-Object {{ $_.ok }}).Count
+      $groupRows = @()
+      foreach ($group in @($plan.domains | Group-Object group)) {{
+        $items = @($doms | Where-Object {{ $_.group -eq $group.Name }})
+        $passed = @($items | Where-Object {{ $_.ok }}).Count
+        $first = $group.Group | Select-Object -First 1
+        $isCritical = [bool]$first.critical
+        $isMusic = $group.Name -eq 'youtube-music'
+        $okGroup = if ($isMusic) {{ $passed -gt 0 }} else {{ $passed -gt 0 -and ($passed * 2 -ge $items.Count) }}
+        $groupRows += [ordered]@{{ id = $group.Name; label = $first.groupLabel; passed = $passed; total = $items.Count; ok = $okGroup; critical = $isCritical; priority = $first.priority }}
+      }}
+      $res.groups = $groupRows
+      $res.criticalOk = @($groupRows | Where-Object {{ $_.critical -and -not $_.ok }}).Count -eq 0
+      if ($p -and -not $p.HasExited) {{ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }}
+    }} else {{
+      $tail = ''
+      if (Test-Path $errFile) {{ $tail = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue) }}
+      if (-not $tail -and (Test-Path $outFile)) {{ $tail = (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) }}
+      $code = if ($p) {{ $p.ExitCode }} else {{ 'null' }}
+      if (-not $isAdmin) {{
+        $res.error = "ADMIN_REQUIRED: winws needs administrator rights - run the GUI as admin (exit $code) " + $tail
+      }} else {{
+        $res.error = "process exited immediately (exit $code) " + $tail
+      }}
+    }}
+  }} catch {{
+    $res.error = $_.Exception.Message
+  }}
+  Start-Sleep -Milliseconds 400
+  $all += [pscustomobject]$res
+  $state = [ordered]@{{ index = $i; total = $plan.steps.Count; currentId = $step.id; currentName = $step.name; results = $all }}
+  ($state | ConvertTo-Json -Depth 8) | Out-File -LiteralPath $out -Encoding utf8
+}}
+$marker = if ($stopRun) {{ 'STOPPED' }} else {{ 'DONE' }}
+$marker | Out-File -LiteralPath $out -Encoding utf8 -Append
+"#,
+        header = crate::runner::PS_HEADER,
+        plan = crate::runner::ps_quote(&plan_path.to_string_lossy())
+    );
+    crate::runner::write_ps1(&script_path, &script)?;
+    Ok((plan_path, script_path, out_path))
+}
+
+/// Читает базовую пробу (без Zapret): host → был ли доступен напрямую.
+/// Сейчас не участвует в калибровке (недоступные = не прошли ни у одной стратегии),
+/// но полезна для диагностики.
+#[allow(dead_code)]
+pub fn read_baseline(data: &Path) -> Vec<(String, bool)> {
+    let p = data.join("logs/test-baseline.json");
+    let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
+    let text = text.trim_start_matches('\u{feff}').trim();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let host = e["host"].as_str()?.to_string();
+                    let ok = e["ok"].as_bool().unwrap_or(false);
+                    Some((host, ok))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Сохраняет результаты калибровки: обходимые Zapret домены и требующие VPN.
+/// `reachable` — прошли хотя бы у одной стратегии; `vpn_only` — не прошли ни у кого,
+/// но базовая проба (без Zapret) их видела (значит, сам сайт жив).
+pub fn save_reachability(data: &Path, reachable: &[String], vpn_only: &[String]) {
+    let dir = data.join("catalog/geoblock");
+    let _ = std::fs::create_dir_all(&dir);
+    let write = |name: &str, list: &[String]| {
+        let mut sorted: Vec<&String> = list.iter().collect();
+        sorted.sort();
+        sorted.dedup();
+        let body: String = sorted.iter().map(|s| format!("{}\n", s)).collect();
+        let _ = std::fs::write(dir.join(name), body);
+    };
+    write("zapret-reachable.lst", reachable);
+    write("vpn-only.lst", vpn_only);
+}
+
+/// Загружает список ранее откалиброванных «обходимых» доменов (может отсутствовать).
+/// Пока не используется в тесте (фильтруем по `vpn-only`), но нужен для UI/статистики.
+#[allow(dead_code)]
+pub fn load_reachable(data: &Path) -> Vec<String> {
+    let p = data.join("catalog/geoblock/zapret-reachable.lst");
+    let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
+    text.lines()
+        .map(|l| l.trim().to_lowercase())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+/// Загружает список доменов, которым нужен только VPN (недоступны через Zapret).
+/// Используется, чтобы вырезать их из основного теста (не физически из .lst).
+pub fn load_vpn_only(data: &Path) -> Vec<String> {
+    let p = data.join("catalog/geoblock/vpn-only.lst");
+    let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
+    text.lines()
+        .map(|l| l.trim().to_lowercase())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+/// Читает частичный/финальный результат встроенного раннера.
+pub fn read_test_progress(out_path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(out_path).ok()?;
+    let text = text.trim_start_matches('\u{feff}').trim();
+    // Отрезаем хвостовой маркер, если он дописан (DONE или STOPPED).
+    let text = ["\nDONE", "\nSTOPPED"]
+        .iter()
+        .fold(text, |t, m| t.split(m).next().unwrap_or(t).trim());
+    if text.is_empty() || !text.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+/// Группирует профили по типу стратегии для UI.
+pub fn group_of(p: &Profile) -> String {
+    if p.source.as_deref().is_some_and(|s| s.starts_with("preset:")) {
+        "flowseal preset".into()
+    } else {
+        "flowseal bat".into()
+    }
+}
+
+/// Формирует сводку: отсортированные результаты + лучшая стратегия.
+pub fn summarize(results: &[StrategyResult]) -> (Vec<StrategyResult>, Option<String>) {
+    let mut v = results.to_vec();
+    v.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    // первая в отсортированном списке с ненулевым счётом — лучшая (детерминированно)
+    let best = v.iter().find(|r| r.started && r.critical_ok).map(|r| r.id.clone());
+    (v, best)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_picks_best() {
+        let mk = |id: &str, name: &str, score: u32| StrategyResult {
+            id: id.into(),
+            name: name.into(),
+            engine: "flowseal".into(),
+            group: "flowseal bat".into(),
+            started: true,
+            score,
+            max_score: 5,
+            domains: vec![],
+            error: None,
+            groups: vec![],
+            critical_ok: true,
+        };
+        let (v, best) = summarize(&[mk("a", "A", 2), mk("b", "B", 5), mk("c", "C", 5)]);
+        assert_eq!(best.as_deref(), Some("b"));
+        assert_eq!(v[0].score, 5);
+    }
+
+    #[test]
+    fn groups() {
+        let p = Profile {
+            id: "x".into(),
+            name: "x".into(),
+            engine: crate::config::ENGINE_FLOWSEAL.into(),
+            args: vec!["--x".into()],
+            builtin: false,
+            source: Some("general.bat".into()),
+            updated_at: None,
+        };
+        assert_eq!(group_of(&p), "flowseal bat");
+    }
+
+    #[test]
+    fn probe_localhost_ok() {
+        let (ok, _ms, _d) = probe_tcp("localhost", 1, Duration::from_millis(300));
+        assert!(!ok, "порт 1 не должен быть открыт");
+    }
+
+    #[test]
+    fn load_domains_parses() {
+        let tmp = std::env::temp_dir().join(format!("zgui-test-{}", std::process::id()));
+        let dir = tmp.join("catalog/geoblock");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("allow-domains-youtube.lst"),
+            "# comment\nwww.youtube.com/abc\n.googlevideo.com\n.ua\n123.45.67.89\n*.wild.bad\nbad.domain.\ngooglevideo.com\n",
+        )
+        .unwrap();
+        let d = load_domains_from_lists(&tmp, 10);
+        assert!(d.iter().any(|(_, h)| h == "www.youtube.com"));
+        assert!(d.iter().any(|(_, h)| h == "googlevideo.com"));
+        assert!(!d.iter().any(|(_, h)| h.starts_with(".")));
+        assert!(!d.iter().any(|(_, h)| h.contains('*')));
+        assert!(!d.iter().any(|(_, h)| h == "123.45.67.89"), "IP в списке доменов недопустим");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn usable_host_rejects_junk() {
+        assert!(usable_test_host("www.youtube.com"));
+        assert!(usable_test_host("xn--e1afmkfd.xn--p1ai"));
+        assert!(!usable_test_host(".ua"));
+        assert!(!usable_test_host("ua."));
+        assert!(!usable_test_host("192.168.1.1"));
+        assert!(!usable_test_host("*.example.com"));
+        assert!(!usable_test_host("exa mple.com"));
+    }
+
+    #[test]
+    fn builtin_domains_are_available_without_updates() {
+        let tmp = std::env::temp_dir().join(format!("zgui-builtin-domains-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let domains = load_domains_from_lists(&tmp, 500);
+        // Обязательные критичные группы + домены из ручного списка.
+        assert!(domains.iter().any(|(_, host)| host == "music.youtube.com"));
+        assert!(domains.iter().any(|(_, host)| host == "discord.com"));
+        assert!(domains.iter().any(|(_, host)| host == "hdrezka.fm"));
+        assert!(domains.len() >= 100);
+        // Вычищенные категории не должны вернуться (почта/СМИ/.ua).
+        assert!(!domains.iter().any(|(_, host)| host == "10minutemail.com"));
+        assert!(!domains.iter().any(|(_, host)| host.ends_with(".ua")));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn cache_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("zgui-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let c = TestCache {
+            best_id: Some("general".into()),
+            ..Default::default()
+        };
+        c.save(&tmp);
+        let back = TestCache::load(&tmp);
+        assert_eq!(back.best_id.as_deref(), Some("general"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn critical_groups_require_youtube_music() {
+        assert!(critical_group_ok(&GROUP_YOUTUBE, 3, 5));
+        assert!(!critical_group_ok(&GROUP_YOUTUBE_MUSIC, 0, 1));
+        assert!(critical_group_ok(&GROUP_YOUTUBE_MUSIC, 1, 1));
+        assert!(!critical_group_ok(&GROUP_DISCORD, 1, 3));
+    }
+
+    #[test]
+    fn classifies_priority_groups_and_excludes_google_ai() {
+        assert_eq!(classify_domain("music.youtube.com").id, "youtube-music");
+        assert_eq!(classify_domain("discordapp.com").id, "discord");
+        assert_eq!(classify_domain("xboxservices.com").id, "microsoft-xbox");
+        assert_eq!(classify_domain("www.google.com").id, "google");
+        assert_eq!(classify_domain("gemini.google.com").id, "other");
+        assert_eq!(classify_domain("www.cloudflare.com").id, "cloudflare");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runner_script_is_ascii_and_runs() {
+        let tmp = std::env::temp_dir().join(format!("zgui-runner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("logs")).unwrap();
+        let steps = vec![TestStep {
+            id: "t".into(),
+            name: "Тест".into(),
+            engine: "flowseal".into(),
+            group: "g".into(),
+            exe: "C:\\Windows\\System32\\cmd.exe".into(),
+            workdir: "C:\\Windows".into(),
+            // Длинная команда с пробелами остаётся активной дольше проверки
+            // процесса и подтверждает корректное quoting в $argLine.
+            args: vec!["/c".into(), "ping -n 6 127.0.0.1 >nul".into()],
+        }];
+        let domains = vec![("y".to_string(), "www.youtube.com".to_string())];
+        let (_plan, script, out) = write_test_runner(&tmp, &steps, &domains, false).unwrap();
+
+        // Скрипт обязан быть ASCII (BOM допустим) — иначе PS 5.1 ломает кириллицу.
+        let raw = std::fs::read(&script).unwrap();
+        let body = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
+        assert!(body.iter().all(|b| *b < 0x80), "runner должен быть ASCII-only");
+        let script_text = std::str::from_utf8(body).unwrap();
+        assert!(script_text.contains("$argLine"));
+        assert!(script_text.contains("if ($a -match '[\\s\"]')"));
+
+        let status = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(status.success(), "раннер завершился с ошибкой");
+
+        let v = read_test_progress(&out).expect("нет результата раннера");
+        assert_eq!(v["total"].as_u64(), Some(1));
+        let results = v["results"].as_array().unwrap();
+        let r: StrategyResult = serde_json::from_value(results[0].clone()).unwrap();
+        assert!(r.started, "процесс не запустился: {:?}", r.error);
+        assert_eq!(r.score, 1, "счёт должен равняться числу доступных доменов");
+        assert_eq!(r.max_score, 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

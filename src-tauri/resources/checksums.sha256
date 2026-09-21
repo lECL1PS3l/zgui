@@ -1,0 +1,6 @@
+# Хеши вшитых ресурсов (SHA-256) — проверяются scripts/security-check.ps1.
+# Если ресурс обновляется осознанно (новый релиз движка/конфигов) — обновите и хеш,
+# это должно быть видно в истории изменений.
+5eaac9fb2e4b1abd693487452a3ff3f4dfe9578a45f9ddddfa4bc1f5a6bb62d5  engine-flowseal.zip
+04b1824f883daa0121086f6fb7aaa5f039c24a52ddceb6b63b66c85ced8f6706  flowseal-main.zip
+1132ebcf5d6c786d684a6e4f8c7350e1152494123b9249fb49d54c40f2b6d972  test-domains-russia.lst
