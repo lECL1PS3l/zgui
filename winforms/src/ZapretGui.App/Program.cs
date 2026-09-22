@@ -20,6 +20,7 @@ namespace ZapretGui.App
 
             Embedded.EngineZip = ReadResource("ZapretGui.App.assets.engine-flowseal.zip");
             Embedded.SnapshotZip = ReadResource("ZapretGui.App.assets.flowseal-main.zip");
+            Embedded.TgBridgeExe = ReadResource("ZapretGui.App.assets.tg-ws-proxy.exe");
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ZapretGui.App")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b5cfb04da42650b2ee5e5c56a4a2a2297b7bd860")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f164d4abedea37e8003597367428b257152c8133")]
 [assembly: System.Reflection.AssemblyProductAttribute("ZapretGui.App")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ZapretGui.App")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
+# 0. Build the Telegram bridge (embedded as a sub-exe).
+cargo build --manifest-path "$root\..\src-tauri\Cargo.toml" -p tg-ws-proxy-rs --bin zgui-bridge --release
+if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+
 # 1. Build App (pulls in Core via project reference).
 dotnet build "$root\src\ZapretGui.App" -c Release
 if ($LASTEXITCODE -ne 0) { throw "build failed" }

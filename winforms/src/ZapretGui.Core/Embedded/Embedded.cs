@@ -31,6 +31,9 @@ namespace ZapretGui.Core.Embedded
         /// <summary>Байты flowseal-main.zip из ресурсов программы.</summary>
         public static byte[] SnapshotZip;
 
+        /// <summary>Байты встроенного Telegram-моста (tg-ws-proxy.exe) из ресурсов.</summary>
+        public static byte[] TgBridgeExe;
+
         /// <summary>
         /// Распаковывает встроенный релиз движка Flowseal в
         /// &lt;data&gt;/engines/flowseal, если там ещё нет exe. Возвращает путь к
@@ -62,6 +65,28 @@ namespace ZapretGui.Core.Embedded
             }
             NeutralizeAuthorAutoupdate(found);
             return found;
+        }
+
+        /// <summary>
+        /// Распаковывает встроенный Telegram-мост в &lt;data&gt;/telegram, если его
+        /// там ещё нет. Старт моста без этого невозможен (Task 13).
+        /// </summary>
+        public static void EnsureTgBridge(string dataDir)
+        {
+            string exe = Path.Combine(dataDir, "telegram", "tg-ws-proxy.exe");
+            if (File.Exists(exe) || TgBridgeExe == null)
+            {
+                return;
+            }
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(exe));
+                Text.AtomicWrite(exe, TgBridgeExe);
+            }
+            catch (Exception e)
+            {
+                LogRing.Write("err", "embedded", "не удалось распаковать Telegram-мост: " + e.Message);
+            }
         }
 
         /// <summary>

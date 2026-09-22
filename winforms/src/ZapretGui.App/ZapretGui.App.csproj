@@ -21,9 +21,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Архивы движка и каталога из ресурсов Tauri-версии, вшиваются в exe. -->
+    <!-- Ресурсы берутся из Tauri-части, чтобы не дублировать мегабайты в репо. -->
     <EmbeddedResource Include="..\..\..\src-tauri\resources\engine-flowseal.zip" Link="assets\engine-flowseal.zip" />
     <EmbeddedResource Include="..\..\..\src-tauri\resources\flowseal-main.zip" Link="assets\flowseal-main.zip" />
+    <!-- Telegram-мост: собирается cargo, поэтому optional — без него GUI
+         просто сообщает, что мост не найден. -->
+    <EmbeddedResource Include="..\..\..\src-tauri\target\release\zgui-bridge.exe" Link="assets\tg-ws-proxy.exe" Condition="Exists('..\..\..\src-tauri\target\release\zgui-bridge.exe')" />
   </ItemGroup>
 
 </Project>

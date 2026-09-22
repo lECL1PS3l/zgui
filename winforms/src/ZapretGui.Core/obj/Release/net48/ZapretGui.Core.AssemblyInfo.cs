@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("Zapret GUI core logic (port of src-tauri/src)")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+caed44b60bc6a438ce90ed5b96909ee9360188ca")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f164d4abedea37e8003597367428b257152c8133")]
 [assembly: System.Reflection.AssemblyProductAttribute("ZapretGui.Core")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ZapretGui.Core")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
