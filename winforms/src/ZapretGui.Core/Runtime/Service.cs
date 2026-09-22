@@ -62,6 +62,24 @@ namespace ZapretGui.Core.Runtime
             return null;
         }
 
+        /// <summary>Запускает установленную службу zapret (service.rs:286-297).</summary>
+        public static string StartService(string dataDir)
+        {
+            string script = Path.Combine(dataDir, "logs", "svc_start_" + Process.GetCurrentProcess().Id + ".ps1");
+            string body = Uac.PsHeader + "\nnet start " + Engines.ServiceName + " 2>$null | Out-Null\nexit 0";
+            try
+            {
+                Uac.WritePs1(script, body);
+            }
+            catch (Exception e)
+            {
+                return e.Message;
+            }
+            int code = Uac.RunElevatedScript(script);
+            try { File.Delete(script); } catch { }
+            return code == 0 ? null : "запуск службы завершился с кодом " + code;
+        }
+
         /// <summary>Удаляет службу (service.rs:421-433). Возвращает ошибку или null.</summary>
         public static string Remove(string dataDir)
         {

@@ -184,6 +184,71 @@ namespace ZapretGui.Core.Runtime
             return "не удалось запустить процесс — подтверждение прав администратора отклонено или файл недоступен";
         }
 
+        /// <summary>Прибивает несколько процессов одним UAC-запросом (runner.rs:372-387).</summary>
+        public static bool StopPids(IList<uint> pids, string dataDir)
+        {
+            if (pids == null || pids.Count == 0) { return true; }
+            string script = Path.Combine(dataDir, "logs", "kill_multi_" + Process.GetCurrentProcess().Id + ".ps1");
+            var sb = new StringBuilder();
+            sb.AppendLine(PsHeader);
+            foreach (uint id in pids)
+            {
+                sb.Append("taskkill /F /T /PID ").Append(id).Append(" | Out-Null\n");
+            }
+            sb.Append("exit 0\n");
+            try { WritePs1(script, sb.ToString()); }
+            catch { return false; }
+            int code = RunElevatedScript(script);
+            try { File.Delete(script); } catch { }
+            return code == 0;
+        }
+
+        /// <summary>
+        /// Запускает ps1 с UAC-элевацией, НЕ ожидая завершения — для длительного
+        /// теста стратегий (runner.rs:130-149). Возвращает null при успехе, иначе ошибку.
+        /// </summary>
+        public static string SpawnElevatedScript(string script)
+        {
+            string inner = "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"";
+            string cmd = "Start-Process -FilePath 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -ArgumentList @(" +
+                PsQuote(inner) + ") -Verb RunAs -WindowStyle Hidden";
+            try
+            {
+                var info = new ProcessStartInfo("powershell.exe",
+                    Processes.BuildArgs(new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd }))
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (Process.Start(info)) { }
+                return null;
+            }
+            catch (Exception e) { return e.Message; }
+        }
+
+        /// <summary>
+        /// Запускает ps1 напрямую, без UAC — для случая, когда GUI уже повышен
+        /// (runner.rs:156-169). Start-Process -Verb RunAs из повышенного процесса
+        /// может не запустить дочерний процесс, и тест «зависнет» на старте.
+        /// </summary>
+        public static string SpawnScriptDirect(string script)
+        {
+            try
+            {
+                var info = new ProcessStartInfo("powershell.exe",
+                    Processes.BuildArgs(new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script }))
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (Process.Start(info)) { }
+                return null;
+            }
+            catch (Exception e) { return "не удалось запустить скрипт: " + e.Message; }
+        }
+
         /// <summary>Прибивает процесс и его дочерние через элевированный taskkill (runner.rs:185-196).</summary>
         public static bool StopPid(int pid, string dataDir)
         {

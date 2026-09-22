@@ -13,4 +13,9 @@
     <Reference Include="System.IO.Compression" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Ручной список доменов для теста стратегий (tester.rs include_bytes). -->
+    <EmbeddedResource Include="..\..\..\src-tauri\resources\test-domains-russia.lst" Link="resources\test-domains-russia.lst" />
+  </ItemGroup>
+
 </Project>

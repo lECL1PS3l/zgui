@@ -133,6 +133,43 @@ namespace ZapretGui.Core.Runtime
             return true;
         }
 
+        /// <summary>
+        /// Останавливает ВСЁ, что относится к нашему движку: профиль приложения,
+        /// нашу службу и winws, поднятые вне программы (ручной .bat/старая служба)
+        /// (lib.rs:863-892). Без этого второй winws не виден GUI и конфликтует
+        /// с первым — обход «не работает», пока процесс не убьют вручную.
+        /// </summary>
+        public static void StopAllOwn(State state)
+        {
+            Stop(state, true);
+            Service.State(out bool installed, out bool? running);
+            if (installed && running == true)
+            {
+                StopService(state.Data);
+            }
+            if (Conflicts.AnyWinwsRunning())
+            {
+                List<uint> leftovers = Conflicts.OwnEnginePids(state.Data, null);
+                if (leftovers.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder("[");
+                    for (var i = 0; i < leftovers.Count; i++)
+                    {
+                        if (i > 0) { sb.Append(", "); }
+                        sb.Append(leftovers[i]);
+                    }
+                    sb.Append(']');
+                    LogRing.Write("warn", "stop", "останавливаю winws вне программы: " + sb);
+                    Uac.StopPids(leftovers, state.Data);
+                }
+            }
+            if (state.ExternalWinws)
+            {
+                state.ExternalWinws = false;
+                state.Save();
+            }
+        }
+
         /// <summary>Состояние запуска с проверкой живости процесса (lib.rs:1089-1095).</summary>
         public static Config.Runtime CurrentStatus(State state)
         {
