@@ -1,0 +1,10 @@
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.csproj.AssemblyReference.cache
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.GeneratedMSBuildEditorConfig.editorconfig
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.AssemblyInfoInputs.cache
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.AssemblyInfo.cs
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.csproj.CoreCompileInputs.cache
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.sourcelink.json
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\bin\Release\net48\ZapretGui.Core.dll
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\bin\Release\net48\ZapretGui.Core.pdb
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.dll
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.Core\obj\Release\net48\ZapretGui.Core.pdb

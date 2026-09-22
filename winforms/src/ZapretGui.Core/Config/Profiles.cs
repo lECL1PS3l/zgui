@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using ZapretGui.Core.Updater;
 using ZapretGui.Core.Util;
 
 namespace ZapretGui.Core.Config
@@ -174,6 +175,12 @@ namespace ZapretGui.Core.Config
             {
                 state.Updater.Entries.RemoveAll(e =>
                     !string.IsNullOrEmpty(e.Group) && e.Group.StartsWith("zapret2", StringComparison.Ordinal));
+            }
+            // applied.json тоже чистим от записей вырезанного движка (lib.rs:677-682).
+            UpdArchive archive = UpdArchive.Load(state.Data);
+            if (archive.PurgePrefix("zapret2") > 0)
+            {
+                archive.Save(state.Data);
             }
         }
     }
