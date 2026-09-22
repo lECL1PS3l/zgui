@@ -1,0 +1,14 @@
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\bin\Release\net48\ZapretGui.App.exe.config
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\bin\Release\net48\ZapretGui.App.exe
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\bin\Release\net48\ZapretGui.App.pdb
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\bin\Release\net48\ZapretGui.Core.dll
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\bin\Release\net48\ZapretGui.Core.pdb
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.csproj.AssemblyReference.cache
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.GeneratedMSBuildEditorConfig.editorconfig
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.AssemblyInfoInputs.cache
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.AssemblyInfo.cs
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.csproj.CoreCompileInputs.cache
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.sourcelink.json
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGu.18E03EB1.Up2Date
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.exe
+E:\Base\opencode\Z GUI\winforms\src\ZapretGui.App\obj\Release\net48\ZapretGui.App.pdb

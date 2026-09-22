@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <LangVersion>7.3</LangVersion>
+    <WarningLevel>4</WarningLevel>
+    <ErrorReport>prompt</ErrorReport>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>ZapretGui.Core</AssemblyName>
+    <RootNamespace>ZapretGui.Core</RootNamespace>
+    <AssemblyTitle>ZapretGui.Core</AssemblyTitle>
+    <Description>Zapret GUI core logic (port of src-tauri/src)</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+</Project>

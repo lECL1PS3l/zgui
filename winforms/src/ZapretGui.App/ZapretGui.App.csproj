@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>ZapretGui.App</AssemblyName>
+    <RootNamespace>ZapretGui.App</RootNamespace>
+    <AssemblyTitle>ZapretGui.App</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ZapretGui.Core\ZapretGui.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ILRepack" Version="2.0.27" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

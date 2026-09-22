@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "7+mCXv031iE=",
+  "success": true,
+  "projectFilePath": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.App\\ZapretGui.App.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\vinta\\.nuget\\packages\\ilrepack\\2.0.27\\ilrepack.2.0.27.nupkg.sha512"
+  ],
+  "logs": []
+}
