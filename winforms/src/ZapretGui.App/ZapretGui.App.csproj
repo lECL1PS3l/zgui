@@ -20,4 +20,10 @@
     <PackageReference Include="ILRepack" Version="2.0.27" PrivateAssets="all" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Архивы движка и каталога из ресурсов Tauri-версии, вшиваются в exe. -->
+    <EmbeddedResource Include="..\..\..\src-tauri\resources\engine-flowseal.zip" Link="assets\engine-flowseal.zip" />
+    <EmbeddedResource Include="..\..\..\src-tauri\resources\flowseal-main.zip" Link="assets\flowseal-main.zip" />
+  </ItemGroup>
+
 </Project>

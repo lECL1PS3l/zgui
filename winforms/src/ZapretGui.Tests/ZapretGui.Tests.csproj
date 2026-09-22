@@ -20,4 +20,18 @@
     <ProjectReference Include="..\ZapretGui.Core\ZapretGui.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Reference Include="System.IO.Compression" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Реальные архивы из ресурсов Tauri-версии, копируются в выходной каталог тестов. -->
+    <None Include="..\..\..\src-tauri\resources\engine-flowseal.zip" Link="assets\engine-flowseal.zip">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\..\src-tauri\resources\flowseal-main.zip" Link="assets\flowseal-main.zip">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

@@ -1,5 +1,8 @@
 using System;
+using System.IO;
+using System.Reflection;
 using System.Windows.Forms;
+using ZapretGui.Core.Embedded;
 
 namespace ZapretGui.App
 {
@@ -15,10 +18,31 @@ namespace ZapretGui.App
                 BootPending = true;
             }
 
+            Embedded.EngineZip = ReadResource("ZapretGui.App.assets.engine-flowseal.zip");
+            Embedded.SnapshotZip = ReadResource("ZapretGui.App.assets.flowseal-main.zip");
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm());
             return 0;
+        }
+
+        private static byte[] ReadResource(string name)
+        {
+            var asm = Assembly.GetExecutingAssembly();
+            using (var s = asm.GetManifestResourceStream(name))
+            {
+                if (s == null) { return null; }
+                var buf = new byte[s.Length];
+                var read = 0;
+                while (read < buf.Length)
+                {
+                    var n = s.Read(buf, read, buf.Length - read);
+                    if (n <= 0) { break; }
+                    read += n;
+                }
+                return buf;
+            }
         }
 
         // Порт boot_pending из AppState (lib.rs:2864): выставляется до показа окна,
