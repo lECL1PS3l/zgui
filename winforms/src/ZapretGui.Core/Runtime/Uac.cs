@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using ZapretGui.Core.Util;
 
 namespace ZapretGui.Core.Runtime
 {
@@ -50,6 +53,153 @@ namespace ZapretGui.Core.Runtime
                 finally { Marshal.FreeHGlobal(sid); }
             }
             finally { CloseHandle(token); }
+        }
+
+        /// <summary>Экранирует аргумент для PowerShell: обрамляет кавычками (runner.rs:31-44).</summary>
+        public static string PsQuote(string arg)
+        {
+            var sb = new StringBuilder((arg ?? string.Empty).Length + 2);
+            sb.Append('"');
+            foreach (var c in arg ?? string.Empty)
+            {
+                if (c == '"') { sb.Append("`\""); }
+                else if (c == '`') { sb.Append("``"); }
+                else if (c == '$') { sb.Append("`$"); }
+                else { sb.Append(c); }
+            }
+            sb.Append('"');
+            return sb.ToString();
+        }
+
+        /// <summary>Формирует -ArgumentList @('a','b') для Start-Process (runner.rs:47-51).</summary>
+        public static string PsArgList(IList<string> args)
+        {
+            var parts = new string[args.Count];
+            for (var i = 0; i < args.Count; i++)
+            {
+                parts[i] = PsQuote(args[i]);
+            }
+            return string.Join(",", parts);
+        }
+
+        /// <summary>
+        /// Запускает PowerShell и ждёт завершения: при успехе возвращает stdout,
+        /// при ошибке — код и stderr (runner.rs:54-68).
+        /// </summary>
+        public static string RunPowerShell(string[] args, out int exitCode, out string stderr)
+        {
+            var full = new string[args.Length + 3];
+            full[0] = "-NoProfile";
+            full[1] = "-ExecutionPolicy";
+            full[2] = "Bypass";
+            args.CopyTo(full, 3);
+            string stdout;
+            Processes.RunOutputHidden("powershell.exe", full, out exitCode, out stdout, out stderr);
+            return stdout.Trim();
+        }
+
+        /// <summary>
+        /// Запускает ps1-скрипт с UAC-элевацией и ждёт его завершения
+        /// (runner.rs:97-118). Возвращает код завершения.
+        /// </summary>
+        public static int RunElevatedScript(string script)
+        {
+            string inner = "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"";
+            string cmd = "$ErrorActionPreference = 'Stop'; try { $p = Start-Process -FilePath " +
+                "'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -ArgumentList @(" +
+                PsQuote(inner) + ") -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode } " +
+                "catch { exit 1 }";
+            string stderr;
+            RunPowerShell(new[] { "-Command", cmd }, out int code, out stderr);
+            return code;
+        }
+
+        /// <summary>
+        /// Пишет launcher-скрипт: поднимает winws через Start-Process -Verb RunAs
+        /// и оставляет pid-файл (runner.rs:120-144). Каталог для скрипта — рядом
+        /// с pid-файлом, расширение .ps1.
+        /// </summary>
+        public static string WriteLauncher(string exe, string wd, string[] args, string pidFile)
+        {
+            string scriptPath = Path.ChangeExtension(pidFile, ".ps1");
+            string body = PsHeader + "\n" +
+                "$pidFile = " + PsQuote(pidFile) + "\n" +
+                "try {\n" +
+                "  $argsRaw = @(" + PsArgList(args) + ")\n" +
+                "  # Start-Process flattens arrays without preserving quotes around paths with spaces.\n" +
+                "  $argLine = @($argsRaw | ForEach-Object { $a = [string]$_; if ($a -match '[\\s\"]') { '\"' + $a.Replace('\"', '\\\"') + '\"' } else { $a } }) -join ' '\n" +
+                "  $p = Start-Process -FilePath " + PsQuote(exe) + " -WorkingDirectory " + PsQuote(wd) +
+                " -WindowStyle Hidden -Verb RunAs -ArgumentList $argLine -PassThru\n" +
+                "  Start-Sleep -Milliseconds 700\n" +
+                "  if ($p -and -not $p.HasExited) { $status = [string]$p.Id } else { $status = 'process exited immediately' }\n" +
+                "} catch {\n" +
+                "  $status = 'LAUNCH_ERROR: ' + $_.Exception.Message\n" +
+                "}\n" +
+                "# Один файл статуса, UTF-8 с BOM: читатель декодирует без «иероглифов».\n" +
+                "Set-Content -LiteralPath $pidFile -Value $status -Encoding UTF8\n" +
+                "if ($status -notmatch '^[0-9]+$') { exit 1 }\n";
+            WritePs1(scriptPath, body);
+            return scriptPath;
+        }
+
+        /// <summary>
+        /// Запускает launcher и ждёт появления pid-файла (runner.rs:146-172).
+        /// Возвращает null при успехе (pid — в out), либо ошибку launcher-а.
+        /// </summary>
+        public static string SpawnAndWaitPid(string script, string pidFile, int timeoutSeconds, out uint pid)
+        {
+            pid = 0;
+            try { File.Delete(pidFile); } catch { }
+            string stderr;
+            RunPowerShell(new[] { "-File", script }, out int code, out stderr);
+            var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+            while (DateTime.UtcNow < deadline)
+            {
+                string text = Text.ReadTextAuto(pidFile);
+                if (text != null)
+                {
+                    string t = text.Trim();
+                    if (uint.TryParse(t, out pid))
+                    {
+                        return null;
+                    }
+                    if (t.Length > 0)
+                    {
+                        // Launcher записал ошибку — не ждём таймаут впустую.
+                        string line = null;
+                        foreach (var l in t.Split('\n'))
+                        {
+                            string trimmed = l.Trim();
+                            if (trimmed.StartsWith("LAUNCH_ERROR", StringComparison.Ordinal))
+                            {
+                                line = trimmed;
+                                break;
+                            }
+                        }
+                        return line ?? t;
+                    }
+                }
+                Thread.Sleep(200);
+            }
+            return "не удалось запустить процесс — подтверждение прав администратора отклонено или файл недоступен";
+        }
+
+        /// <summary>Прибивает процесс и его дочерние через элевированный taskkill (runner.rs:185-196).</summary>
+        public static bool StopPid(int pid, string dataDir)
+        {
+            string script = Path.Combine(dataDir, "logs",
+                "kill_" + Process.GetCurrentProcess().Id + "_" + pid + ".ps1");
+            try
+            {
+                WritePs1(script, PsHeader + "\ntaskkill /F /T /PID " + pid + " | Out-Null\nexit 0");
+            }
+            catch
+            {
+                return false;
+            }
+            int code = RunElevatedScript(script);
+            try { File.Delete(script); } catch { }
+            return code == 0;
         }
 
         /// <summary>

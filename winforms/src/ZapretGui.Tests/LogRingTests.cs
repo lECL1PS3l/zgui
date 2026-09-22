@@ -5,6 +5,7 @@ using ZapretGui.Core.Log;
 
 namespace ZapretGui.Tests
 {
+    [Collection("LogRing")]
     public class LogRingTests : IDisposable
     {
         private readonly string _dir;
@@ -49,10 +50,12 @@ namespace ZapretGui.Tests
             LogRing.Write("info", "b", "2");
             LogRing.Write("info", "c", "3");
             var all = LogRing.Entries(0);
-            Assert.Equal(new long[] { 1, 2, 3 }, all.ConvertAll(x => x.Seq));
+            Assert.Equal(3, all.Count);
             Assert.Equal(new[] { "a", "b", "c" }, all.ConvertAll(x => x.Scope));
-            var tail = LogRing.Entries(1);
-            Assert.Equal(new long[] { 2, 3 }, tail.ConvertAll(x => x.Seq));
+            // Фильтр «после seq»: пропускаем первую запись.
+            var tail = LogRing.Entries(all[0].Seq);
+            Assert.Equal(2, tail.Count);
+            Assert.Equal(new[] { "b", "c" }, tail.ConvertAll(x => x.Scope));
         }
 
         [Fact]

@@ -1,0 +1,130 @@
+{
+  "format": 1,
+  "restore": {
+    "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Tests\\ZapretGui.Tests.csproj": {}
+  },
+  "projects": {
+    "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Core\\ZapretGui.Core.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Core\\ZapretGui.Core.csproj",
+        "projectName": "ZapretGui.Core",
+        "projectPath": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Core\\ZapretGui.Core.csproj",
+        "packagesPath": "C:\\Users\\vinta\\.nuget\\packages\\",
+        "outputPath": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Core\\obj\\",
+        "projectStyle": "PackageReference",
+        "fallbackFolders": [
+          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+        ],
+        "configFilePaths": [
+          "C:\\Users\\vinta\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net48"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net48": {
+            "framework": "net48",
+            "targetAlias": "net48",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.300"
+      },
+      "frameworks": {
+        "net48": {
+          "framework": "net48",
+          "targetAlias": "net48",
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.300\\RuntimeIdentifierGraph.json"
+        }
+      }
+    },
+    "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Tests\\ZapretGui.Tests.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Tests\\ZapretGui.Tests.csproj",
+        "projectName": "ZapretGui.Tests",
+        "projectPath": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Tests\\ZapretGui.Tests.csproj",
+        "packagesPath": "C:\\Users\\vinta\\.nuget\\packages\\",
+        "outputPath": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Tests\\obj\\",
+        "projectStyle": "PackageReference",
+        "fallbackFolders": [
+          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+        ],
+        "configFilePaths": [
+          "C:\\Users\\vinta\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net48"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net48": {
+            "framework": "net48",
+            "targetAlias": "net48",
+            "projectReferences": {
+              "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Core\\ZapretGui.Core.csproj": {
+                "projectPath": "E:\\Base\\opencode\\Z GUI\\winforms\\src\\ZapretGui.Core\\ZapretGui.Core.csproj"
+              }
+            }
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.300"
+      },
+      "frameworks": {
+        "net48": {
+          "framework": "net48",
+          "targetAlias": "net48",
+          "dependencies": {
+            "Microsoft.NET.Test.Sdk": {
+              "target": "Package",
+              "version": "[17.13.0, )"
+            },
+            "xunit": {
+              "target": "Package",
+              "version": "[2.9.3, )"
+            },
+            "xunit.runner.visualstudio": {
+              "include": "Runtime, Build, Native, ContentFiles, Analyzers, BuildTransitive",
+              "suppressParent": "All",
+              "target": "Package",
+              "version": "[2.8.2, )"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.300\\RuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

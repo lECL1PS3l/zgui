@@ -80,6 +80,13 @@ namespace ZapretGui.Core.Runtime
         /// <summary>Выполняет процесс и ждёт его завершения, возвращая вывод (runner.rs run_powershell).</summary>
         public static void RunOutputHidden(string exe, string[] args, out int exitCode, out string output)
         {
+            string stderr;
+            RunOutputHidden(exe, args, out exitCode, out output, out stderr);
+        }
+
+        /// <summary>То же, но возвращает и stderr (run_powershell отдаёт его при ошибке).</summary>
+        public static void RunOutputHidden(string exe, string[] args, out int exitCode, out string stdout, out string stderr)
+        {
             var info = new ProcessStartInfo
             {
                 FileName = exe,
@@ -94,12 +101,11 @@ namespace ZapretGui.Core.Runtime
             var proc = Process.Start(info);
             // stderr читаем в отдельном потоке — иначе переполнение трубы
             // заблокирует дочерний процесс.
-            var stderr = Task.Run(() => proc.StandardError.ReadToEnd());
-            var stdout = proc.StandardOutput.ReadToEnd();
+            var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
+            stdout = proc.StandardOutput.ReadToEnd();
             proc.WaitForExit();
-            var unused = stderr.Result;
+            stderr = stderrTask.Result;
             exitCode = proc.ExitCode;
-            output = stdout;
         }
 
         /// <summary>Жив ли процесс (plan Task 6): PID 0 никогда не жив.</summary>
