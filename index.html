@@ -118,14 +118,14 @@
             <div class="card-head">
               <h3>Тест стратегий <span class="chip">autotest</span></h3>
               <label class="muted inline-check">
-                <input type="checkbox" id="testSelectAll" checked /> выбрать все .bat
+                <input type="checkbox" id="testSelectAll" checked /> выбрать все стратегии
               </label>
               <button class="btn primary small" id="btnRunTest">Запустить тест</button>
               <button class="btn ghost small" id="btnRunGeoblock">Геоблок-тест</button>
               <button class="btn danger small" id="btnStopTest" disabled>Остановить тест</button>
             </div>
             <p class="hint">
-              Каждой стратегии Flowseal соответствует свой <code>*.bat</code>: тест по очереди запускает их,
+              Тест по очереди запускает стратегии всех установленных движков (пресеты и <code>*.bat</code>),
               проверяет контрольные домены (обязательные + ручной список) и выбирает лучшую.
               «Геоблок-тест» прогоняет весь онлайн-список geoblock с базовой пробой и калибрует,
               какие домены обходятся Zapret, а какие требуют VPN.
