@@ -120,6 +120,12 @@ fn is_vpn_process(name: &str) -> bool {
     VPN_PROCESSES.iter().any(|v| base == *v || base.starts_with(&format!("{}-", v)))
 }
 
+/// Запущен ли Telegram Desktop (для предложения прокси-моста при свежем старте).
+/// Имя процесса — Telegram.exe; сравнение по базовому имени без расширения.
+pub fn telegram_running() -> bool {
+    !list_processes(|n| n.to_lowercase().trim_end_matches(".exe") == "telegram").is_empty()
+}
+
 /// Находит запущенные VPN/прокси-клиенты.
 pub fn detect_vpn() -> Vec<ConflictProcess> {
     let mut out: Vec<ConflictProcess> = list_processes(is_vpn_process)

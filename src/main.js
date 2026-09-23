@@ -285,6 +285,7 @@ async function refreshAll(notify = false) {
   try {
     B = await invoke("bootstrap");
     onBootstrap();
+    checkTgOffer();
     if (notify) toast("ok", "статус обновлён");
   } catch (e) {
     toast("err", "bootstrap: " + e);
@@ -1712,6 +1713,34 @@ async function tgToggle() {
   } finally {
     btnBusy($("#btnTgToggle"), false);
     renderTg();
+  }
+}
+
+/// Неблокирующее предложение Telegram-моста: Telegram запущен, VPN нет.
+let tgOfferShown = false;
+async function checkTgOffer() {
+  if (tgOfferShown) return;
+  let offer = false;
+  try { offer = await invoke("tg_offer"); } catch (_) { return; }
+  if (!offer) return;
+  tgOfferShown = true;
+  const ok = await showConfirm({
+    title: "Telegram-прокси",
+    okLabel: "Построить мост",
+    cancelLabel: "Не сейчас",
+    html: `<p>Запущен Telegram, VPN не обнаружен.</p>
+           <p class="sub">Собрать прокси-мост для Telegram? Мессенджер настроится
+             автоматически, трафик пойдёт через встроенный мост.</p>`,
+  });
+  if (!ok) return;
+  try {
+    const port = Number($("#tgPort")?.value) || (B && B.settings && B.settings.tgPort) || 1443;
+    tgState = await invoke("tg_start", { port });
+    renderTg();
+    if (tgState.link) await invoke("open_url", { url: tgState.link });
+    toast("ok", "Telegram-прокси включён");
+  } catch (e) {
+    toast("err", String(e));
   }
 }
 

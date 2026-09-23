@@ -45,6 +45,10 @@ pub struct Global {
     pub op_running: AtomicBool,
     pub telegram: telegram::TgState,
     pub watchdog: std::sync::Arc<watchdog::WatchdogState>,
+    /// Предложение Telegram-моста уже сделано в этой сессии (спрашиваем один раз).
+    pub tg_offer_shown: AtomicBool,
+    /// Время последней проверки Telegram-предложения (throttle, epoch-сек).
+    pub tg_offer_checked: std::sync::atomic::AtomicU64,
 }
 
 impl Global {
@@ -1726,6 +1730,38 @@ fn tg_check_update() -> updater::TgBridgeInfo {
     updater::check_tg_bridge()
 }
 
+/// Стоит ли предложить Telegram-мост: Telegram запущен И VPN/туннели не найдены,
+/// мост ещё не включён и автозапуск не задан. Спрашиваем один раз за сессию
+/// (флаг `tg_offer_shown`); проверку троттлим, чтобы не дёргать tasklist на каждый
+/// опрос bootstrap.
+#[tauri::command(async)]
+fn tg_offer(ga: State<'_, Global>) -> bool {
+    let g = ga.inner();
+    if g.tg_offer_shown.load(Ordering::SeqCst) {
+        return false;
+    }
+    let now = now_ts();
+    let last = g.tg_offer_checked.load(Ordering::SeqCst);
+    if now < last + 30 {
+        return false;
+    }
+    g.tg_offer_checked.store(now, Ordering::SeqCst);
+    if g.telegram.status().running {
+        return false;
+    }
+    if st(g).settings.tg_autostart {
+        return false;
+    }
+    if !svc::telegram_running() {
+        return false;
+    }
+    if !svc::detect_vpn().is_empty() {
+        return false;
+    }
+    g.tg_offer_shown.store(true, Ordering::SeqCst);
+    true
+}
+
 /// Текущее состояние watchdog (обход YouTube/Discord).
 #[tauri::command(async)]
 fn watchdog_status(ga: State<'_, Global>) -> watchdog::WatchdogStatus {
@@ -3063,6 +3099,8 @@ pub fn run() {
                 op_running: AtomicBool::new(false),
                 telegram: telegram::TgState::default(),
                 watchdog: std::sync::Arc::new(watchdog::WatchdogState::default()),
+                tg_offer_shown: AtomicBool::new(false),
+                tg_offer_checked: std::sync::atomic::AtomicU64::new(0),
             };
             app.manage(global);
             // Автозапуск Telegram-прокси, если включён в настройках.
@@ -3151,6 +3189,7 @@ pub fn run() {
             tg_start,
             tg_stop,
             tg_check_update,
+            tg_offer,
             watchdog_status,
             cancel_test,
             apply_best_strategy,
