@@ -305,7 +305,6 @@ fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
     // Владельца считаем до захвата state: current_owner сам берёт этот лок.
     let owner = owner_name(&current_owner(g)).to_string();
     let s = st(g);
-    let fs = root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe");
     let engines = engines_info(&s);
     let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
     let runtime = s.runtime.clone().map(|mut r| {
@@ -313,7 +312,7 @@ fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
         r
     });
     Bootstrap {
-        flowseal: fs,
+        flowseal: root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe"),
         engines,
         settings: s.settings.clone(),
         profiles: s.profiles.clone(),
@@ -2496,7 +2495,20 @@ fn report_save(ga: State<'_, Global>) -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| human::with_context("не удалось создать папку отчёта", &e.to_string()))?;
     let path = dir.join(format!("отчёт-{}.txt", logger::now_stamp()));
 
-    let fs = root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe");
+    // Секция движков: все из реестра (готовность + путь).
+    let engines_lines: String = config::engines()
+        .iter()
+        .map(|def| {
+            let info = root_info(&s.roots, def.id, def.exe);
+            format!(
+                "  {:<12} : {} ({}: {})\r\n",
+                def.label,
+                info.path.unwrap_or_else(|| "не установлен".into()),
+                def.exe,
+                if info.exe.is_some() { "есть" } else { "НЕТ" }
+            )
+        })
+        .collect();
     let runtime = match &s.runtime {
         Some(r) => format!("{} (pid {}, через {})", r.profile_id, r.pid, r.via),
         None => "не запущено".into(),
@@ -2523,8 +2535,7 @@ fn report_save(ga: State<'_, Global>) -> Result<String, String> {
          Папка программы  : {exe}\r\n\
          Папка данных     : {data}\r\n\
          ------------------------------------------------------------\r\n\
-         Движок Flowseal  : {fs_root} (winws.exe: {fs_exe})\r\n\
-         Профилей         : {total}\r\n\
+         Движки:\r\n{engines}         Профилей         : {total}\r\n\
          Сейчас запущено  : {runtime}\r\n\
          Служба Windows   : {service}\r\n\
          ------------------------------------------------------------\r\n\
@@ -2552,8 +2563,7 @@ fn report_save(ga: State<'_, Global>) -> Result<String, String> {
         adm = if rn::is_elevated() { "да" } else { "НЕТ" },
         exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         data = s.data.display(),
-        fs_root = fs.path.clone().unwrap_or_else(|| "не указан".into()),
-        fs_exe = if fs.exe.is_some() { "есть" } else { "НЕТ" },
+        engines = engines_lines,
         total = s.profiles.len(),
         runtime = runtime,
         service = service,
