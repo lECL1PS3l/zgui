@@ -61,30 +61,37 @@ pub fn engine_ids() -> Vec<&'static str> {
     engines().iter().map(|d| d.id).collect()
 }
 
-#[derive(Serialize, Clone, Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Roots {
-    /// Сериализуется как плоский объект `{"flowseal": "..."}` —
-    /// старый state.json (поле flowseal) читается без миграции.
+    /// Сериализуется как ПЛОСКИЙ объект `{"flowseal": "..."}` (см. ручной Serialize).
+    /// Старый state.json (поле flowseal) читается без миграции.
     map: BTreeMap<String, String>,
+}
+
+/// Плоская сериализация: `{"flowseal":"...","zapret2":"..."}`, а НЕ `{"map":{...}}`.
+/// Раньше derive писал обёртку `map`, из-за чего свой же файл не читался обратно
+/// (кастомный Deserialize ждал плоский объект) — настройки терялись каждый запуск.
+impl Serialize for Roots {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.map.serialize(s)
+    }
 }
 
 impl<'de> Deserialize<'de> for Roots {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        // Старый формат: {"flowseal": "C:\\..."} — единственный движок.
-        // Новый: плоский map по id движков. Читаем оба.
-        #[derive(Deserialize)]
-        struct Legacy {
-            #[serde(default)]
-            flowseal: Option<String>,
-        }
         let raw = serde_json::Value::deserialize(d)?;
-        let legacy: Legacy =
-            serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
-        let mut map: BTreeMap<String, String> =
-            serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
-        if let Some(p) = legacy.flowseal {
-            map.entry(ENGINE_FLOWSEAL.to_string()).or_insert(p);
-        }
+        let map: BTreeMap<String, String> = match &raw {
+            // Формат 1.3.0 (баг): {"map": {"flowseal": "..."}} — читаем внутренний объект.
+            serde_json::Value::Object(o) => match o.get("map") {
+                Some(serde_json::Value::Object(inner)) => {
+                    serde_json::from_value(serde_json::Value::Object(inner.clone()))
+                        .map_err(serde::de::Error::custom)?
+                }
+                // Плоский (текущий и легаси {"flowseal": "..."}).
+                _ => serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?,
+            },
+            _ => serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?,
+        };
         Ok(Roots { map })
     }
 }
@@ -548,5 +555,61 @@ mod tests {
         let mut q = p.clone();
         q.engine = "unknown".into();
         assert_eq!(q.exe_name(), "winws.exe");
+    }
+
+    #[test]
+    fn roots_roundtrips_flat_map_and_legacy() {
+        // Плоская сериализация (не {"map":{...}}) — корень бага с потерей настроек.
+        let mut r = Roots::default();
+        r.set(ENGINE_FLOWSEAL, Some("C:\\z".into()));
+        r.set(ENGINE_ZAPRET2, Some("D:\\e2".into()));
+        let js = serde_json::to_string(&r).unwrap();
+        assert!(js.starts_with('{') && js.contains("\"flowseal\"") && !js.contains("\"map\""));
+        let back: Roots = serde_json::from_str(&js).unwrap();
+        assert_eq!(back.path(ENGINE_FLOWSEAL).unwrap(), PathBuf::from("C:\\z"));
+        assert_eq!(back.path(ENGINE_ZAPRET2).unwrap(), PathBuf::from("D:\\e2"));
+
+        // Формат 1.3.0 с обёрткой map — читаем (обратная совместимость).
+        let wrapped = serde_json::json!({"map": {"zapret2": "D:\\e2"}});
+        let r2: Roots = serde_json::from_value(wrapped).unwrap();
+        assert_eq!(r2.path(ENGINE_ZAPRET2).unwrap(), PathBuf::from("D:\\e2"));
+
+        // Легаси плоский {"flowseal": ...}.
+        let leg = serde_json::json!({"flowseal": "C:\\z"});
+        let r3: Roots = serde_json::from_value(leg).unwrap();
+        assert_eq!(r3.path(ENGINE_FLOWSEAL).unwrap(), PathBuf::from("C:\\z"));
+    }
+
+    #[test]
+    fn appstate_roundtrips_settings_and_roots() {
+        // Регресс: раньше AppState писался без возможности прочитать обратно
+        // (roots: {"map":...}) — каждый запуск «state.json повреждён», настройки
+        // сбрасывались. Проверяем полный round-trip.
+        let mut roots = Roots::default();
+        roots.set(ENGINE_FLOWSEAL, Some("C:\\z".into()));
+        let mut settings = Settings::default();
+        settings.admin_onboarded = true;
+        settings.always_admin = true;
+        settings.update_interval_hours = 5;
+        let state = AppState {
+            data: PathBuf::new(), // #[serde(skip)]
+            roots,
+            settings,
+            profiles: vec![],
+            runtime: None,
+            updater: UpdaterCache::default(),
+            service_checked_at: 0,
+            service_running: None,
+            service_strategy: None,
+            boot_pending: false,
+            external_winws: false,
+            engine_version: None,
+        };
+        let js = serde_json::to_string(&state).unwrap();
+        let back: AppState = serde_json::from_str(&js).expect("state.json должен читаться обратно");
+        assert_eq!(back.roots.path(ENGINE_FLOWSEAL).unwrap(), PathBuf::from("C:\\z"));
+        assert!(back.settings.admin_onboarded, "admin_onboarded должен сохраниться");
+        assert!(back.settings.always_admin);
+        assert_eq!(back.settings.update_interval_hours, 5);
     }
 }
