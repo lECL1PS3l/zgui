@@ -724,6 +724,8 @@ let sigProfiles = "";
 let sigUpdates = "";
 let sigSettings = "";
 let sigTestResults = "";
+// Фильтр результатов теста по движку: null — все, иначе id движка.
+let testEngineFilter = null;
 
 /// Табы движков на вкладке «Стратегии»: рендерятся из bootstrap.engines.
 /// Пустой профиль-фильтр «all» + по движку; статус готовности виден прямо в табе.
@@ -984,6 +986,7 @@ function renderTestProgress() {
 function renderTestResults() {
   const box = $("#testResults");
   const bestBox = $("#testBest");
+  const filterBox = $("#testFilter");
   if (!box) return;
   const results = (testState && testState.results && testState.results.length
     ? testState.results
@@ -996,14 +999,56 @@ function renderTestResults() {
     (testState && testState.bestName) || "",
     results.length ? (results[results.length - 1].id || "") + ":" + results[results.length - 1].score : "",
     testState && testState.index,
+    testEngineFilter,
   ]);
   if (sig === sigTestResults) return;
   sigTestResults = sig;
   if (!results.length) {
     box.innerHTML = "";
     bestBox.classList.add("hidden");
+    if (filterBox) filterBox.classList.add("hidden");
     return;
   }
+  // Кнопки-фильтры по движку: «Все» + по одному чипу на каждый движок в результатах.
+  // Если выбранный фильтр исчез (новый прогон), молча сбрасываем на «Все».
+  const enginesInResults = [...new Set(results.map((r) => r.engine).filter(Boolean))];
+  if (testEngineFilter && !enginesInResults.includes(testEngineFilter)) {
+    testEngineFilter = null;
+  }
+  if (filterBox) {
+    if (enginesInResults.length <= 1) {
+      filterBox.classList.add("hidden");
+    } else {
+      filterBox.classList.remove("hidden");
+      filterBox.innerHTML = "";
+      const mk = (label, val, dot) => {
+        const b = document.createElement("button");
+        b.className = "test-filter-chip" + (testEngineFilter === val ? " active" : "");
+        if (dot) {
+          const d = document.createElement("span");
+          d.className = "tab-dot" + (dot === "ready" ? "" : " amber");
+          if (dot === "ready") d.style.background = "var(--green)";
+          b.appendChild(d);
+        }
+        const t = document.createElement("span");
+        t.textContent = label;
+        b.appendChild(t);
+        b.addEventListener("click", () => {
+          testEngineFilter = testEngineFilter === val ? null : val;
+          sigTestResults = "";
+          renderTestResults();
+        });
+        return b;
+      };
+      filterBox.appendChild(mk(`Все (${results.length})`, null, null));
+      for (const eng of enginesInResults) {
+        const n = results.filter((r) => r.engine === eng).length;
+        const ready = ((B && B.engines) || []).find((x) => x.id === eng);
+        filterBox.appendChild(mk(`${engineLabel(eng)} (${n})`, eng, ready ? (ready.ready ? "ready" : "no") : "no"));
+      }
+    }
+  }
+  const shown = testEngineFilter ? results.filter((r) => r.engine === testEngineFilter) : results;
   if (testState && testState.done && testState.bestName) {
     bestBox.classList.remove("hidden");
     bestBox.innerHTML = "";
@@ -1028,7 +1073,7 @@ function renderTestResults() {
   }
 
   box.innerHTML = "";
-  for (const r of results) {
+  for (const r of shown) {
     const row = document.createElement("div");
     row.className = "test-row " + (r.criticalOk ? "ok" : r.started && r.score > 0 ? "part" : "bad");
     const head = document.createElement("div");

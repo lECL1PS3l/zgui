@@ -697,6 +697,15 @@ select option:hover {
 }
 .test-best-title { font-weight: 600; font-size: 14px; color: var(--green); }
 .test-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+/* Фильтр результатов теста по движку. */
+.test-filter { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.test-filter-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--line); background: var(--bg2); color: var(--muted);
+  padding: 4px 10px; border-radius: 999px; cursor: pointer; font-size: 12px;
+}
+.test-filter-chip:hover { color: var(--text); border-color: var(--accent); }
+.test-filter-chip.active { background: var(--panel2); color: var(--accent); border-color: var(--accent); }
 .test-row {
   padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--bg2);
