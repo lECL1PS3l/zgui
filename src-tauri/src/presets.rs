@@ -258,32 +258,20 @@ pub fn prepare_args(args: &[String], root: &Path, tcp: &str, udp: &str) -> Vec<S
 /// ZGUI_PRESETS_OUT в тестах).
 #[allow(dead_code)] // генератор ассета релиза: вызов из теста по ZGUI_PRESETS_OUT
 pub fn preset_set_json(version: &str) -> String {
-    fn esc(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('"', "\\\"")
-    }
-    let items: Vec<String> = builtin_presets()
+    // Собираем через serde_json: ручной эскейп ломался бы на управляющих
+    // символах и нестандартных кавычках в именах/аргументах пресетов.
+    let presets: Vec<serde_json::Value> = builtin_presets()
         .iter()
         .map(|p| {
-            let args = p
-                .args
-                .iter()
-                .map(|a| format!("\"{}\"", esc(a)))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "{{\"id\":\"{}\",\"engine\":\"{}\",\"name\":\"{}\",\"args\":[{}]}}",
-                esc(p.id),
-                esc(p.engine),
-                esc(p.name),
-                args
-            )
+            serde_json::json!({
+                "id": p.id,
+                "engine": p.engine,
+                "name": p.name,
+                "args": p.args,
+            })
         })
         .collect();
-    format!(
-        "{{\"version\":\"{}\",\"presets\":[{}]}}",
-        esc(version),
-        items.join(",")
-    )
+    serde_json::json!({ "version": version, "presets": presets }).to_string()
 }
 
 /// Выгружает актуальный ассет пресетов в указанный путь (для подготовки релиза).

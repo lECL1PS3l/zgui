@@ -2271,82 +2271,83 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
         } else {
             Ok(Vec::new())
         };
-        match file_applied {
-            Ok(mut entries) => {
-                let ga2 = app2.state::<Global>();
-                let mut s = ga2.state.lock().unwrap();
-                let mut preset_note: Option<String> = None;
-                if let Some(set) = &preset_set {
-                    let (updated, added) = up::apply_presets(&data, &mut s.profiles, set);
-                    preset_note = Some(format!("пресеты: обновлено {updated}, добавлено {added}"));
-                    entries.push(crate::config::UpdEntry {
-                        id: up::PRESETS_ENTRY_ID.into(),
-                        group: up::PRESETS_GROUP.into(),
-                        label: format!("presets.json ({updated} обновлено, {added} добавлено)"),
-                        dest: String::new(),
-                        exists: true,
-                        status: "ok".into(),
-                        remote_hash: Some(set.version.clone()),
-                        applied_hash: Some(set.version.clone()),
-                        local_hash: None,
-                        size: 0,
-                        error: None,
-                    });
-                } else if let Some(err) = &preset_err {
-                    entries.push(crate::config::UpdEntry {
-                        id: up::PRESETS_ENTRY_ID.into(),
-                        group: up::PRESETS_GROUP.into(),
-                        label: "presets.json".into(),
-                        dest: String::new(),
-                        exists: false,
-                        status: "err".into(),
-                        remote_hash: None,
-                        applied_hash: None,
-                        local_hash: None,
-                        size: 0,
-                        error: Some(err.clone()),
-                    });
-                }
-                for e in &entries {
-                    if let Some(old) = s.updater.entries.iter_mut().find(|x| x.id == e.id) {
-                        *old = e.clone();
-                    } else {
-                        s.updater.entries.push(e.clone());
-                    }
-                }
-                if entries.iter().any(|e| e.group.starts_with("flowseal strategies") && e.status == "ok") {
-                    reload_bats_from_disk(&mut s);
-                }
-                s.updater.last_check = Some(crate::profiles::now_str());
-                s.save();
-                emit(&app2, "zgui:updates", updater_view(&s));
-                let ok_count = entries.iter().filter(|e| e.status == "ok").count();
-                let failed: Vec<String> = entries
-                    .iter()
-                    .filter(|e| e.status == "err")
-                    .map(|e| format!("{}: {}", e.label, e.error.clone().unwrap_or_default()))
-                    .collect();
-                logger::log(
-                    if failed.is_empty() { "ok" } else { "warn" },
-                    "updates",
-                    &format!(
-                        "обновлено записей: {ok_count}{}{}",
-                        preset_note.map(|n| format!(" ({n})")).unwrap_or_default(),
-                        if failed.is_empty() { String::new() } else { format!(", ошибки: {}", failed.join("; ")) }
-                    ),
-                );
-                emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("обновлено записей: {}", ok_count)}));
-            }
+        // Файловые записи и набор пресетов обрабатываем НЕЗАВИСИМО: падение
+        // файловой части (сеть/лимит GitHub API) не должно терять уже скачанный
+        // набор пресетов — иначе успешное обновление пресетов молча пропадало.
+        let (mut entries, file_err) = match file_applied {
+            Ok(e) => (e, None),
             Err(e) => {
-                logger::log("err", "updates", &format!("применение обновлений не удалось: {e}"));
-                log_updates(&data, &format!("apply error: {}", e));
-                {
-                    let ga2 = app2.state::<Global>();
-                    let s = st(ga2.inner());
-                    emit(&app2, "zgui:updates", updater_view(&s));
-                }
-                emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось применить обновления", &e)}));
+                logger::log("err", "updates", &format!("применение файловых обновлений не удалось: {e}"));
+                log_updates(&data, &format!("apply error: {e}"));
+                (Vec::new(), Some(e))
             }
+        };
+        let ga2 = app2.state::<Global>();
+        let mut s = ga2.state.lock().unwrap();
+        let mut preset_note: Option<String> = None;
+        if let Some(set) = &preset_set {
+            let (updated, added) = up::apply_presets(&data, &mut s.profiles, set);
+            preset_note = Some(format!("пресеты: обновлено {updated}, добавлено {added}"));
+            entries.push(crate::config::UpdEntry {
+                id: up::PRESETS_ENTRY_ID.into(),
+                group: up::PRESETS_GROUP.into(),
+                label: format!("presets.json ({updated} обновлено, {added} добавлено)"),
+                dest: String::new(),
+                exists: true,
+                status: "ok".into(),
+                remote_hash: Some(set.version.clone()),
+                applied_hash: Some(set.version.clone()),
+                local_hash: None,
+                size: 0,
+                error: None,
+            });
+        } else if let Some(err) = &preset_err {
+            entries.push(crate::config::UpdEntry {
+                id: up::PRESETS_ENTRY_ID.into(),
+                group: up::PRESETS_GROUP.into(),
+                label: "presets.json".into(),
+                dest: String::new(),
+                exists: false,
+                status: "err".into(),
+                remote_hash: None,
+                applied_hash: None,
+                local_hash: None,
+                size: 0,
+                error: Some(err.clone()),
+            });
+        }
+        for e in &entries {
+            if let Some(old) = s.updater.entries.iter_mut().find(|x| x.id == e.id) {
+                *old = e.clone();
+            } else {
+                s.updater.entries.push(e.clone());
+            }
+        }
+        if entries.iter().any(|e| e.group.starts_with("flowseal strategies") && e.status == "ok") {
+            reload_bats_from_disk(&mut s);
+        }
+        s.updater.last_check = Some(crate::profiles::now_str());
+        s.save();
+        emit(&app2, "zgui:updates", updater_view(&s));
+        let ok_count = entries.iter().filter(|e| e.status == "ok").count();
+        let failed: Vec<String> = entries
+            .iter()
+            .filter(|e| e.status == "err")
+            .map(|e| format!("{}: {}", e.label, e.error.clone().unwrap_or_default()))
+            .collect();
+        logger::log(
+            if failed.is_empty() && file_err.is_none() { "ok" } else { "warn" },
+            "updates",
+            &format!(
+                "обновлено записей: {ok_count}{}{}",
+                preset_note.map(|n| format!(" ({n})")).unwrap_or_default(),
+                if failed.is_empty() { String::new() } else { format!(", ошибки: {}", failed.join("; ")) }
+            ),
+        );
+        if let Some(e) = &file_err {
+            emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось применить обновления конфигов", e)}));
+        } else {
+            emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("обновлено записей: {}", ok_count)}));
         }
         app2.state::<Global>().set_op_running(false);
         emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "updates"}));

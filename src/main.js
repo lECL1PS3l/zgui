@@ -1734,7 +1734,7 @@ async function checkTgOffer() {
   });
   if (!ok) return;
   try {
-    const port = Number($("#tgPort")?.value) || (B && B.settings && B.settings.tgPort) || 1443;
+    const port = Number($("#tgPort")?.value) || (B && B.settings && B.settings.tg_port) || 1443;
     tgState = await invoke("tg_start", { port });
     renderTg();
     if (tgState.link) await invoke("open_url", { url: tgState.link });

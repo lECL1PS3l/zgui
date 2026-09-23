@@ -388,10 +388,14 @@ pub fn parse_preset_set(bytes: &[u8]) -> Result<RemotePresetSet, String> {
         let id = item["id"].as_str().unwrap_or("").trim().to_string();
         let engine = item["engine"].as_str().unwrap_or("").trim().to_string();
         let name = item["name"].as_str().unwrap_or("").trim().to_string();
-        let args: Vec<String> = item["args"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
+        // args должен быть массивом СТРОК целиком: нестроковый элемент — битый
+        // пресет (усечённая команда опаснее), пропускаем его полностью.
+        let args: Option<Vec<String>> = item["args"].as_array().and_then(|a| {
+            a.iter()
+                .map(|x| x.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()
+        });
+        let Some(args) = args else { continue };
         if id.is_empty() || args.is_empty() {
             continue;
         }
@@ -730,6 +734,10 @@ mod tg_tests {
         // Мусор и пустой набор — ошибки.
         assert!(parse_preset_set(b"not json").is_err());
         assert!(parse_preset_set(br#"{"version":"1","presets":[]}"#).is_err());
+
+        // Нестроковый элемент в args — битый пресет целиком (не усекаем команду).
+        let mixed = r#"[{"id":"z","engine":"goodbyedpi","args":["-9",5]}]"#;
+        assert!(parse_preset_set(mixed.as_bytes()).is_err(), "args с числом должен отвергнуться");
     }
 
     #[test]
