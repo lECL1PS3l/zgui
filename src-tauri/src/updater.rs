@@ -391,7 +391,8 @@ impl UpdArchive {
     pub fn applied(&self, id: &str) -> Option<String> {
         self.map.get(id).cloned()
     }
-    /// Убирает записи групп с указанным префиксом (например, вырезанного движка).
+    /// Убирает записи групп с указанным префиксом.
+    #[allow(dead_code)]
     pub fn purge_prefix(&mut self, prefix: &str) -> usize {
         let before = self.map.len();
         self.map.retain(|k, _| !k.starts_with(prefix));

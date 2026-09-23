@@ -144,8 +144,8 @@ fn collect_warnings(s: &AppState) -> Vec<String> {
         );
     }
 
-    for engine in [ENGINE_FLOWSEAL] {
-        let Some(root) = s.roots.path(engine) else { continue };
+    for def in config::engines() {
+        let Some(root) = s.roots.path(def.id) else { continue };
         let original_bats = std::fs::read_dir(&root)
             .map(|rd| {
                 rd.flatten().any(|e| {
@@ -157,7 +157,7 @@ fn collect_warnings(s: &AppState) -> Vec<String> {
         if original_bats {
             out.push(format!(
                 "В корне {} найдены оригинальные .bat/.lua автора — отключите их автозапуск (службу/планировщик), иначе они будут конфликтовать с нашей программой.",
-                engine
+                def.id
             ));
         }
     }
@@ -168,6 +168,8 @@ fn collect_warnings(s: &AppState) -> Vec<String> {
 #[serde(rename_all = "camelCase")]
 struct Bootstrap {
     flowseal: RootInfo,
+    /// Все движки реестра со статусом готовности (селектор UI).
+    engines: Vec<EngineInfo>,
     settings: Settings,
     profiles: Vec<Profile>,
     runtime: Option<Runtime>,
@@ -183,6 +185,35 @@ struct Bootstrap {
     owner: String,
     data_dir: String,
     warnings: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EngineInfo {
+    id: &'static str,
+    label: &'static str,
+    repo: &'static str,
+    path: Option<String>,
+    exe: Option<String>,
+    ready: bool,
+}
+
+fn engines_info(s: &AppState) -> Vec<EngineInfo> {
+    config::engine_ids()
+        .iter()
+        .map(|id| {
+            let def = config::engine_def(id).unwrap();
+            let info = root_info(&s.roots, def.id, def.exe);
+            EngineInfo {
+                id: def.id,
+                label: def.label,
+                repo: def.repo,
+                path: info.path,
+                exe: info.exe,
+                ready: info.ready,
+            }
+        })
+        .collect()
 }
 
 fn updater_view(s: &AppState) -> UpdaterView {
@@ -275,6 +306,7 @@ fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
     let owner = owner_name(&current_owner(g)).to_string();
     let s = st(g);
     let fs = root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe");
+    let engines = engines_info(&s);
     let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
     let runtime = s.runtime.clone().map(|mut r| {
         r.alive = rn::pid_alive(r.pid);
@@ -282,6 +314,7 @@ fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
     });
     Bootstrap {
         flowseal: fs,
+        engines,
         settings: s.settings.clone(),
         profiles: s.profiles.clone(),
         runtime,
@@ -400,14 +433,12 @@ fn seed_flowseal_configs(root: &std::path::Path, data: &std::path::Path, setting
 #[tauri::command(async)]
 fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String) -> Result<RootInfo, String> {
     let g = ga.inner();
+    let meta = engine_meta(&engine)?;
     let selected = PathBuf::from(&path);
     if !selected.is_dir() {
         return Err("указанная папка не существует".into());
     }
-    if engine != ENGINE_FLOWSEAL {
-        return Err("поддерживается только движок Flowseal (winws)".into());
-    }
-    let exe_name = "winws.exe";
+    let exe_name = meta.exe;
     if crate::config::find_exe(&selected, exe_name).is_none() {
         return Err(format!("в папке не найден {} — укажите корень распакованного движка", exe_name));
     }
@@ -417,8 +448,10 @@ fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String)
         (s.data.clone(), s.settings.clone())
     };
     st(g).roots.set(&engine, Some(root.to_string_lossy().into_owned()));
-    embedded::neutralize_author_autoupdate(&root);
-    seed_flowseal_configs(&root, &data, &settings);
+    if engine == ENGINE_FLOWSEAL {
+        embedded::neutralize_author_autoupdate(&root);
+        seed_flowseal_configs(&root, &data, &settings);
+    }
     let mut s = st(g);
     reload_bats_from_disk(&mut s);
     s.save();
@@ -434,10 +467,9 @@ struct EngineMeta {
 }
 
 fn engine_meta(engine: &str) -> Result<EngineMeta, String> {
-    match engine {
-        ENGINE_FLOWSEAL => Ok(EngineMeta { repo: "Flowseal/zapret-discord-youtube", exe: "winws.exe" }),
-        _ => Err("поддерживается только движок Flowseal (winws)".into()),
-    }
+    crate::config::engine_def(engine)
+        .map(|d| EngineMeta { repo: d.repo, exe: d.exe })
+        .ok_or_else(|| format!("неизвестный движок «{engine}»"))
 }
 
 #[tauri::command]
@@ -468,9 +500,13 @@ fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Opt
                 let ga2 = app2.state::<Global>();
                 let mut s = ga2.state.lock().unwrap();
                 s.roots.set(&engine2, Some(path.clone()));
-                s.engine_version = Some(version.trim_start_matches('v').to_string());
+                if engine2 == ENGINE_FLOWSEAL {
+                    s.engine_version = Some(version.trim_start_matches('v').to_string());
+                }
                 cleanup_stale_engine_dirs(std::path::Path::new(&path));
-                seed_flowseal_configs(std::path::Path::new(&path), &s.data, &s.settings);
+                if engine2 == ENGINE_FLOWSEAL {
+                    seed_flowseal_configs(std::path::Path::new(&path), &s.data, &s.settings);
+                }
                 reload_bats_from_disk(&mut s);
                 s.save();
                 drop(s);
@@ -503,10 +539,29 @@ fn fetch_engine_impl(app: &AppHandle, meta: &EngineMeta, dest: &str, data: &std:
     }
     let rel: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
     let tag_name = rel["tag_name"].as_str().unwrap_or("unknown").to_string();
-    let asset_url = rel["assets"]
-        .as_array()
-        .and_then(|a| a.iter().find(|x| x["name"].as_str().map(|n| n.ends_with(".zip")).unwrap_or(false)))
-        .map(|x| x["browser_download_url"].as_str().unwrap_or("").to_string())
+    // Asset ищем по маске: сначала zip с exe внутри (по exe-имени движка),
+    // затем любой zip; у dpibreak win-артефакт может зваться по архитектуре.
+    let zip_with_exe = |name: &str| -> Option<String> {
+        rel["assets"].as_array().and_then(|a| {
+            a.iter()
+                .find(|x| {
+                    x["name"].as_str().map(|n| n.to_lowercase().contains(name)).unwrap_or(false)
+                        && x["name"].as_str().map(|n| n.ends_with(".zip")).unwrap_or(false)
+                })
+                .map(|x| x["browser_download_url"].as_str().unwrap_or("").to_string())
+        })
+    };
+    let asset_url = zip_with_exe(meta.exe.trim_end_matches(".exe"))
+        .or_else(|| zip_with_exe("win"))
+        .or_else(|| {
+            rel["assets"]
+                .as_array()
+                .and_then(|a| {
+                    a.iter()
+                        .find(|x| x["name"].as_str().map(|n| n.ends_with(".zip")).unwrap_or(false))
+                })
+                .map(|x| x["browser_download_url"].as_str().unwrap_or("").to_string())
+        })
         .unwrap_or_default();
     if asset_url.is_empty() {
         return Err("в релизе не найден zip-архив".into());
@@ -541,9 +596,17 @@ fn fetch_engine_impl(app: &AppHandle, meta: &EngineMeta, dest: &str, data: &std:
     let _ = std::fs::remove_file(&tmp_zip);
 
     let rootdir = PathBuf::from(dest);
-    let actual_root = embedded::engine_root_for_public(&rootdir)
+    // Корень ищем рекурсивно по exe движка; нейтрализация автоапдейта —
+    // только для Flowseal (файл utils/check_updates.enabled есть только там).
+    let actual_root = crate::config::find_exe(&rootdir, meta.exe)
+        .map(|rel| {
+            let p = rootdir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            p.parent().map(|d| d.to_path_buf()).unwrap_or(rootdir)
+        })
         .ok_or_else(|| format!("не найден {} в распакованном архиве", meta.exe))?;
-    embedded::neutralize_author_autoupdate(&actual_root);
+    if engine == ENGINE_FLOWSEAL {
+        embedded::neutralize_author_autoupdate(&actual_root);
+    }
     Ok((actual_root.to_string_lossy().into_owned(), tag_name))
 }
 
@@ -666,54 +729,6 @@ fn ensure_presets(s: &mut AppState) {
     }
 }
 
-/// Миграция после удаления движка zapret2 (winws2): профили winws2 больше не
-/// поддерживаются — убираем их и сбрасываем автостарт, если он указывал на них.
-fn migrate_removed_engine(s: &mut AppState) {
-    let before = s.profiles.len();
-    s.profiles.retain(|p| p.engine == ENGINE_FLOWSEAL);
-    if s.profiles.len() != before {
-        logger::log(
-            "info",
-            "profiles",
-            &format!("удалено профилей вырезанного движка winws2: {}", before - s.profiles.len()),
-        );
-    }
-    if let Some(pid) = s.settings.autostart_profile.clone() {
-        if !s.profiles.iter().any(|p| p.id == pid) {
-            s.settings.autostart_mode = "none".into();
-            s.settings.autostart_profile = None;
-            logger::log("info", "profiles", "автостарт сброшен: профиль удалён");
-        }
-    }
-    // Чистим данные вырезанного движка: движки, конфиги и служебные каталоги.
-    for dir in [
-        s.data.join("engines/zapret2"),
-        s.data.join("catalog/zapret2"),
-        s.data.join("catalog/sources/zapret2"),
-    ] {
-        if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
-            logger::log("info", "profiles", &format!("удалён каталог вырезанного движка: {}", dir.display()));
-        }
-    }
-    // Старый кэш обновлений в state.json: группы zapret2 больше не существуют,
-    // но записи прошлой проверки продолжали показываться на экране «Обновления».
-    let stale = s.updater.entries.len();
-    s.updater.entries.retain(|e| !e.group.starts_with("zapret2"));
-    if s.updater.entries.len() != stale {
-        logger::log(
-            "info",
-            "updates",
-            &format!("удалено записей каталога вырезанного движка: {}", stale - s.updater.entries.len()),
-        );
-    }
-    let mut archive = up::UpdArchive::load(&s.data);
-    let purged = archive.purge_prefix("zapret2");
-    if purged > 0 {
-        archive.save(&s.data);
-        logger::log("info", "updates", &format!("очищено applied.json: {} записей", purged));
-    }
-}
 
 fn is_author_profile(p: &Profile) -> bool {
     p.builtin
@@ -2913,7 +2928,6 @@ pub fn run() {
             embedded::seed_catalog(&state.data)?;
             provision_engines(&mut state);
             ensure_presets(&mut state);
-            migrate_removed_engine(&mut state);
             state.save();
             provision_boot(&mut state);
             // Чиним «осиротевший» системный прокси (остался от выгруженного VPN).
@@ -3050,7 +3064,22 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{autostart_wants_task, local_proxy_port, winws_owner_of, WinwsOwner};
+    use super::{
+        autostart_wants_task, engine_meta, local_proxy_port, winws_owner_of, WinwsOwner,
+    };
+    use crate::config;
+
+    #[test]
+    fn engine_meta_registry() {
+        for def in crate::config::engines() {
+            let id = def.id;
+            let m = engine_meta(&id).unwrap_or_else(|e| panic!("нет meta для {id}: {e}"));
+            let def = config::engine_def(&id).unwrap();
+            assert_eq!(m.repo, def.repo);
+            assert_eq!(m.exe, def.exe);
+        }
+        assert!(engine_meta("nope").is_err());
+    }
 
     #[test]
     fn owner_precedence() {
