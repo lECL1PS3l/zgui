@@ -1,5 +1,6 @@
 use crate::config::{
-    AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL, SERVICE_NAME,
+    AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL, ENGINE_ZAPRET2,
+    SERVICE_NAME,
 };
 use crate::profiles as pf;
 use crate::runner as rn;
@@ -16,6 +17,9 @@ use std::sync::{Mutex, MutexGuard};
 /// `lock()` — безвозвратно до отпускания; `try_lock()` — None, если уже занято.
 /// Правило порядка: всегда берётся ДО `Global::state` (иначе дедлок).
 static OPS: Mutex<()> = Mutex::new(());
+
+/// Репо самого Z GUI: отсюда качаются движки нашей сборки (self_asset).
+const SELF_REPO: &str = "lECL1PS3l/zgui";
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -463,12 +467,18 @@ fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String)
 struct EngineMeta {
     repo: &'static str,
     exe: &'static str,
+    /// Имя zip-ассета в релизе НАШЕГО репо (собранная нами версия движка,
+    /// живёт под Defender). None — движок качается из репо автора.
+    self_asset: Option<&'static str>,
 }
 
 fn engine_meta(engine: &str) -> Result<EngineMeta, String> {
-    crate::config::engine_def(engine)
-        .map(|d| EngineMeta { repo: d.repo, exe: d.exe })
-        .ok_or_else(|| format!("неизвестный движок «{engine}»"))
+    let d = crate::config::engine_def(engine)
+        .ok_or_else(|| format!("неизвестный движок «{engine}»"))?;
+    // zapret2: релизный zip bol-van палятся Defender'ом (детект по содержимому),
+    // поэтому качаем собственную сборку из релиза нашего репо.
+    let self_asset = (engine == ENGINE_ZAPRET2).then_some("engine-zapret2.zip");
+    Ok(EngineMeta { repo: d.repo, exe: d.exe, self_asset })
 }
 
 #[tauri::command]
@@ -531,15 +541,19 @@ fn fetch_engine_impl(app: &AppHandle, meta: &EngineMeta, dest: &str, data: &std:
     let cli = up::client()?;
     let tag = format!("fetch:{}", engine);
 
-    let api_url = format!("https://api.github.com/repos/{}/releases/latest", meta.repo);
+    // Движки с self_asset качаем из релиза нашего репо (наша сборка);
+    // остальные — из репо автора.
+    let repo = meta.self_asset.map(|_| SELF_REPO).unwrap_or(meta.repo);
+    let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
     let resp = cli.get(&api_url).send().map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("GitHub API: HTTP {}", resp.status()));
     }
     let rel: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
     let tag_name = rel["tag_name"].as_str().unwrap_or("unknown").to_string();
-    // Asset ищем по маске: сначала zip с exe внутри (по exe-имени движка),
-    // затем любой zip; у dpibreak win-артефакт может зваться по архитектуре.
+    // Asset ищем по маске: точное имя self_asset, затем zip с exe внутри
+    // (по exe-имени движка), затем любой zip; у dpibreak win-артефакт может
+    // зваться по архитектуре.
     let zip_with_exe = |name: &str| -> Option<String> {
         rel["assets"].as_array().and_then(|a| {
             a.iter()
@@ -550,7 +564,10 @@ fn fetch_engine_impl(app: &AppHandle, meta: &EngineMeta, dest: &str, data: &std:
                 .map(|x| x["browser_download_url"].as_str().unwrap_or("").to_string())
         })
     };
-    let asset_url = zip_with_exe(meta.exe.trim_end_matches(".exe"))
+    let asset_url = meta
+        .self_asset
+        .and_then(|name| zip_with_exe(name.trim_end_matches(".zip")))
+        .or_else(|| zip_with_exe(meta.exe.trim_end_matches(".exe")))
         .or_else(|| zip_with_exe("win"))
         .or_else(|| {
             rel["assets"]
@@ -3112,6 +3129,18 @@ mod tests {
             assert_eq!(m.exe, def.exe);
         }
         assert!(engine_meta("nope").is_err());
+    }
+
+    #[test]
+    fn zapret2_fetched_from_self_repo() {
+        // Релизный zip bol-van сносит Defender — zapret2 качаем нашей сборкой
+        // из релиза нашего репо, asset engine-zapret2.zip.
+        let m = engine_meta("zapret2").unwrap();
+        assert_eq!(m.self_asset, Some("engine-zapret2.zip"));
+        // Остальные движки — из репо автора.
+        assert!(engine_meta("flowseal").unwrap().self_asset.is_none());
+        assert!(engine_meta("goodbyedpi").unwrap().self_asset.is_none());
+        assert!(engine_meta("dpibreak").unwrap().self_asset.is_none());
     }
 
     #[test]

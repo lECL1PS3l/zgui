@@ -2,24 +2,27 @@
 # Кладёт движки в data/engines/<id>/ рядом с exe: они попадают в дистрибутив.
 # Запускается при подготовке релиза, НЕ на машинах пользователей
 # (там движки качает fetch_engine по кнопке в GUI).
+# ВАЖНО: zapret2 НЕ качается отсюда — релизный zip bol-van сносится Defender'ом.
+# Наша сборка (winws2.exe из исходников + lua/ + files/ + cygwin1.dll +
+# WinDivert) уже лежит в data/engines/zapret2/ дистрибутива и обновляется
+# только вручную при выходе новой версии bol-van.
 #
 # Пример: powershell -ExecutionPolicy Bypass -File scripts\fetch-engines.ps1
 #         powershell -ExecutionPolicy Bypass -File scripts\fetch-engines.ps1 -Engines zapret2
 
 param(
-    # По умолчанию — все новые движки; flowseal вшит в exe (embedded.rs) и не качается.
-    [string[]]$Engines = @("zapret2", "goodbyedpi", "dpibreak")
+    # По умолчанию — качаемые движки; flowseal вшит в exe (embedded.rs),
+    # zapret2 — собственная сборка в data/engines.
+    [string[]]$Engines = @("goodbyedpi", "dpibreak")
 )
 
 $ErrorActionPreference = "Stop"
 
 $repos = @{
-    "zapret2"    = "bol-van/zapret2"
     "goodbyedpi" = "ValdikSS/GoodbyeDPI"
     "dpibreak"   = "dilluti0n/dpibreak"
 }
 $exes = @{
-    "zapret2"    = "winws2.exe"
     "goodbyedpi" = "goodbyedpi.exe"
     "dpibreak"   = "dpibreak.exe"
 }
