@@ -458,6 +458,13 @@ foreach ($step in $plan.steps) {{
     $p = Start-Process -FilePath $step.exe -WorkingDirectory $step.workdir -WindowStyle Hidden -ArgumentList $argLine -PassThru -RedirectStandardError $errFile -RedirectStandardOutput $outFile
       $p.Id | Out-File -LiteralPath $plan.winPid -Encoding ascii
     Start-Sleep -Milliseconds 1800
+    # One retry when the process died instantly (Driver load race, transient
+    # WinDivert state). Not retried: a healthy run (probes already measured).
+    if ($p -and $p.HasExited) {{
+      $p = Start-Process -FilePath $step.exe -WorkingDirectory $step.workdir -WindowStyle Hidden -ArgumentList $argLine -PassThru -RedirectStandardError $errFile -RedirectStandardOutput $outFile
+      $p.Id | Out-File -LiteralPath $plan.winPid -Encoding ascii
+      Start-Sleep -Milliseconds 1800
+    }}
     if ($p -and -not $p.HasExited) {{
       $res.started = $true
       # HTTPS probes in batches: connections inside a batch run in parallel,
