@@ -28,6 +28,23 @@ pub fn ensure_embedded_engine(data: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(found))
 }
 
+/// Корень движка <id>: сначала data/engines/<id> с exe (дистрибутив/скачанный),
+/// для flowseal — fallback на вшитый в exe архив (миграция portable-пользователей).
+/// Возвращает None, если движок не установлен (UI покажет «Скачать»).
+pub fn ensure_engine(data: &Path, id: &str) -> Result<Option<PathBuf>, String> {
+    let def = crate::config::engine_def(id)
+        .ok_or_else(|| format!("неизвестный движок: {id}"))?;
+    let root = data.join("engines").join(id);
+    if let Some(found) = crate::config::find_exe(&root, def.exe) {
+        let path = root.join(found.replace('/', std::path::MAIN_SEPARATOR_STR));
+        return Ok(Some(path.parent().map(|p| p.to_path_buf()).unwrap_or(root)));
+    }
+    if id == crate::config::ENGINE_FLOWSEAL {
+        return ensure_embedded_engine(data);
+    }
+    Ok(None)
+}
+
 /// Отключает авторскую авто-проверку обновлений Flowseal: `utils/check_updates.enabled`
 /// заставляет каждый *.bat вызывать `service.bat check_updates`, который открывает
 /// страницу релиза в браузере. Нам это не нужно (обновления ведёт наш GUI).
@@ -305,6 +322,27 @@ mod tests {
 
         assert!(!flag.exists(), "флаг автопроверки должен быть отключён");
         assert!(utils.join("check_updates.enabled.zgui_disabled").exists());
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn ensure_engine_finds_data_root_and_flowseal_fallback() {
+        let data = std::env::temp_dir().join(format!("zgui-ensure-engine-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&data);
+        fs::create_dir_all(&data).unwrap();
+
+        // Пустая data: новых движков нет (None), flowseal разворачивается из вшитого.
+        assert!(ensure_engine(&data, "zapret2").unwrap().is_none());
+        assert!(ensure_engine(&data, "nope").is_err());
+        assert!(ensure_engine(&data, "flowseal").unwrap().is_some());
+
+        // data/engines/zapret2 с exe — корень отдаётся из папки данных.
+        let bin = data.join("engines/zapret2/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("winws2.exe"), b"").unwrap();
+        let root = ensure_engine(&data, "zapret2").unwrap().unwrap();
+        assert!(crate::config::find_exe(&root, "winws2.exe").is_some());
+
         let _ = fs::remove_dir_all(&data);
     }
 }

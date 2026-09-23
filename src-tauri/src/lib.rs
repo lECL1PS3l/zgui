@@ -717,6 +717,20 @@ fn provision_engines(s: &mut AppState) {
             log_updates(&data, &format!("embedded engine {}: {}", engine, e));
         }
     }
+    // Новые движки (zapret2/goodbyedpi/dpibreak): подхватываем развёрнутый
+    // data/engines/<id> (дистрибутив или загрузка fetch_engine), если корень ещё не задан.
+    for id in config::engine_ids() {
+        if id == ENGINE_FLOWSEAL {
+            continue;
+        }
+        if s.roots.path(id).is_some() {
+            continue;
+        }
+        if let Ok(Some(root)) = embedded::ensure_engine(&data, id) {
+            s.roots.set(id, Some(root.to_string_lossy().into_owned()));
+            logger::log("ok", "engine", &format!("движок {id} подхвачен: {}", root.display()));
+        }
+    }
 }
 
 fn ensure_presets(s: &mut AppState) {
