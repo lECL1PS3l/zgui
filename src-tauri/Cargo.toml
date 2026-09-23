@@ -1,7 +1,7 @@
 [package]
 name = "zgui"
-version = "1.2.0"
-description = "Modern GUI for Flowseal zapret-discord-youtube (winws)"
+version = "1.3.0"
+description = "Modern GUI for DPI-bypass engines (flowseal zapret, zapret2, GoodbyeDPI, DPIBreak)"
 edition = "2021"
 
 [lib]
