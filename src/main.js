@@ -462,7 +462,8 @@ async function maybeOfferAdmin() {
     return false;
   }
   const t0 = Date.now();
-  while (Date.now() - t0 < 12000) {
+  // Ждём каталог недолго: модалка не должна подвешивать первый запуск.
+  while (Date.now() - t0 < 3000) {
     const entries = (B && B.updates && B.updates.entries) || [];
     if (entries.length) break;
     await new Promise((r) => setTimeout(r, 400));
@@ -506,7 +507,6 @@ async function askRestartAdmin() {
   const ok = await showConfirm({
     title: "Перезапуск от администратора",
     okLabel: "Перезапустить",
-    delaySec: 3,
     html: `<p>Программа будет перезапущена с правами администратора.</p>
            <p class="sub">Текущее окно закроется, откроется новое. Один раз подтвердите запрос Windows.</p>`,
   });
@@ -547,9 +547,15 @@ function renderRunBar() {
   const owner = (B && B.owner) || "none";
   const rt = (B || {}).runtime || null;
   const st = $("#runState");
+  const opRunning = !!(B && B.opRunning);
   const nameOf = (id) => (B.profiles.find((p) => p.id === id) || {}).name || id || "";
   const svcStrategy = (B.service && B.service.strategy) || null;
-  if (owner === "test") {
+  if (opRunning) {
+    // Идёт долгая операция (обновления, DNS, служба, сброс сети, тест):
+    // старт/стоп профилей запрещён — взаимная блокировка.
+    st.className = "run-state busy";
+    st.textContent = "идёт операция…";
+  } else if (owner === "test") {
     // Идёт прогон тестов: winws управляется тестом — останавливать его тулбаром нельзя.
     st.className = "run-state running";
     st.textContent = "идёт тест стратегий";
@@ -568,7 +574,7 @@ function renderRunBar() {
     st.className = "run-state idle";
     st.textContent = "не запущено";
   }
-  $("#btnStop").disabled = !["app", "service", "external"].includes(owner);
+  $("#btnStop").disabled = opRunning || !["app", "service", "external"].includes(owner);
 }
 
 /// Индикатор watchdog в шапке: «стратегия активна / не отвечает». Активен только
@@ -680,6 +686,7 @@ function renderProfiles() {
     B.profiles,
     B.runtime,
     B.busy,
+    B.opRunning,
     B.settings,
     B.service,
     testCache && testCache.bestId,
@@ -701,6 +708,7 @@ function renderProfiles() {
     const isRun =
       (B.runtime && B.runtime.alive && B.runtime.profileId === p.id) ||
       (B.service && B.service.running === true && B.service.strategy === p.id);
+    const opRunning = !!B.opRunning;
     if (isRun) tile.classList.add("running");
     if (bestId === p.id) tile.classList.add("best");
 
@@ -754,9 +762,9 @@ function renderProfiles() {
     // Кнопки.
     const acts = document.createElement("div");
     acts.className = "profile-actions";
-    acts.appendChild(btn(isRun ? "Остановить" : "Запустить", "primary", async () => {
+    const runBtn = btn(isRun ? "Остановить" : "Запустить", "primary", async () => {
       const doStart = async () => {
-        btnBusy(acts.children[0], true);
+        btnBusy(runBtn, true);
         try {
           if (isRun) {
             await invoke("stop_running");
@@ -767,14 +775,16 @@ function renderProfiles() {
         } catch (e) {
           toast("err", String(e));
         }
-        btnBusy(acts.children[0], false);
+        btnBusy(runBtn, false);
       };
       if (!isRun) {
         const has = await checkConflicts(false, doStart);
         if (has) return;
       }
       await doStart();
-    }));
+    });
+    runBtn.disabled = opRunning;
+    acts.appendChild(runBtn);
     const more = btn("⋯", "ghost", () => openProfileModal(p));
     more.classList.add("profile-more");
     more.title = "Параметры стратегии";
@@ -1003,6 +1013,11 @@ async function runTest(already, mode) {
     return;
   }
   const btn = geoblock ? $("#btnRunGeoblock") : $("#btnRunTest");
+  // Взаимная блокировка: тест не запускается параллельно с другой операцией.
+  if (B && B.opRunning) {
+    toast("warn", "идёт другая операция — дождитесь завершения");
+    return;
+  }
   if (!already) {
     const ok = await showConfirm({
       title: geoblock ? "Геоблок-тест" : "Тест стратегий",
@@ -1863,7 +1878,7 @@ function bindStatic() {
   $("#btnElevateNow").addEventListener("click", askRestartAdmin);
 
   // Первый запуск: предложение «Всегда запускать от администратора».
-  lockBtnWithCountdown($("#adminEnable"), 3);
+  // Таймер обратного отсчёта убран: кнопка доступна сразу (не заставляем ждать).
   $("#adminEnable").addEventListener("click", async () => {
     const btn = $("#adminEnable");
     btnBusy(btn, true);
@@ -2067,6 +2082,11 @@ async function wireEvents() {
     }
   });
   await listen("zgui:watchdog", (ev) => renderWatchdog(ev.payload));
+  // Взаимная блокировка: долгая операция началась/закончилась — обновляем
+  // индикатор и кнопки сразу, не дожидаясь следующего опроса bootstrap.
+  await listen("zgui:op", async () => {
+    await refreshAll();
+  });
 }
 
 initTheme();

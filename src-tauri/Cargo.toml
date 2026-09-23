@@ -30,6 +30,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Controls",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
 ] }
 
 [profile.release]

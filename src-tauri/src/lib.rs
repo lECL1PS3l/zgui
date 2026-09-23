@@ -10,6 +10,12 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
+
+/// Взаимная блокировка долгих операций: запуск/остановка стратегий, тест,
+/// служба, DNS, обновления, сброс сети, восстановление интернета. Захват через
+/// `lock()` — безвозвратно до отпускания; `try_lock()` — None, если уже занято.
+/// Правило порядка: всегда берётся ДО `Global::state` (иначе дедлок).
+static OPS: Mutex<()> = Mutex::new(());
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -30,7 +36,10 @@ mod watchdog;
 pub struct Global {
     pub state: Mutex<AppState>,
     pub busy: AtomicBool,
+    /// Идёт тест стратегий — взаимная блокировка с запуском/остановкой профилей.
     pub testing: Mutex<tester::TestProgress>,
+    /// Идёт долгая операция (обновления, fetch_engine, DNS, net_reset, service).
+    pub op_running: AtomicBool,
     pub telegram: telegram::TgState,
     pub watchdog: std::sync::Arc<watchdog::WatchdogState>,
 }
@@ -42,10 +51,24 @@ impl Global {
     pub fn set_busy(&self, b: bool) {
         self.busy.store(b, Ordering::SeqCst);
     }
+    /// Долгая операция активна (обновления, DNS, служба, сброс сети).
+    /// Фронт блокирует кнопки профилей/теста на это время — взаимная блокировка.
+    pub fn op_running(&self) -> bool {
+        self.op_running.load(Ordering::SeqCst)
+    }
+    pub fn set_op_running(&self, b: bool) {
+        self.op_running.store(b, Ordering::SeqCst);
+    }
 }
 
 fn st(g: &Global) -> MutexGuard<'_, AppState> {
     g.state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Гард взаимной блокировки операций. `None` — уже занято (блокирующая
+/// альтернатива `lock()` не используется: UI не должен ждать десятки секунд).
+fn ops_try() -> Option<std::sync::MutexGuard<'static, ()>> {
+    OPS.try_lock().ok()
 }
 
 fn now_ts() -> u64 {
@@ -152,6 +175,9 @@ struct Bootstrap {
     game_filter_ports: (String, String),
     busy: bool,
     elevated: bool,
+    /// Долгая операция (обновления, DNS, служба, сброс сети): фронт блокирует
+    /// запуск/остановку профилей и тест до её завершения (взаимная блокировка).
+    op_running: bool,
     /// Кто держит обход: none|app|service|test|external (единый источник правды).
     owner: String,
     data_dir: String,
@@ -267,6 +293,7 @@ fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
         game_filter_ports: (tcp, udp),
         busy: g.is_busy(),
         elevated: rn::is_elevated(),
+        op_running: g.op_running(),
         owner,
         data_dir: s.data.to_string_lossy().into_owned(),
         warnings: collect_warnings(&s),
@@ -417,13 +444,17 @@ fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Opt
     let meta = engine_meta(&engine)?;
     let g = ga.inner();
     // Второй запуск поверх первого писал бы в тот же tmp-zip (File::create обрезает
-    // файл) и мог испортить распаковку. busy ставит и авто-проверка конфигов.
+    // файл) и мог испортить распаковку. Взаимная блокировка: тест/стоп/обновления
+    // не могут начаться, пока идёт загрузка.
+    let _op = ops_try().ok_or("уже идёт операция — дождитесь завершения")?;
     if g.busy
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
         return Err("уже идёт загрузка или проверка обновлений — дождитесь завершения".into());
     }
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "fetch"}));
     let dest = dest.unwrap_or_else(|| st(g).data.join("engines").join(&engine).to_string_lossy().into_owned());
     let data_dir = st(g).data.clone();
     let app2 = app.clone();
@@ -454,6 +485,8 @@ fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Opt
             }
         }
         app2.state::<Global>().set_busy(false);
+        app2.state::<Global>().set_op_running(false);
+        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "fetch"}));
     });
     Ok(format!("загрузка {} началась", engine))
 }
@@ -893,7 +926,15 @@ fn stop_all_own(app: &AppHandle, g: &Global) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn stop_running(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
-    stop_all_own(&app, ga.inner())?;
+    let g = ga.inner();
+    // Взаимная блокировка: stop и start/test не пересекаются.
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "stop"}));
+    let result = stop_all_own(&app, g);
+    g.set_op_running(false);
+    emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "stop"}));
+    result?;
     emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"всё остановлено"}));
     Ok(())
 }
@@ -990,6 +1031,8 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     );
     emit(app, "zgui:status", serde_json::json!({"running": true, "pid": pid, "profileId": profile.id}));
     emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Запущена стратегия «{}»", profile.name)}));
+    g.set_op_running(false);
+    emit(app, "zgui:op", serde_json::json!({"running": false, "kind": "start"}));
     Ok(runtime)
 }
 
@@ -998,54 +1041,62 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
 /// обхода), иначе поднимает winws как процесс программы.
 fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     // Во время прогона теста запуск запрещён: do_start/stop_all_own убили бы
-    // winws теста. Лок `testing` берём до `state` — иначе дедлок с test_status.
+    // winws теста. Взаимная блокировка: тест и запуск профиля исключают друг друга.
     let testing = g.testing.lock().unwrap_or_else(|e| e.into_inner()).running;
     if testing || tester::runner_alive(&st(g).data) {
         return Err("идёт тест стратегий — дождитесь окончания".into());
     }
-    // Решаем по факту, а не по записи в state.json: службу могли создать или
-    // удалить извне, и устаревшее состояние повело бы по неверной ветке —
-    // поднялся бы winws как процесс программы рядом со «второй» службой.
-    if !svc::service_state().0 {
-        return do_start(app, g, id);
-    }
-    let (profile, root, args, data) = {
-        let s = st(g);
-        let p = s.profile(id).cloned().ok_or_else(|| "профиль не найден".to_string())?;
-        let root = s
-            .roots
-            .path(&p.engine)
-            .ok_or_else(|| format!("корень «{}» не задан — нажмите «Скачать движок»", p.engine))?;
-        let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
-        (p.clone(), root, pf::apply_game_filter(&p.args, &tcp, &udp), s.data.clone())
+    // Параллельная операция (обновления, DNS, сброс сети, служба): запрещаем
+    // запуск, пока она не завершится — иначе старт/стоп могут пересечься.
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(app, "zgui:op", serde_json::json!({"running": true, "kind": "start"}));
+    let result = if !svc::service_state().0 {
+        do_start(app, g, id)
+    } else {
+        let (profile, root, args, data) = {
+            let s = st(g);
+            let p = s.profile(id).cloned().ok_or_else(|| "профиль не найден".to_string())?;
+            let root = s
+                .roots
+                .path(&p.engine)
+                .ok_or_else(|| format!("корень «{}» не задан — нажмите «Скачать движок»", p.engine))?;
+            let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
+            (p.clone(), root, pf::apply_game_filter(&p.args, &tcp, &udp), s.data.clone())
+        };
+        // Один живой winws: снимаем процесс программы и старую службу перед пересозданием.
+        let _ = stop_all_own(app, g);
+        svc::install_service(&root, &profile, &args, &data).map_err(|e| {
+            logger::log("err", "service", &format!("переключение службы не удалось: {e}"));
+            human::with_context("не удалось переключить службу на эту стратегию", &e)
+        })?;
+        logger::log(
+            "ok",
+            "service",
+            &format!("служба zapret переключена на «{}»", profile.name),
+        );
+        {
+            let mut s = st(g);
+            s.service_running = Some(true);
+            s.service_strategy = Some(profile.id.clone());
+            s.runtime = None;
+            s.save();
+        }
+        emit(app, "zgui:status", serde_json::json!({"running": true, "pid": null, "profileId": profile.id}));
+        emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Служба переключена на «{}»", profile.name)}));
+        g.set_op_running(false);
+        emit(app, "zgui:op", serde_json::json!({"running": false, "kind": "start"}));
+        Ok(Runtime {
+            profile_id: profile.id,
+            pid: 0,
+            started_at: now_ts(),
+            via: "service".into(),
+            alive: true,
+        })
     };
-    // Один живой winws: снимаем процесс программы и старую службу перед пересозданием.
-    let _ = stop_all_own(app, g);
-    svc::install_service(&root, &profile, &args, &data).map_err(|e| {
-        logger::log("err", "service", &format!("переключение службы не удалось: {e}"));
-        human::with_context("не удалось переключить службу на эту стратегию", &e)
-    })?;
-    logger::log(
-        "ok",
-        "service",
-        &format!("служба zapret переключена на «{}»", profile.name),
-    );
-    {
-        let mut s = st(g);
-        s.service_running = Some(true);
-        s.service_strategy = Some(profile.id.clone());
-        s.runtime = None;
-        s.save();
-    }
-    emit(app, "zgui:status", serde_json::json!({"running": true, "pid": null, "profileId": profile.id}));
-    emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Служба переключена на «{}»", profile.name)}));
-    Ok(Runtime {
-        profile_id: profile.id,
-        pid: 0,
-        started_at: now_ts(),
-        via: "service".into(),
-        alive: true,
-    })
+    g.set_op_running(false);
+    emit(app, "zgui:op", serde_json::json!({"running": false, "kind": "start"}));
+    result
 }
 
 #[tauri::command]
@@ -1139,6 +1190,11 @@ fn test_strategies(
             return Err("тест уже выполняется".into());
         }
     }
+    // Взаимная блокировка: тест исключает запуск/остановку профилей и другие
+    // долгие операции — иначе winws теста был бы убит или запущен рядом.
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "test"}));
     let (profiles, data, roots_ok) = {
         let s = st(g);
         let all = s.profiles.clone();
@@ -1502,6 +1558,8 @@ fn test_strategies(
                 "zgui:toast",
                 serde_json::json!({"kind":"info","text": msg}),
             );
+            app2.state::<Global>().set_op_running(false);
+            emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "test"}));
             return;
         }
         if !geoblock {
@@ -1548,6 +1606,8 @@ fn test_strategies(
             "zgui:toast",
             serde_json::json!({"kind":"ok","text": msg}),
         );
+        app2.state::<Global>().set_op_running(false);
+        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "test"}));
     });
     Ok(true)
 }
@@ -1640,6 +1700,9 @@ async fn apply_best_strategy(app: AppHandle, id: String) -> Result<(), String> {
         if !st(g).profiles.iter().any(|p| p.id == id) {
             return Err("профиль не найден".into());
         }
+        let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+        g.set_op_running(true);
+        emit(&app2, "zgui:op", serde_json::json!({"running": true, "kind": "apply"}));
         let data = st(g).data.clone();
         {
             let mut s = st(g);
@@ -1651,7 +1714,14 @@ async fn apply_best_strategy(app: AppHandle, id: String) -> Result<(), String> {
         c.best_id = Some(id.clone());
         c.save(&data);
         sync_autostart(g);
-        start_or_switch(&app2, g, &id)?;
+        // Лок отпускаем ДО запуска: start_or_switch сам берёт OPS —
+        // не-реентерабельный try_lock внутри того же лока всегда падал
+        // «идёт другая операция» на самом себе.
+        drop(_op);
+        g.set_op_running(false);
+        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "apply"}));
+        let r = start_or_switch(&app2, g, &id);
+        r?;
         emit(
             &app2,
             "zgui:toast",
@@ -1742,9 +1812,14 @@ fn vpn_check() -> svc::ConflictReport {
 /// Требует перезагрузку (winsock/int ip reset).
 #[tauri::command(async)]
 fn net_reset(ga: State<'_, Global>) -> Result<netreset::NetResetResult, String> {
-    let data = st(ga.inner()).data.clone();
+    let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    let data = st(g).data.clone();
     logger::log("warn", "netreset", "запущено восстановление сети");
-    match netreset::reset(&data) {
+    let r = netreset::reset(&data);
+    g.set_op_running(false);
+    match r {
         Ok(r) => {
             logger::log("ok", "netreset", "восстановление сети завершено");
             Ok(r)
@@ -1782,12 +1857,17 @@ fn reboot_now() -> Result<(), String> {
 #[tauri::command(async)]
 fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String> {
     let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "kill"}));
     let (data, our_pid) = {
         let s = st(g);
         (s.data.clone(), s.runtime.as_ref().map(|r| r.pid))
     };
     let report = svc::detect_conflicts(&data, our_pid);
     if !report.has_conflicts() {
+        g.set_op_running(false);
+        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "kill"}));
         return Ok(false);
     }
     let app2 = app.clone();
@@ -1809,6 +1889,8 @@ fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String>
             );
         }
         emit(&app2, "zgui:conflict", serde_json::json!({}));
+        app2.state::<Global>().set_op_running(false);
+        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "kill"}));
     });
     Ok(true)
 }
@@ -1818,6 +1900,9 @@ fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String>
 #[tauri::command(async)]
 fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<(), String> {
     let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "service"}));
     let (profile, root, args, data) = {
         let s = st(g);
         let p = s.profile(&id).cloned().ok_or("профиль не найден")?;
@@ -1825,11 +1910,16 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
         let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
         (p.clone(), root, pf::apply_game_filter(&p.args, &tcp, &udp), s.data.clone())
     };
-    svc::install_service(&root, &profile, &args, &data)
+    let r = svc::install_service(&root, &profile, &args, &data)
         .map_err(|e| {
             logger::log("err", "service", &format!("установка службы не удалась: {e}"));
             human::with_context("не удалось установить службу", &e)
-        })?;
+        });
+    if let Err(e) = r {
+        g.set_op_running(false);
+        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
+        return Err(e);
+    }
     logger::log("ok", "service", &format!("служба zapret установлена со стратегией «{}»", profile.name));
     {
         let mut s = st(g);
@@ -1842,6 +1932,8 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
     // Служба — единственный механизм автозапуска: снимаем задачу планировщика,
     // если она была (раньше это был тупик с ошибкой «сначала отключите автозапуск»).
     sync_autostart(g);
+    g.set_op_running(false);
+    emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
     emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"служба zapret установлена и запущена"}));
     Ok(())
 }
@@ -1849,11 +1941,19 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
 #[tauri::command(async)]
 fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
     let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "service"}));
     let data = st(g).data.clone();
-    svc::remove_service(&data).map_err(|e| {
+    let r = svc::remove_service(&data).map_err(|e| {
         logger::log("err", "service", &format!("удаление службы не удалось: {e}"));
         human::with_context("не удалось удалить службу", &e)
-    })?;
+    });
+    if let Err(e) = r {
+        g.set_op_running(false);
+        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
+        return Err(e);
+    }
     logger::log("info", "service", "служба zapret удалена");
     let fallback = {
         let mut s = st(g);
@@ -1871,6 +1971,8 @@ fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
     if fallback {
         sync_autostart(g);
     }
+    g.set_op_running(false);
+    emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
     emit(&app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
     emit(
         &app,
@@ -1948,8 +2050,12 @@ fn engine_check_update(ga: State<'_, Global>) -> EngineUpdateInfo {
 
 #[tauri::command]
 async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String> {
+    let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "updates"}));
     let (data, roots, settings) = {
-        let s = st(ga.inner());
+        let s = st(g);
         (s.data.clone(), s.roots.clone(), s.settings.clone())
     };
     let app2 = app.clone();
@@ -1990,6 +2096,8 @@ async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, St
                 emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось проверить обновления", &e)}));
             }
         }
+        app2.state::<Global>().set_op_running(false);
+        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "updates"}));
     });
     Ok(true)
 }
@@ -2028,8 +2136,12 @@ fn reload_bats_from_disk(s: &mut AppState) {
 
 #[tauri::command]
 async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) -> Result<bool, String> {
+    let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "updates"}));
     let (data, roots, settings) = {
-        let s = st(ga.inner());
+        let s = st(g);
         (s.data.clone(), s.roots.clone(), s.settings.clone())
     };
     let app2 = app.clone();
@@ -2073,6 +2185,8 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
                 emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось применить обновления", &e)}));
             }
         }
+        app2.state::<Global>().set_op_running(false);
+        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "updates"}));
     });
     Ok(true)
 }
@@ -2433,8 +2547,13 @@ fn dns_providers() -> Vec<dns::DnsProvider> {
 
 #[tauri::command(async)]
 fn apply_dns(ga: State<'_, Global>, provider: String, adapter: Option<String>) -> Result<String, String> {
-    let data = st(ga.inner()).data.clone();
-    match dns::apply(&data, &provider, adapter.as_deref()) {
+    let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    let data = st(g).data.clone();
+    let r = dns::apply(&data, &provider, adapter.as_deref());
+    g.set_op_running(false);
+    match r {
         Ok(msg) => {
             logger::log("ok", "dns", &format!("применён DNS {provider}: {msg}"));
             Ok(msg)
@@ -2448,8 +2567,13 @@ fn apply_dns(ga: State<'_, Global>, provider: String, adapter: Option<String>) -
 
 #[tauri::command(async)]
 fn reset_dns(ga: State<'_, Global>, adapter: Option<String>) -> Result<String, String> {
-    let data = st(ga.inner()).data.clone();
-    match dns::reset(&data, adapter.as_deref()) {
+    let g = ga.inner();
+    let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
+    g.set_op_running(true);
+    let data = st(g).data.clone();
+    let r = dns::reset(&data, adapter.as_deref());
+    g.set_op_running(false);
+    match r {
         Ok(msg) => {
             logger::log("info", "dns", "DNS возвращён на автоматический");
             Ok(msg)
@@ -2799,6 +2923,7 @@ pub fn run() {
                 state: Mutex::new(state),
                 busy: AtomicBool::new(false),
                 testing: Mutex::new(tester::TestProgress::default()),
+                op_running: AtomicBool::new(false),
                 telegram: telegram::TgState::default(),
                 watchdog: std::sync::Arc::new(watchdog::WatchdogState::default()),
             };
@@ -2981,4 +3106,3 @@ mod tests {
         assert_eq!(local_proxy_port("nonsense"), None);
     }
 }
-

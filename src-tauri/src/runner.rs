@@ -345,6 +345,23 @@ pub fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
+    // ponytail: OpenProcess дешевле tasklist (спавн процесса ~30 мс каждый
+    // вызов; проверок много: watcher-цикл 2 c, bootstrap, current_owner).
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let ok = unsafe { is_process_alive(handle) };
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
+        return ok;
+    }
+    #[cfg(not(windows))]
+    {
     let out = hidden_command("tasklist.exe")
         .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
         .output();
@@ -355,6 +372,18 @@ pub fn pid_alive(pid: u32) -> bool {
         }
         Err(_) => false,
     }
+    }
+}
+
+/// Выходной код 259 (STILL_ACTIVE) — процесс жив.
+#[cfg(windows)]
+unsafe fn is_process_alive(handle: std::os::windows::io::RawHandle) -> bool {
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+    let mut code: u32 = 0;
+    if unsafe { GetExitCodeProcess(handle, &mut code) } == 0 {
+        return false;
+    }
+    code == 259
 }
 
 /// Прибивает процесс и его дочерние (через элевацию).
