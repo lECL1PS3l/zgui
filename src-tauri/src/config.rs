@@ -1,27 +1,106 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const ENGINE_FLOWSEAL: &str = "flowseal";
+pub const ENGINE_ZAPRET2: &str = "zapret2";
+pub const ENGINE_GOODBYEDPI: &str = "goodbyedpi";
+pub const ENGINE_DPIBREAK: &str = "dpibreak";
 pub const SERVICE_NAME: &str = "zapret";
 
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+/// Описание встроенного движка. Единая точка правды: exe, репозиторий релизов,
+/// человекочитаемое имя. Все проверки «какой движок» идут через реестр.
+pub struct EngineDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub repo: &'static str,
+    pub exe: &'static str,
+}
+
+/// Реестр поддерживаемых движков. Все системные (WinDivert), plug-and-play.
+pub fn engines() -> &'static [EngineDef] {
+    &[
+        EngineDef {
+            id: ENGINE_FLOWSEAL,
+            label: "Flowseal (zapret winws)",
+            repo: "Flowseal/zapret-discord-youtube",
+            exe: "winws.exe",
+        },
+        EngineDef {
+            id: ENGINE_ZAPRET2,
+            label: "zapret2 (winws2)",
+            repo: "bol-van/zapret2",
+            exe: "winws2.exe",
+        },
+        EngineDef {
+            id: ENGINE_GOODBYEDPI,
+            label: "GoodbyeDPI",
+            repo: "ValdikSS/GoodbyeDPI",
+            exe: "goodbyedpi.exe",
+        },
+        EngineDef {
+            id: ENGINE_DPIBREAK,
+            label: "DPIBreak",
+            repo: "dilluti0n/dpibreak",
+            exe: "dpibreak.exe",
+        },
+    ]
+}
+
+pub fn engine_def(id: &str) -> Option<&'static EngineDef> {
+    engines().iter().find(|d| d.id == id)
+}
+
+pub fn engine_ids() -> Vec<&'static str> {
+    engines().iter().map(|d| d.id).collect()
+}
+
+#[derive(Serialize, Clone, Default, Debug)]
 pub struct Roots {
-    pub flowseal: Option<String>,
+    /// Сериализуется как плоский объект `{"flowseal": "..."}` —
+    /// старый state.json (поле flowseal) читается без миграции.
+    map: BTreeMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for Roots {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Старый формат: {"flowseal": "C:\\..."} — единственный движок.
+        // Новый: плоский map по id движков. Читаем оба.
+        #[derive(Deserialize)]
+        struct Legacy {
+            #[serde(default)]
+            flowseal: Option<String>,
+        }
+        let raw = serde_json::Value::deserialize(d)?;
+        let legacy: Legacy =
+            serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
+        let mut map: BTreeMap<String, String> =
+            serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+        if let Some(p) = legacy.flowseal {
+            map.entry(ENGINE_FLOWSEAL.to_string()).or_insert(p);
+        }
+        Ok(Roots { map })
+    }
 }
 
 impl Roots {
     pub fn path(&self, engine: &str) -> Option<PathBuf> {
-        if engine == ENGINE_FLOWSEAL {
-            self.flowseal.as_ref().map(PathBuf::from)
-        } else {
-            None
-        }
+        engine_def(engine)
+            .and_then(|_| self.map.get(engine).map(PathBuf::from))
     }
     pub fn set(&mut self, engine: &str, p: Option<String>) {
-        if engine == ENGINE_FLOWSEAL {
-            self.flowseal = p;
+        if engine_def(engine).is_none() {
+            return;
+        }
+        match p {
+            Some(v) => {
+                self.map.insert(engine.into(), v);
+            }
+            None => {
+                self.map.remove(engine);
+            }
         }
     }
 }
@@ -94,7 +173,7 @@ pub struct Profile {
 
 impl Profile {
     pub fn exe_name(&self) -> &'static str {
-        "winws.exe"
+        engine_def(&self.engine).map(|d| d.exe).unwrap_or("winws.exe")
     }
 }
 
@@ -420,4 +499,50 @@ pub fn find_exe(root: &Path, name: &str) -> Option<String> {
             .ok()
             .map(|r| r.to_string_lossy().replace('\\', "/"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_and_roots_migration() {
+        // Реестр: все четыре движка, exe-имена корректны.
+        let all = engines();
+        assert_eq!(all.len(), 4);
+        assert!(engine_def("zapret2").map(|d| d.exe == "winws2.exe").unwrap_or(false));
+        assert!(engine_def("goodbyedpi").map(|d| d.exe == "goodbyedpi.exe").unwrap_or(false));
+        assert!(engine_def("dpibreak").map(|d| d.exe == "dpibreak.exe").unwrap_or(false));
+        assert!(engine_def("unknown").is_none());
+
+        // Старый state.json: roots {"flowseal": "C:\\z"} → новая map.
+        let legacy = serde_json::json!({"flowseal": "C:\\z"});
+        let roots: Roots = serde_json::from_value(legacy).unwrap();
+        assert_eq!(roots.path("flowseal").unwrap(), PathBuf::from("C:\\z"));
+        assert!(roots.path("zapret2").is_none());
+
+        // set работает для зарегистрированных движков, чужой id игнорируется.
+        let mut r = Roots::default();
+        r.set("zapret2", Some("D:\\e2".into()));
+        r.set("bogus", Some("X".into()));
+        assert_eq!(r.path("zapret2").unwrap(), PathBuf::from("D:\\e2"));
+        assert!(r.path("bogus").is_none());
+        r.set("zapret2", None);
+        assert!(r.path("zapret2").is_none());
+
+        // exe_name через реестр; неизвестный движок — безопасный фоллбек winws.
+        let p = Profile {
+            id: "x".into(),
+            name: "x".into(),
+            engine: "goodbyedpi".into(),
+            args: vec![],
+            builtin: true,
+            source: None,
+            updated_at: None,
+        };
+        assert_eq!(p.exe_name(), "goodbyedpi.exe");
+        let mut q = p.clone();
+        q.engine = "unknown".into();
+        assert_eq!(q.exe_name(), "winws.exe");
+    }
 }

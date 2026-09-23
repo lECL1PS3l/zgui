@@ -46,8 +46,7 @@ pub fn collect_entries(data: &Path, roots: &Roots, _settings: &Settings) -> Resu
     };
 
     // flowseal: списки в live-корень движка
-    if let Some(r) = roots.flowseal.as_ref() {
-        let root = PathBuf::from(r);
+    if let Some(root) = roots.path("flowseal") {
         for f in [
             "list-general.txt",
             "list-google.txt",
