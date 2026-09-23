@@ -137,3 +137,25 @@ Self-review fix (коммит bfac0ac): баг — wd = root/bin у новых �
 - Порядок обновления нашей сборки zapret2: пересборка из исходников (Cygwin+LuaJIT, процесс в Context.md выше) → Compress-Archive "\*" → release\engine-zapret2.zip → gh release upload v1.2.0 --clobber → залить в data/engines дистрибутива.
 
 Релизная заметка: движение fetch_engine("zapret2") у юзеров теперь ходит в наш репо — Defender не сносит (наша сборка не совпадает с сигнатурой bol-van).
+
+## СМС от пользователя (23.09.2026, поздно)
+
+«Можешь без уточнений вести проект к завершению, просто перед релизом остановись и по спорным вопросам спрашивай» + «Доделай действие и остановись, нужно перезагрузить клиент opencode»
+
+## Ответ агента: Фаза 3 выполнена, остановка по просьбе (23.09.2026)
+
+Мандат: вести проект к завершению без вопросов, остановка ТОЛЬКО перед релизом (спорные вопросы — там).
+
+ФАЗА 3 (тестер+автоподбор на все движки) — ЗАКРЫТА, коммиты:
+- a068972: test_strategies (lib.rs:~1248) — по умолчанию (ids пустые) профили ВСЕХ установленных движков (engine_def есть + roots.path есть), явные ids фильтруются по roots с честной ошибкой. tester::group_of → "<preset|bat> · <движок label>". Тест groups дополнен (zapret2 → «preset · zapret2 (winws2)»).
+- cdfc3e2: index.html/main.js — тест-карточка без Flowseal-специфики (flowsealProfiles → все ready-движки, пусто → «скачайте хотя бы один движок», чип движка в результатах через engineLabel, «выбрать все стратегии»).
+- 0e07f15: PS-раннер (tester.rs:~461) — один повтор старта, если процесс мгновенно умер (гонка драйвера WinDivert).
+Скоринг доля успехов + TLS-handshake время уже был (summarize: score → critical → avg_ms). Кэш TestCache уже есть. Кнопка «Применить лучшую» (apply_best_strategy) уже есть. 56/56 тестов.
+
+ПРОДОЛЖИТЬ ОТСЮДА — ФАЗА 4 (OTA-пресеты):
+- presets.json в ассетах релиза v1.2.0 нашего репо (lECL1PS3l/zgui; gh уже залогинен, ассет engine-zapret2.zip залит ранее).
+- Схема [{engine, id, name, args, version}]; updater.rs — новая группа «Пресеты»: сейчас updater работает с файлами на диск (CatEntry url/dest), а пресеты живут в state.json как профили builtin — нужен спец-путь: check по version, apply обновляет builtin-профили (preset:<id>) в state.json, НЕ трогает кастомные. Вшитая таблица presets.rs — фоллбек.
+- Точка интеграции: lib.rs apply_updates (ветка entries → reload_bats при flowseal strategies) + check_updates/updater_view; ensure_presets (lib.rs:~700) сеет по id.
+- Затем ФАЗА 5: Telegram-автопрокид (telegram.exe в процессах + svc::detect_vpn() пуст → один раз за сессию неблокирующее предложение; tg_start/tg_stop/tg_status/telegram.rs готовы; флаг в state типа tg_offer_done).
+- Затем: ФИНАЛ перед релизом (сюда задавать спорные вопросы), сборка npx tauri build, Context.md-цикл.
+Черновик начала Фазы 4: читал updater.rs (check_entry/apply_updates/UpdArchive — применённые хэши, backup, atomic_write) и presets.rs (PresetDef, to_profile). Ничего не менял в них ещё.
