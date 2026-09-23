@@ -303,10 +303,12 @@ pub fn start_service(data_dir: &Path) -> Result<(), String> {
     r.map(|_| ())
 }
 
-/// Гасит чужие процессы и VPN «намертво» (taskkill по PID и по имени, стоп служб).
-/// Свои pid-ы не трогает. Возвращает список имён, по которым выдана команда
-/// завершения (для итогового уведомления в UI).
-pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &Path) -> Result<Vec<String>, String> {
+/// Строит PowerShell-скрипт выгрузки конфликтов и список имён, по которым выдана
+/// команда завершения. `None` — выгружать нечего. Имена процессов приходят из
+/// tasklist (их задаёт внешний exe), поэтому они НЕ подставляются в regex или
+/// командную строку как есть — только массивом с экранированием одинарных кавычек
+/// (иначе имя вида `x'-...` = инъекция в админский скрипт).
+pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -> Option<(String, Vec<String>)> {
     let mut pids: Vec<u32> = report
         .processes
         .iter()
@@ -317,15 +319,12 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
     pids.sort_unstable();
     pids.dedup();
     let foreign_service = report.foreign_service;
-    // VPN-службы (pid = 0, имя вида service:<name>) останавливаем отдельно.
     let vpn_services: Vec<String> = report
         .vpn
         .iter()
         .filter(|p| p.pid == 0)
         .filter_map(|p| p.name.strip_prefix("service:").map(|s| s.to_string()))
         .collect();
-    // Уникальные имена процессов (из pid-записей) — убиваем и по имени: это
-    // ловит все копии и переживает гонку с перезапуском демоном.
     let mut names: Vec<String> = report
         .processes
         .iter()
@@ -337,7 +336,7 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
     names.dedup();
 
     if pids.is_empty() && !foreign_service && vpn_services.is_empty() && names.is_empty() {
-        return Ok(Vec::new());
+        return None;
     }
 
     let mut body = format!("{}\n", crate::runner::PS_HEADER);
@@ -345,24 +344,26 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
     // (например, AmneziaVPN-service возрождает AmneziaVPN-service.exe после taskkill).
     for svc in &vpn_services {
         body.push_str(&format!(
-            "Stop-Service -Name '{svc}' -Force -ErrorAction SilentlyContinue\n\
-             sc.exe stop '{svc}' 2>$null | Out-Null\n"
+            "Stop-Service -Name '{}' -Force -ErrorAction SilentlyContinue\n\
+             sc.exe stop '{}' 2>$null | Out-Null\n",
+            ps_single_quote(svc),
+            ps_single_quote(svc)
         ));
     }
-    // Службы, чей путь ведёт к найденным VPN-процессам (имя службы может
-    // отличаться от имени exe — тогда по списку выше её не остановить).
+    // Службы, чей путь ведёт к найденным VPN-процессам: массив + `-contains`.
     if !names.is_empty() {
-        let stems: Vec<String> = names
+        let arr = names
             .iter()
-            .map(|n| n.trim_end_matches(".exe").to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let pat = stems.join("|");
+            .map(|n| format!("'{}'", ps_single_quote(n.trim_end_matches(".exe").to_lowercase().as_str())))
+            .collect::<Vec<_>>()
+            .join(",");
         body.push_str(&format!(
-            "$pat = '{pat}'\n\
-             Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | \
-               Where-Object {{ $_.PathName -and $_.PathName.ToLower() -match $pat }} | \
-               ForEach-Object {{ Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue; sc.exe stop $_.Name 2>$null | Out-Null; sc.exe delete $_.Name 2>$null | Out-Null }}\n"
+            "$zguiNames = @({arr})\n\
+             Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | ForEach-Object {{ \
+               $leaf = [System.IO.Path]::GetFileNameWithoutExtension((($_.PathName -replace '\"','') -split ' ')[0]); \
+               if ($leaf -and ($zguiNames -contains $leaf.ToLower())) {{ \
+                 Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue; \
+                 sc.exe stop $_.Name 2>$null | Out-Null; sc.exe delete $_.Name 2>$null | Out-Null }} }}\n"
         ));
     }
     if !vpn_services.is_empty() || !names.is_empty() {
@@ -376,15 +377,32 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
             SERVICE_NAME, SERVICE_NAME
         ));
     }
-    // Убиваем по имени (все копии), затем по PID (остатки/деревья).
-    for n in &names {
-        body.push_str(&format!("taskkill /F /T /IM \"{}\" 2>$null | Out-Null\n", n));
+    // Убиваем по имени (все копии) массивом, затем по PID (остатки/деревья).
+    if !names.is_empty() {
+        let arr = names
+            .iter()
+            .map(|n| format!("'{}'", ps_single_quote(n)))
+            .collect::<Vec<_>>()
+            .join(",");
+        body.push_str(&format!(
+            "$zguiKill = @({arr})\n\
+             foreach ($n in $zguiKill) {{ taskkill /F /T /IM $n 2>$null | Out-Null }}\n"
+        ));
     }
     for pid in &pids {
         body.push_str(&format!("taskkill /F /T /PID {} 2>$null | Out-Null\n", pid));
     }
     body.push_str("exit 0\n");
+    Some((body, names))
+}
 
+/// Гасит чужие процессы и VPN «намертво» (taskkill по PID и по имени, стоп служб).
+/// Свои pid-ы не трогает. Возвращает список имён, по которым выдана команда
+/// завершения (для итогового уведомления в UI).
+pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &Path) -> Result<Vec<String>, String> {
+    let Some((body, names)) = build_kill_script(report, our_pid) else {
+        return Ok(Vec::new());
+    };
     let script = data_dir
         .join("logs")
         .join(format!("conflict_kill_{}.ps1", std::process::id()));
@@ -586,6 +604,21 @@ mod tests {
         let c = build_service_cmdline(Path::new("C:\\z"), &p, &p.args);
         assert!(c.contains("winws.exe"));
         assert!(c.contains("\"--filter-tcp=80 --new\""));
+    }
+
+    #[test]
+    fn kill_script_escapes_process_names() {
+        // Имя exe задаёт внешний файл: кавычка в имени не должна ломать
+        // админский PowerShell-скрипт (инъекция).
+        let malicious = "evil'-x.exe".to_string();
+        let report = ConflictReport {
+            vpn: vec![ConflictProcess { pid: 4242, name: malicious.clone(), note: "vpn".into() }],
+            ..Default::default()
+        };
+        let (body, names) = build_kill_script(&report, None).expect("должен быть скрипт");
+        assert_eq!(names, vec![malicious.clone()], "список имён для UI — как есть");
+        assert!(body.contains("evil''-x.exe"), "кавычка в имени должна быть удвоена: {body}");
+        assert!(!body.contains("'evil'-x"), "неэкранированной кавычки быть не должно");
     }
 
     #[test]

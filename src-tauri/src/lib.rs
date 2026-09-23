@@ -1805,11 +1805,14 @@ async fn tg_start(app: AppHandle, ga: State<'_, Global>, port: Option<u16>) -> R
 
 #[tauri::command(async)]
 fn tg_stop(app: AppHandle, ga: State<'_, Global>) -> telegram::TgStatus {
+    let was_running = ga.inner().telegram.status().running;
     ga.inner().telegram.stop();
     logger::log("info", "telegram", "прокси остановлен");
     emit(&app, "zgui:tg", serde_json::json!({"running": false}));
     // Прокси в Telegram удалить программно нельзя — подсказываем, как выключить.
-    emit(&app, "zgui:toast", serde_json::json!({"kind":"info","text":"Чтобы Telegram перестал использовать прокси: Настройки → Продвинутые → Тип подключения → «Отключить прокси»."}));
+    if was_running {
+        emit(&app, "zgui:toast", serde_json::json!({"kind":"info","text":"Чтобы Telegram перестал использовать прокси: Настройки → Продвинутые → Тип подключения → «Отключить прокси»."}));
+    }
     ga.inner().telegram.status()
 }
 
@@ -2514,6 +2517,11 @@ fn set_settings(ga: State<'_, Global>, mut settings: Settings) -> Result<(), Str
         // задаётся не формой, а `sync_autostart` — здесь его просто сохраняем.
         settings.theme = s.settings.theme.clone();
         settings.boot_app = s.settings.boot_app;
+        // Серверные поля, которых нет в форме настроек: иначе любое сохранение
+        // обнуляло бы постоянный TG-секрет и сбрасывало флаг онбординга админа
+        // (модалка «всегда от админа» всплывала бы снова).
+        settings.tg_secret = s.settings.tg_secret.clone();
+        settings.admin_onboarded = s.settings.admin_onboarded;
         let changed = s.settings.autostart_mode != settings.autostart_mode
             || s.settings.autostart_profile != settings.autostart_profile;
         s.settings = settings;

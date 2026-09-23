@@ -116,13 +116,16 @@ fn zapret2_tls_variants() -> Vec<(&'static str, &'static str, Vec<&'static str>)
     ]
 }
 
-/// Заменяет в базовых аргументах zapret2 блок TLS (строки `--lua-desync=...`,
-/// идущие после `--filter-l7=tls`) на переданные варианты. Остальное сохраняется.
+/// Заменяет в базовых аргументах zapret2 блок TLS (строки `--lua-desync=...`
+/// между `--filter-l7=tls` и концом блока) на переданные варианты. Блок
+/// завершается на `--new` или новом `--filter-*`; остальные блоки (HTTP, QUIC)
+/// сохраняются как есть.
 fn zapret2_with_tls(base: &[String], tls: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_tls = false;
     for a in base {
-        if a == "--filter-tcp=443" {
+        let is_filter = a.starts_with("--filter-tcp=") || a.starts_with("--filter-udp=");
+        if is_filter || a == "--new" {
             in_tls = false;
         }
         if a == "--filter-l7=tls" {
@@ -135,7 +138,7 @@ fn zapret2_with_tls(base: &[String], tls: &[&str]) -> Vec<String> {
             continue;
         }
         out.push(a.clone());
-        // После TLS-блока ставим наш вариант один раз (перед --new).
+        // После TLS-payload вставляем вариант один раз (перед --new следующего блока).
         if in_tls && a == "--payload=tls_client_hello" {
             for t in tls {
                 out.push((*t).to_string());
@@ -180,6 +183,11 @@ mod tests {
         assert!(out.iter().any(|a| a == "--wf-tcp-out=80,443"));
         assert!(out.iter().any(|a| a.starts_with("--lua-init=@")));
         assert!(out.iter().any(|a| a == "--filter-l7=quic"));
+        // QUIC-lua-desync НЕ должен пропасть (регресс: in_tls не сбрасывался на --new).
+        assert!(
+            out.iter().any(|a| a.starts_with("--lua-desync=fake:blob=fake_default_quic")),
+            "QUIC-блок потерян: {out:?}"
+        );
         // Старый TLS fake/… заменён на единственный вариант.
         assert!(out.iter().any(|a| a == "--lua-desync=multidisorder:pos=1,midsld"));
         assert!(!out.iter().any(|a| a.contains("repeats=6")));

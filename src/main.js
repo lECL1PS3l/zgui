@@ -1259,19 +1259,20 @@ async function runAutotune() {
     return;
   }
   try {
+    const ok = await showConfirm({
+      title: "Подбор стратегии",
+      okLabel: "Запустить",
+      html: `<p>Для движка <b>${engineLabel(eng)}</b> переберём вшитые пресеты и сгенерированные варианты обхода.</p>
+             <p class="sub">Windows запросит права администратора — один раз на весь подбор.</p>`,
+    });
+    if (!ok) return;
+    // Кандидатов сохраняем только после согласия (иначе мусор в профилях).
     const profs = await invoke("autotune_prepare", { engine: eng });
     autotuneIds = profs.map((p) => p.id);
     if (!autotuneIds.length) {
       toast("warn", "нет кандидатов для подбора");
       return;
     }
-    const ok = await showConfirm({
-      title: "Подбор стратегии",
-      okLabel: "Запустить",
-      html: `<p>Будет перебрано <b>${autotuneIds.length}</b> вариантов движка ${engineLabel(eng)}.</p>
-             <p class="sub">Windows запросит права администратора — один раз на весь подбор.</p>`,
-    });
-    if (!ok) return;
     await invoke("test_strategies", { ids: autotuneIds, mode: "main" });
     toast("info", "подбор запущен");
   } catch (e) {
@@ -1574,6 +1575,7 @@ function collectSettings() {
     autostart_profile: $("#cfAutostart").value || null,
     always_admin: $("#cfAlwaysAdmin").checked,
     tg_autostart: $("#tgAutostart")?.checked || false,
+    tg_offer: $("#tgOffer") ? $("#tgOffer").checked : (B && B.settings ? B.settings.tg_offer !== false : true),
     tg_port: Number($("#tgPort")?.value) || 1443,
   };
 }
