@@ -286,6 +286,7 @@ async function refreshAll(notify = false) {
     B = await invoke("bootstrap");
     onBootstrap();
     checkTgOffer();
+    tgVpnGuard();
     if (notify) toast("ok", "статус обновлён");
   } catch (e) {
     toast("err", "bootstrap: " + e);
@@ -298,7 +299,9 @@ function onBootstrap() {
   applyTheme(currentTheme());
   renderRunBar();
   ensureEngineCards();
-  renderEngineTabs();
+  ensureEngineCards();
+  renderProfileTabs();
+  renderTestTabs();
   renderEngines();
   renderWarnings();
   renderProfiles();
@@ -723,19 +726,14 @@ let sigTestResults = "";
 // Фильтр результатов теста по движку: null — все, иначе id движка.
 let testEngineFilter = null;
 
-/// Табы движков на вкладке «Стратегии»: рендерятся из bootstrap.engines.
-/// Пустой профиль-фильтр «all» + по движку; статус готовности виден прямо в табе.
-let engineTabsBuilt = "";
-function renderEngineTabs() {
-  const wrap = $("#profileTabs");
-  if (!wrap || !B.engines) return;
-  const sig = B.engines.map((e) => `${e.id}:${e.ready ? 1 : 0}`).join(",");
-  if (sig === engineTabsBuilt) return;
-  engineTabsBuilt = sig;
+/// Общий конструктор сегментных табов по движкам (как в «Стратегиях»).
+/// `current` — активный фильтр ("all" или id движка), `onPick(filter)` — реакция.
+function buildEngineTabs(wrap, current, onPick) {
+  if (!wrap || !B || !B.engines) return;
   wrap.innerHTML = "";
-  const mkTab = (filter, label, ready) => {
+  const mk = (filter, label, ready) => {
     const t = document.createElement("button");
-    t.className = "tab" + (profileFilter === filter ? " active" : "");
+    t.className = "tab" + (current === filter ? " active" : "");
     t.dataset.filter = filter;
     t.textContent = label;
     if (ready === false) {
@@ -744,19 +742,46 @@ function renderEngineTabs() {
       dot.title = "движок не установлен — нажмите «Скачать» на вкладке «Обновления»";
       t.appendChild(dot);
     }
-    t.addEventListener("click", () => {
-      $$("#profileTabs .tab").forEach((x) => x.classList.remove("active"));
-      t.classList.add("active");
-      profileFilter = filter;
-      renderProfiles();
-    });
+    t.addEventListener("click", () => onPick(filter));
     wrap.appendChild(t);
   };
-  mkTab("all", "Все");
-  for (const e of B.engines) {
-    mkTab(e.id, e.label, e.ready);
-  }
+  mk("all", "Все");
+  for (const e of B.engines) mk(e.id, e.label, e.ready);
 }
+
+// Сигнатуры табов: перерисовываем только при смене набора движков/готовности/фильтра.
+let tabsSigProfiles = "";
+let tabsSigTests = "";
+
+/// Табы движков на вкладке «Стратегии».
+function renderProfileTabs() {
+  const wrap = $("#profileTabs");
+  if (!wrap || !B.engines) return;
+  const sig = B.engines.map((e) => `${e.id}:${e.ready ? 1 : 0}`).join(",") + "|" + profileFilter;
+  if (sig === tabsSigProfiles) return;
+  tabsSigProfiles = sig;
+  buildEngineTabs(wrap, profileFilter, (filter) => {
+    profileFilter = filter;
+    renderProfileTabs();
+    renderProfiles();
+  });
+}
+
+/// Табы движков на вкладке «Тест стратегий» — фильтруют и кандидатов, и результаты.
+function renderTestTabs() {
+  const wrap = $("#testTabs");
+  if (!wrap || !B.engines) return;
+  const sig = B.engines.map((e) => `${e.id}:${e.ready ? 1 : 0}`).join(",") + "|" + (testEngineFilter || "all");
+  if (sig === tabsSigTests) return;
+  tabsSigTests = sig;
+  buildEngineTabs(wrap, testEngineFilter || "all", (filter) => {
+    testEngineFilter = filter === "all" ? null : filter;
+    renderTestTabs();
+    renderTestCard();
+    renderTestResults();
+  });
+}
+
 // Таймер отложенного автосохранения настроек (см. «Настройки»).
 let saveSettingsTimer = 0;
 
@@ -911,19 +936,34 @@ function flowsealProfiles() {
   return ((B && B.profiles) || []).filter((p) => engines.includes(p.engine));
 }
 
+/// Профили, видимые на вкладке тестов с учётом таба по движку.
+function visibleTestProfiles() {
+  const all = flowsealProfiles();
+  return testEngineFilter ? all.filter((p) => p.engine === testEngineFilter) : all;
+}
+
 function renderTestCard() {
   const pick = $("#testPick");
   if (!pick) return;
-  const profs = flowsealProfiles();
-  if (!profs.length) {
+  renderTestTabs();
+  const all = flowsealProfiles();
+  if (!all.length) {
     pick.innerHTML = '<div class="empty">Нет доступных движков — скачайте хотя бы один на вкладке «Обновления».</div>';
+    $("#btnRunTest").disabled = true;
+    return;
+  }
+  // Таб движка фильтрует список кандидатов (как во вкладке «Стратегии»).
+  const profs = testEngineFilter ? all.filter((p) => p.engine === testEngineFilter) : all;
+  if (!profs.length) {
+    pick.innerHTML = '<div class="empty">У этого движка нет стратегий. Выберите «Все» или другой движок.</div>';
     $("#btnRunTest").disabled = true;
     return;
   }
   $("#btnRunTest").disabled = !!(testState && testState.running);
   if ($("#btnRunGeoblock")) $("#btnRunGeoblock").disabled = !!(testState && testState.running);
   if ($("#btnStopTest")) $("#btnStopTest").disabled = !(testState && testState.running);
-  $("#testSelectAll").checked = testPicked === null || testPicked.size === profs.length;
+  const ids = profs.map((p) => p.id);
+  $("#testSelectAll").checked = testPicked === null || ids.every((id) => testPicked.has(id));
   pick.innerHTML = "";
   const best = testCache && testCache.bestId;
   for (const p of profs) {
@@ -938,7 +978,7 @@ function renderTestCard() {
       }
       if (cb.checked) testPicked.add(p.id);
       else testPicked.delete(p.id);
-      $("#testSelectAll").checked = testPicked.size === profs.length;
+      $("#testSelectAll").checked = profs.every((x) => testPicked.has(x.id));
     });
     wrap.appendChild(cb);
     const nm = document.createElement("span");
@@ -982,7 +1022,6 @@ function renderTestProgress() {
 function renderTestResults() {
   const box = $("#testResults");
   const bestBox = $("#testBest");
-  const filterBox = $("#testFilter");
   if (!box) return;
   const results = (testState && testState.results && testState.results.length
     ? testState.results
@@ -1002,47 +1041,7 @@ function renderTestResults() {
   if (!results.length) {
     box.innerHTML = "";
     bestBox.classList.add("hidden");
-    if (filterBox) filterBox.classList.add("hidden");
     return;
-  }
-  // Кнопки-фильтры по движку: «Все» + по одному чипу на каждый движок в результатах.
-  // Если выбранный фильтр исчез (новый прогон), молча сбрасываем на «Все».
-  const enginesInResults = [...new Set(results.map((r) => r.engine).filter(Boolean))];
-  if (testEngineFilter && !enginesInResults.includes(testEngineFilter)) {
-    testEngineFilter = null;
-  }
-  if (filterBox) {
-    if (enginesInResults.length <= 1) {
-      filterBox.classList.add("hidden");
-    } else {
-      filterBox.classList.remove("hidden");
-      filterBox.innerHTML = "";
-      const mk = (label, val, dot) => {
-        const b = document.createElement("button");
-        b.className = "test-filter-chip" + (testEngineFilter === val ? " active" : "");
-        if (dot) {
-          const d = document.createElement("span");
-          d.className = "tab-dot" + (dot === "ready" ? "" : " amber");
-          if (dot === "ready") d.style.background = "var(--green)";
-          b.appendChild(d);
-        }
-        const t = document.createElement("span");
-        t.textContent = label;
-        b.appendChild(t);
-        b.addEventListener("click", () => {
-          testEngineFilter = testEngineFilter === val ? null : val;
-          sigTestResults = "";
-          renderTestResults();
-        });
-        return b;
-      };
-      filterBox.appendChild(mk(`Все (${results.length})`, null, null));
-      for (const eng of enginesInResults) {
-        const n = results.filter((r) => r.engine === eng).length;
-        const ready = ((B && B.engines) || []).find((x) => x.id === eng);
-        filterBox.appendChild(mk(`${engineLabel(eng)} (${n})`, eng, ready ? (ready.ready ? "ready" : "no") : "no"));
-      }
-    }
   }
   const shown = testEngineFilter ? results.filter((r) => r.engine === testEngineFilter) : results;
   if (testState && testState.done && testState.bestName) {
@@ -1135,7 +1134,7 @@ function renderTestResults() {
 
 async function runTest(already, mode) {
   const geoblock = mode === "geoblock";
-  const profs = flowsealProfiles();
+  const profs = visibleTestProfiles();
   const useIds = testPicked === null ? profs.map((p) => p.id) : [...testPicked];
   if (!useIds.length) {
     toast("warn", "не выбрано ни одной стратегии");
@@ -1445,6 +1444,7 @@ function renderSettings() {
   const adm = $("#cfAlwaysAdmin");
   if (adm) adm.checked = !!s.always_admin;
   if ($("#tgAutostart")) $("#tgAutostart").checked = !!s.tg_autostart;
+  if ($("#tgOffer")) $("#tgOffer").checked = s.tg_offer !== false;
   if ($("#tgPort")) $("#tgPort").value = s.tg_port || 1443;
   renderDnsProviders();
 }
@@ -1686,6 +1686,7 @@ async function tgSavePrefs() {
       settings: {
         ...cfg,
         tg_autostart: $("#tgAutostart")?.checked || false,
+        tg_offer: $("#tgOffer") ? $("#tgOffer").checked : true,
         tg_port: Number($("#tgPort")?.value) || 1443,
       },
     });
@@ -1709,6 +1710,16 @@ async function tgToggle() {
     btnBusy($("#btnTgToggle"), false);
     renderTg();
   }
+}
+
+/// Стража VPN: если наш TG-мост включён, а обнаружен VPN/туннель — бэкенд гасит мост.
+async function tgVpnGuard() {
+  try {
+    if (await invoke("tg_vpn_guard")) {
+      tgState = await invoke("tg_status").catch(() => tgState);
+      renderTg();
+    }
+  } catch (_) {}
 }
 
 /// Неблокирующее предложение Telegram-моста: Telegram запущен, VPN нет.
@@ -1792,6 +1803,7 @@ function bindStatic() {
   if ($("#btnTgToggle")) $("#btnTgToggle").addEventListener("click", tgToggle);
   if ($("#btnTgConnect")) $("#btnTgConnect").addEventListener("click", tgConnect);
   if ($("#tgAutostart")) $("#tgAutostart").addEventListener("change", tgSavePrefs);
+  if ($("#tgOffer")) $("#tgOffer").addEventListener("change", tgSavePrefs);
   if ($("#tgPort")) $("#tgPort").addEventListener("change", tgSavePrefs);
 
   $("#btnKillConflicts").addEventListener("click", async () => {
@@ -1909,7 +1921,7 @@ function bindStatic() {
     }
   });
   $("#testSelectAll").addEventListener("change", (e) => {
-    const profs = flowsealProfiles();
+    const profs = visibleTestProfiles();
     testPicked = e.target.checked ? new Set(profs.map((p) => p.id)) : new Set();
     renderTestCard();
   });

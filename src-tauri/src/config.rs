@@ -129,6 +129,14 @@ pub struct Settings {
     pub tg_autostart: bool,
     #[serde(default = "default_tg_port")]
     pub tg_port: u16,
+    /// Предлагать автоматически подключить Telegram-прокси, когда запущен Telegram
+    /// и нет VPN/туннеля (галочка в пункте «Telegram»).
+    #[serde(default = "default_true")]
+    pub tg_offer: bool,
+    /// Постоянный секрет MTProto-бриджа (32 hex). Один и тот же между запусками:
+    /// Telegram переиспользует одну запись прокси вместо накопления мёртвых.
+    #[serde(default)]
+    pub tg_secret: Option<String>,
     /// Одноразовая миграция: старый дефолт интервала 6 ч → 72 ч.
     #[serde(default)]
     pub interval_migrated: bool,
@@ -147,6 +155,10 @@ fn default_tg_port() -> u16 {
     1443
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_theme() -> String {
     "grey".into()
 }
@@ -162,6 +174,8 @@ impl Default for Settings {
             always_admin: false,
             tg_autostart: false,
             tg_port: default_tg_port(),
+            tg_offer: true,
+            tg_secret: None,
             interval_migrated: false,
             theme: default_theme(),
             boot_app: false,

@@ -118,22 +118,21 @@
             <div class="card-head">
               <h3>Тест стратегий <span class="chip">autotest</span></h3>
               <label class="muted inline-check">
-                <input type="checkbox" id="testSelectAll" checked /> выбрать все стратегии
+                <input type="checkbox" id="testSelectAll" checked /> выбрать все
               </label>
               <button class="btn primary small" id="btnRunTest">Запустить тест</button>
-              <button class="btn ghost small" id="btnRunGeoblock">Геоблок-тест</button>
               <button class="btn danger small" id="btnStopTest" disabled>Остановить тест</button>
+              <button class="btn ghost small test-geoblock" id="btnRunGeoblock"
+                      title="Диагностика: прогоняет весь онлайн-список заблокированных сайтов и калибрует, какие домены обходятся Zapret, а какие требуют VPN. Нужен разово, чтобы основной тест не тратил время на недостижимые сайты.">Геоблок-тест ?</button>
             </div>
             <p class="hint">
-              Тест по очереди запускает стратегии всех установленных движков (пресеты и <code>*.bat</code>),
+              Тест по очереди запускает стратегии выбранных движков (пресеты и <code>*.bat</code>),
               проверяет контрольные домены (обязательные + ручной список) и выбирает лучшую.
-              «Геоблок-тест» прогоняет весь онлайн-список geoblock с базовой пробой и калибрует,
-              какие домены обходятся Zapret, а какие требуют VPN.
             </p>
+            <div class="tabs test-tabs" id="testTabs"></div>
             <div id="testPick" class="test-pick"></div>
             <div id="testProgBar" class="prog hidden"><div class="prog-fill" id="testProgFill"></div><span id="testProgLabel"></span></div>
             <div id="testBest" class="test-best hidden"></div>
-            <div id="testFilter" class="test-filter hidden"></div>
             <div id="testResults" class="test-results"></div>
           </div>
         </section>
@@ -207,6 +206,27 @@
               <label class="inline-check">
                 <input type="checkbox" id="tgAutostart" /> включать при запуске программы
               </label>
+              <label class="inline-check">
+                <input type="checkbox" id="tgOffer" checked /> предлагать автоматически, когда запущен Telegram
+              </label>
+            </details>
+            <details id="tgTip">
+              <summary>Как отключить прокси в Telegram</summary>
+              <p class="muted card-sub">
+                Прокси в Telegram добавляется автоматически, но выключать его нужно в самом Telegram:
+                Настройки → Продвинутые настройки → Тип подключения → «Отключить прокси».
+                Старые записи в списке прокси можно удалить там же (⋮ → Удалить).
+              </p>
+              <div class="tg-tip-shots">
+                <figure>
+                  <img src="./src/assets/tg-disable-1.png" alt="Telegram: Настройки → Продвинутые" loading="lazy" />
+                  <figcaption>Настройки → Продвинутые</figcaption>
+                </figure>
+                <figure>
+                  <img src="./src/assets/tg-disable-2.png" alt="Тип подключения → Отключить прокси" loading="lazy" />
+                  <figcaption>Тип подключения → «Отключить прокси»</figcaption>
+                </figure>
+              </div>
             </details>
           </div>
         </section>

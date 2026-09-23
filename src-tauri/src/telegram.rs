@@ -51,8 +51,10 @@ impl TgState {
 
     /// Запускает прокси с минимумом параметров (user friendly): только порт.
     /// Остальное — дефолты крейта (встроенный пул CF-доменов, DC-IP и т.д.).
+    /// `secret` — постоянный MTProto-секрет (32 hex): Telegram переиспользует одну
+    /// запись прокси вместо накопления мёртвых. None — крейт сгенерит случайный.
     /// Возвращает статус только после фактического бинда сокета (или ошибку).
-    pub async fn start(&self, port: u16, faketls_domain: Option<String>) -> Result<TgStatus, String> {
+    pub async fn start(&self, port: u16, faketls_domain: Option<String>, secret: Option<String>) -> Result<TgStatus, String> {
         {
             let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if g.shutdown.is_some() {
@@ -69,6 +71,10 @@ impl TgState {
         if let Some(d) = faketls_domain.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
             args.push("--listen-faketls-domain".into());
             args.push(d.to_string());
+        }
+        if let Some(s) = secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            args.push("--secret".into());
+            args.push(s.to_string());
         }
 
         let config = Config::try_from_args(args)?;
@@ -150,7 +156,7 @@ mod tests {
     async fn start_binds_and_reports_port() {
         let s = TgState::default();
         // Порт 0 — ОС выдаст свободный, тест не конфликтует с реальным 1443.
-        let st = s.start(0, None).await.expect("прокси должен запуститься");
+        let st = s.start(0, None, None).await.expect("прокси должен запуститься");
         assert!(st.running, "статус должен быть running после бинда");
         assert!(st.port.is_some(), "порт должен быть известен после бинда");
         assert!(
@@ -160,5 +166,18 @@ mod tests {
         );
         s.stop();
         assert!(!s.status().running, "после stop статус не running");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_with_fixed_secret_is_stable() {
+        let s = TgState::default();
+        let secret = "0123456789abcdef0123456789abcdef";
+        let st = s.start(0, None, Some(secret.to_string())).await.expect("прокси должен запуститься");
+        assert!(
+            st.link.as_deref().unwrap_or("").contains(secret),
+            "ссылка должна содержать заданный (постоянный) секрет: {:?}",
+            st.link
+        );
+        s.stop();
     }
 }

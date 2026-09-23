@@ -49,6 +49,8 @@ pub struct Global {
     pub tg_offer_shown: AtomicBool,
     /// Время последней проверки Telegram-предложения (throttle, epoch-сек).
     pub tg_offer_checked: std::sync::atomic::AtomicU64,
+    /// Время последней проверки VPN-стража Telegram (throttle, epoch-сек).
+    pub tg_guard_checked: std::sync::atomic::AtomicU64,
 }
 
 impl Global {
@@ -1701,11 +1703,37 @@ fn tg_stats(ga: State<'_, Global>) -> String {
     ga.inner().telegram.stats()
 }
 
+/// Постоянный MTProto-секрет (32 hex) для бриджа. Генерируется один раз и
+/// хранится в настройках: Telegram переиспользует одну запись прокси.
+fn tg_secret_of(ga: &State<'_, Global>) -> String {
+    let mut s = st(ga.inner());
+    if s.settings.tg_secret.is_none() {
+        s.settings.tg_secret = Some(gen_tg_secret());
+        s.save();
+    }
+    s.settings.tg_secret.clone().unwrap_or_default()
+}
+
+/// 16 случайных байт в hex. RandomState засевается ОС на каждый экземпляр.
+fn gen_tg_secret() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(32);
+    for i in 0..2u64 {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u64(now_ts());
+        h.write_u64(std::process::id() as u64 + i);
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
+}
+
 #[tauri::command]
 async fn tg_start(app: AppHandle, ga: State<'_, Global>, port: Option<u16>) -> Result<telegram::TgStatus, String> {
     let st = ga.inner().telegram.clone();
     let port = port.unwrap_or(1443);
-    let result = st.start(port, None).await;
+    let secret = tg_secret_of(&ga);
+    let result = st.start(port, None, Some(secret)).await;
     match &result {
         Ok(_) => {
             logger::log("ok", "telegram", &format!("прокси запущен на порту {port}"));
@@ -1721,7 +1749,34 @@ fn tg_stop(app: AppHandle, ga: State<'_, Global>) -> telegram::TgStatus {
     ga.inner().telegram.stop();
     logger::log("info", "telegram", "прокси остановлен");
     emit(&app, "zgui:tg", serde_json::json!({"running": false}));
+    // Прокси в Telegram удалить программно нельзя — подсказываем, как выключить.
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"info","text":"Чтобы Telegram перестал использовать прокси: Настройки → Продвинутые → Тип подключения → «Отключить прокси»."}));
     ga.inner().telegram.status()
+}
+
+/// Следит: если включён наш Telegram-мост, а обнаружен VPN/туннель/сторонний
+/// прокси — гасим мост (конфликт) и подсказываем отключить прокси в Telegram.
+/// Троттлим, чтобы не дёргать tasklist на каждый bootstrap.
+#[tauri::command(async)]
+fn tg_vpn_guard(app: AppHandle, ga: State<'_, Global>) -> bool {
+    let g = ga.inner();
+    if !g.telegram.status().running {
+        return false;
+    }
+    let now = now_ts();
+    let last = g.tg_guard_checked.load(Ordering::SeqCst);
+    if now < last + 20 {
+        return false;
+    }
+    g.tg_guard_checked.store(now, Ordering::SeqCst);
+    if svc::detect_vpn().is_empty() {
+        return false;
+    }
+    g.telegram.stop();
+    logger::log("warn", "telegram", "обнаружен VPN/туннель — Telegram-прокси выключен");
+    emit(&app, "zgui:tg", serde_json::json!({"running": false}));
+    emit(&app, "zgui:toast", serde_json::json!({"kind":"warn","text":"Обнаружен VPN/туннель — Telegram-прокси выключен. В Telegram отключите прокси: Настройки → Продвинутые → Тип подключения."}));
+    true
 }
 
 /// Проверка обновления встроенного Telegram-моста (версия ZUI + коммиты Flowseal).
@@ -1749,8 +1804,11 @@ fn tg_offer(ga: State<'_, Global>) -> bool {
     if g.telegram.status().running {
         return false;
     }
-    if st(g).settings.tg_autostart {
-        return false;
+    {
+        let s = st(g);
+        if !s.settings.tg_offer || s.settings.tg_autostart {
+            return false;
+        }
     }
     if !svc::telegram_running() {
         return false;
@@ -3130,18 +3188,28 @@ pub fn run() {
                 watchdog: std::sync::Arc::new(watchdog::WatchdogState::default()),
                 tg_offer_shown: AtomicBool::new(false),
                 tg_offer_checked: std::sync::atomic::AtomicU64::new(0),
+                tg_guard_checked: std::sync::atomic::AtomicU64::new(0),
             };
             app.manage(global);
             // Автозапуск Telegram-прокси, если включён в настройках.
             {
                 let g = app.state::<Global>();
-                let (auto, port, tg) = {
-                    let s = st(g.inner());
-                    (s.settings.tg_autostart, s.settings.tg_port, g.inner().telegram.clone())
+                let (auto, port, secret, tg) = {
+                    let mut s = st(g.inner());
+                    if s.settings.tg_secret.is_none() {
+                        s.settings.tg_secret = Some(gen_tg_secret());
+                        s.save();
+                    }
+                    (
+                        s.settings.tg_autostart,
+                        s.settings.tg_port,
+                        s.settings.tg_secret.clone().unwrap_or_default(),
+                        g.inner().telegram.clone(),
+                    )
                 };
                 if auto {
                     tauri::async_runtime::spawn(async move {
-                        let _ = tg.start(port, None).await;
+                        let _ = tg.start(port, None, Some(secret)).await;
                     });
                 }
             }
@@ -3219,6 +3287,7 @@ pub fn run() {
             tg_stop,
             tg_check_update,
             tg_offer,
+            tg_vpn_guard,
             watchdog_status,
             cancel_test,
             apply_best_strategy,
