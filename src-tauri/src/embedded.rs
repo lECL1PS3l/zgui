@@ -8,8 +8,8 @@ const FLOWSEAL_ENGINE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 
 pub const SNAPSHOT_INFO: &str = "Official Flowseal main snapshot bundled at build time";
 /// Версия вшитого движка Flowseal (входит в состав exe).
-pub const ENGINE_VERSION: &str = "1.10.2";
-pub const ENGINE_INFO: &str = "Flowseal 1.10.2 release archive bundled in the executable";
+pub const ENGINE_VERSION: &str = "1.10.3";
+pub const ENGINE_INFO: &str = "Flowseal 1.10.3 release archive bundled in the executable";
 
 /// Распаковывает встроенный релиз движка Flowseal в `<data>/engines/flowseal`,
 /// если там ещё нет exe. Возвращает путь к корню движка, если он готов.
