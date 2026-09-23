@@ -148,6 +148,9 @@ pub fn detect_vpn() -> Vec<ConflictProcess> {
 }
 
 /// Ищет чужие процессы winws.exe/winws2.exe (не наши), чужую службу `zapret` и VPN.
+/// Все exe реестра движков (конфликт-чек и остановка внешнего обхода).
+pub const ENGINE_EXES: [&str; 4] = ["winws.exe", "winws2.exe", "goodbyedpi.exe", "dpibreak.exe"];
+
 pub fn detect_conflicts(data_dir: &Path, our_pid: Option<u32>) -> ConflictReport {
     let mut report = ConflictReport::default();
 
@@ -172,9 +175,9 @@ pub fn detect_conflicts(data_dir: &Path, our_pid: Option<u32>) -> ConflictReport
     // Пути процессов winws/winws2 через WMI (tasklist не отдаёт путь к exe).
     // Свои экземпляры — из папки движка под <data> — не считаем чужими, даже если
     // их подняла наша служба zapret или UAC-раннер (тогда PID не совпадает с GUI).
-    let image_paths = process_image_paths(&["winws.exe", "winws2.exe"]);
+    let image_paths = process_image_paths(&ENGINE_EXES);
 
-    for exe in ["winws.exe", "winws2.exe"] {
+    for exe in ENGINE_EXES {
         let out = hidden_command("tasklist.exe")
             .args(["/FI", &format!("IMAGENAME eq {}", exe), "/FO", "CSV", "/NH"])
             .output();
@@ -264,7 +267,7 @@ fn is_own_engine(path: &Path, data_dir: &Path) -> bool {
 /// старая служба): GUI его не видит и может запустить второй winws — два
 /// фильтра WinDivert дерутся, и обход перестаёт работать.
 pub fn own_engine_pids(data_dir: &Path, exclude: Option<u32>) -> Vec<u32> {
-    let mut pids: Vec<u32> = process_image_paths(&["winws.exe", "winws2.exe"])
+    let mut pids: Vec<u32> = process_image_paths(&ENGINE_EXES)
         .into_iter()
         .filter(|(pid, p)| Some(*pid) != exclude && is_own_engine(p, data_dir))
         .map(|(pid, _)| pid)
@@ -274,11 +277,9 @@ pub fn own_engine_pids(data_dir: &Path, exclude: Option<u32>) -> Vec<u32> {
     pids
 }
 
-/// Дешёвая проверка: запущен ли хоть один winws/winws2 (без WMI).
+/// Дешёвая проверка: запущен ли хоть один exe движков (без WMI).
 pub fn any_winws_running() -> bool {
-    !list_processes(|n| {
-        n.eq_ignore_ascii_case("winws.exe") || n.eq_ignore_ascii_case("winws2.exe")
-    })
+    !list_processes(|n| ENGINE_EXES.iter().any(|e| n.eq_ignore_ascii_case(e)))
     .is_empty()
 }
 
@@ -358,7 +359,7 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
 /// Строит командную строку службы: "C:\...\winws.exe" --arg "v" ...
 /// exe ищется так же, как при обычном запуске, — рекурсивно от корня:
 /// пользователь мог указать каталог-обёртку распакованного релиза.
-fn build_service_cmdline(root: &Path, profile: &Profile, args: &[String]) -> String {
+pub(crate) fn build_service_cmdline(root: &Path, profile: &Profile, args: &[String]) -> String {
     let bin = crate::config::find_exe(root, profile.exe_name())
         .map(|rel| root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
         .unwrap_or_else(|| root.join("bin").join(profile.exe_name()));
@@ -467,6 +468,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn engine_exe_list_covers_registry() {
+        for d in crate::config::engines() {
+            assert!(ENGINE_EXES.contains(&d.exe), "нет в конфликтах: {}", d.exe);
+        }
+    }
+
+    #[test]
+    fn service_cmdline_quotes_spaces() {
+        let p = Profile {
+            id: "z2".into(),
+            name: "z".into(),
+            engine: crate::config::ENGINE_ZAPRET2.into(),
+            args: vec!["--lua-init=@C:\\lua lib\\zapret-lib.lua".into()],
+            builtin: true,
+            source: None,
+            updated_at: None,
+        };
+        let c = build_service_cmdline(Path::new(r"D:\e"), &p, &p.args);
+        assert!(c.contains("winws2.exe"));
+        assert!(c.contains("\"--lua-init=@C:\\lua lib\\zapret-lib.lua\""));
+    }
+
+    #[test]
     fn conflict_report_flags() {
         let mut r = ConflictReport::default();
         assert!(!r.has_conflicts());
@@ -550,4 +574,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-

@@ -128,7 +128,7 @@ pub fn reset(data: &Path) -> Result<NetResetResult, String> {
     // 3. Процессы VPN и чужие winws (не наши — наш процесс к этому моменту остановлен GUI).
     body.push_str(
         "Write-Output 'STEP:завершение процессов VPN/zapret'\n\
-         $names = @('winws','winws2','AmneziaVPN-service','AmneziaVPN','amneziawg','wg','wireguard','openvpn','openvpn-gui','sing-box','xray','v2ray','nekoray','clash','mihomo','happ','hiddify','tun2socks')\n\
+         $names = @('winws','winws2','goodbyedpi','dpibreak','AmneziaVPN-service','AmneziaVPN','amneziawg','wg','wireguard','openvpn','openvpn-gui','sing-box','xray','v2ray','nekoray','clash','mihomo','happ','hiddify','tun2socks')\n\
          foreach ($n in $names) {\n\
            Get-Process -Name $n -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n\
          }\n\n",
