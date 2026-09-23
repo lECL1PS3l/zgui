@@ -1,4 +1,4 @@
-use crate::config::{
+﻿use crate::config::{
     AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL, SERVICE_NAME,
 };
 use crate::profiles as pf;
@@ -25,6 +25,7 @@ mod embedded;
 mod human;
 mod logger;
 mod netreset;
+mod presets;
 mod profiles;
 mod runner;
 mod service;
@@ -656,13 +657,12 @@ fn provision_engines(s: &mut AppState) {
 }
 
 fn ensure_presets(s: &mut AppState) {
-    if !s
-        .profiles
-        .iter()
-        .any(|p| p.engine == ENGINE_FLOWSEAL && p.source.as_deref().is_some_and(|x| x.starts_with("preset:")))
-    {
-        let mut presets = pf::builtin_flowseal_presets();
-        s.profiles.append(&mut presets);
+    // Сеем вшитые пресеты всех движков: недостающие добавляем, существующие
+    // (по id «preset:<id>») не трогаем — пользователь мог их скрыть/переименовать.
+    for def in presets::builtin_presets() {
+        if !s.profiles.iter().any(|p| p.id == format!("preset:{}", def.id)) {
+            s.profiles.push(def.to_profile());
+        }
     }
 }
 
@@ -960,7 +960,7 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
         human::humanize(&e)
     })?;
     let (tcp, udp) = pf::game_filter_ports(&settings.game_filter);
-    let args = pf::apply_game_filter(&profile.args, &tcp, &udp);
+    let args = presets::prepare_args(&profile.args, &root_path, &tcp, &udp);
 
     let logs = data.join("logs");
     let _ = std::fs::create_dir_all(&logs);
@@ -1062,7 +1062,7 @@ fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, Str
                 .path(&p.engine)
                 .ok_or_else(|| format!("корень «{}» не задан — нажмите «Скачать движок»", p.engine))?;
             let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
-            (p.clone(), root, pf::apply_game_filter(&p.args, &tcp, &udp), s.data.clone())
+            (p.clone(), root.clone(), presets::prepare_args(&p.args, &root, &tcp, &udp), s.data.clone())
         };
         // Один живой winws: снимаем процесс программы и старую службу перед пересозданием.
         let _ = stop_all_own(app, g);
@@ -1262,7 +1262,7 @@ fn test_strategies(
             group: tester::group_of(p),
             exe: exe.to_string_lossy().into_owned(),
             workdir: wd.to_string_lossy().into_owned(),
-            args: pf::apply_game_filter(&p.args, &tcp, &udp),
+            args: presets::prepare_args(&p.args, &root, &tcp, &udp),
         });
     }
 
@@ -1908,7 +1908,7 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
         let p = s.profile(&id).cloned().ok_or("профиль не найден")?;
         let root = s.roots.path(&p.engine).ok_or("корень движка не задан — нажмите «Скачать движок»")?;
         let (tcp, udp) = pf::game_filter_ports(&s.settings.game_filter);
-        (p.clone(), root, pf::apply_game_filter(&p.args, &tcp, &udp), s.data.clone())
+        (p.clone(), root.clone(), presets::prepare_args(&p.args, &root, &tcp, &udp), s.data.clone())
     };
     let r = svc::install_service(&root, &profile, &args, &data)
         .map_err(|e| {
