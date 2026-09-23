@@ -159,3 +159,40 @@ Self-review fix (коммит bfac0ac): баг — wd = root/bin у новых �
 - Затем ФАЗА 5: Telegram-автопрокид (telegram.exe в процессах + svc::detect_vpn() пуст → один раз за сессию неблокирующее предложение; tg_start/tg_stop/tg_status/telegram.rs готовы; флаг в state типа tg_offer_done).
 - Затем: ФИНАЛ перед релизом (сюда задавать спорные вопросы), сборка npx tauri build, Context.md-цикл.
 Черновик начала Фазы 4: читал updater.rs (check_entry/apply_updates/UpdArchive — применённые хэши, backup, atomic_write) и presets.rs (PresetDef, to_profile). Ничего не менял в них ещё.
+
+## СМС от пользователя (23.09.2026, продолжение работы)
+
+«продолжи» + «продолжи проект, если что-то хочешь спросить - давай сейчас, ибо я надолго отойду дальше» + «также не забудь про вкладку с тестами под каждый движок обхода, можно добавить кнопки сортировки по движку»
+
+## Ответ агента: вопросы заданы, фазы 4-5 закрыты (23.09.2026)
+
+Решения пользователя на вопросы (перед уходом): 1) «Всё, кроме публикации» — доделать код/тесты/exe, НЕ публиковать и НЕ пушить; 2) версия → 1.3.0; 3) не пушить в origin.
+
+ИНЦИДЕНТ (найден и исправлен): коммит 6acd597 побил кириллицу в lib.rs — PowerShell 5.1 `Get-Content -Raw | Set-Content` декодировал UTF-8-без-BOM как CP1251 (двойная перекодировка). Побиты только комментарии и строковые литералы (логи/тосты), логика цела. Коммит НЕ был запушен → сделал `git reset --soft 40fa9e7`, восстановил lib.rs из 40fa9e7 и переприменил правки Фазы 4 через edit-инструмент. УРОК: НИКОГДА не править .rs/.js через Get-Content|Set-Content (PS 5.1 ломает кириллицу); только edit/write инструменты. Проверка целостности: сканировать символы U+0402..U+040F/U+0452..U+045F (маркеры двойной перекодировки) + BOM (первые 3 байта).
+
+ФАЗА 4 (OTA-пресеты) — ЗАКРЫТА, коммит 58d6bae:
+- config.rs: `pub const SELF_REPO = "lECL1PS3l/zgui"` (перенесён из lib.rs), `use ... SELF_REPO`.
+- presets.rs: `preset_profile_id(id)` + `preset_profile(id,engine,name,args)` (единая сборка builtin-профиля preset:<id>); `preset_set_json(version)` — генератор ассета релиза из вшитой таблицы (источник правды); `emit_preset_set_json(path,version)` + тест по env ZGUI_PRESETS_OUT/ZGUI_PRESETS_VERSION (генерация release\presets.json). Оба помечены #[allow(dead_code)] (вызов только из теста). Тест round-trip: preset_set_json → updater::parse_preset_set → все пресеты выживают.
+- updater.rs: RemotePreset{id,engine,name,args} + RemotePresetSet{version,presets}; const PRESETS_ENTRY_ID="presets:set", PRESETS_GROUP="Набор пресетов"; parse_preset_set (объект {version,presets} ИЛИ голый массив; пропуск неизвестных движков и пустых args); fetch_preset_set (ассет presets.json из releases/latest SELF_REPO); check_preset_entry (статус ok если версия в applied.json совпала); apply_preset_set (обновляет только builtin с id preset:<id>, добавляет недостающие, кастомные не трогает); apply_presets (пишет версию в applied.json). check_all добавляет сводную запись набора в конец каталога.
+- lib.rs apply_updates: wants_presets = ids пустой ИЛИ содержит PRESETS_ENTRY_ID; набор качается ЗАРАНЕЕ вне блокировки state; file_ids без PRESETS_ENTRY_ID (пустой список у apply_updates = «все», поэтому если выбрали только набор — файловые не трогаем); после применения — запись в entries (или err-запись при неудаче), push в updater.entries если новой нет.
+- Тесты: preset_set_parses_object_and_array_and_skips_unknown, apply_preset_set_updates_builtin_adds_new_keeps_custom. 60 тестов.
+- Release-ассет сгенерирован: release\presets.json (version 2026.09.24, 14 пресетов, UTF-8 без BOM, 4375 б) — НЕ залит (по решению «без публикации»).
+
+ФАЗА 5 (Telegram-автопрокид) — ЗАКРЫТА, коммит (см. ниже):
+- service.rs: `pub fn telegram_running()` (list_processes, базовое имя == "telegram").
+- lib.rs Global: `tg_offer_shown: AtomicBool` (раз за сессию) + `tg_offer_checked: AtomicU64` (троттл 30 с — не дёргать tasklist на каждый bootstrap). Команда `tg_offer() -> bool`: false если уже предлагали/мост включён/tg_autostart/Telegram не запущен/VPN обнаружен; иначе true + ставит флаг. Зарегистрирована в invoke_handler.
+- main.js: `checkTgOffer()` (вызывается из refreshAll, guard tgOfferShown): showConfirm «Запущен Telegram, VPN не обнаружен — построить мост?» → Да: tg_start(port) + renderTg + open_url(link); Нет: ничего (повторно не спрашиваем).
+
+UI (по просьбе пользователя) — вкладка тестов, фильтр по движку, коммит f4eedb1:
+- index.html: `<div id="testFilter" class="test-filter hidden">` перед testResults.
+- styles.css: .test-filter / .test-filter-chip (+.active).
+- main.js: testEngineFilter (null=все); в renderTestResults — чипы «Все (N)» + по движку («label (N)» с точкой готовности), клик фильтрует (повторный клик сбрасывает); фильтр в sig-строке; показываются только строки выбранного движка; чипы скрыты при ≤1 движке; сброс фильтра если движок исчез из результатов.
+
+Версия → 1.3.0 (Cargo.toml + description обновлён, package.json, tauri.conf.json).
+Верификация: cargo check 0 warnings, cargo test --lib 60/60, node --check main.js OK, все .rs/.js без BOM и без двойной перекодировки.
+
+ОСТАЛОСЬ (перед релизом — сюда спорные вопросы пользователю):
+1. Собрать exe: `npx tauri build` (cargo build --release НЕ пересобирает dist/).
+2. Публикация (НЕ делать без пользователя): `gh release create v1.3.0` (или upload ассетов к существующему) с presets.json; залить presets.json в релиз; пуш коммитов в origin/main.
+3. Ручная верификация фаз 4-5 на машине юзера: «Проверить обновления» → группа «Набор пресетов»; запуск Telegram без VPN → предложение моста.
+

@@ -122,3 +122,18 @@ Self-review fix (коммит bfac0ac): баг — wd = root/bin у новых �
 - Фаза 5: Telegram-автопрокид — telegram.exe запущен + detect_vpn() пуст → предложить мост (telegram.rs готов).
 
 Известная мелочь на подумать: fetch_engine для zapret2 у юзеров будет падать под Defender (детект релизного zip, os error 225) — нужен UX-хинт или дистрибуция собранной нами версии (у нас self-built winws2.exe живёт под Defender).
+
+## СМС от пользователя (23.09.2026, вечер, второе)
+
+«100% - класть в наш релиз собственную сборку» (решение по zapret2 под Defender)
+
+## Ответ агента: zapret2 из нашего релиза (23.09.2026, вечер)
+
+Коммит b8b3f4c + exe пересобран. Что сделано:
+- release\engine-zapret2.zip (1.66 МБ, плоский, без каталога-обёртки) из нашей self-built сборки (winws2.exe 666112 б + cygwin1.dll + WinDivert.dll/.sys + lua/ + files/) залит как ассет релиза v1.2.0 нашего репо (lECL1PS3l/zgui) через gh; старый ассет ZapretGUI-1.2.0-portable.zip удалён (он же лежал локально в github pre release — оттуда тоже убран).
+- lib.rs: EngineMeta.self_asset: Option<&'static str>, const SELF_REPO = "lECL1PS3l/zgui". engine_meta("zapret2") → self_asset = Some("engine-zapret2.zip"). fetch_engine_impl: repo = SELF_REPO если self_asset задан; asset-поиск: точное имя self_asset → zip с exe → 'win' → любой zip. Остальные движки (flowseal/goodbyedpi/dpibreak) качаются из репо авторов как раньше.
+- scripts/fetch-engines.ps1: zapret2 исключён из списка качаемых (собственная сборка в data/engines дистрибутива, обновление только вручную при новом релизе bol-van).
+- Тест zapret2_fetched_from_self_repo. 56/56, cargo check 0 warnings.
+- Порядок обновления нашей сборки zapret2: пересборка из исходников (Cygwin+LuaJIT, процесс в Context.md выше) → Compress-Archive "\*" → release\engine-zapret2.zip → gh release upload v1.2.0 --clobber → залить в data/engines дистрибутива.
+
+Релизная заметка: движение fetch_engine("zapret2") у юзеров теперь ходит в наш репо — Defender не сносит (наша сборка не совпадает с сигнатурой bol-van).
