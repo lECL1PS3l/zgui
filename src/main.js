@@ -678,7 +678,7 @@ function engineLabel(id) {
 /// остальные создаём из bootstrap.engines (id, label, статус, кнопки).
 let engineCardsBuilt = "";
 function ensureEngineCards() {
-  const wrap = document.querySelector(".engines");
+  const wrap = document.querySelector("#updTiles");
   if (!wrap || !B.engines) return;
   const sig = B.engines.map((e) => e.id).join(",");
   if (sig === engineCardsBuilt) return;
@@ -686,24 +686,25 @@ function ensureEngineCards() {
   for (const e of B.engines) {
     if (e.id === "flowseal" || $("#engine-" + e.id)) continue;
     const card = document.createElement("div");
-    card.className = "card engine";
+    card.className = "card tile engine";
     card.id = "engine-" + e.id;
     const head = document.createElement("div");
-    head.className = "card-head";
-    const h = document.createElement("h3");
+    head.className = "tile-head";
+    const h = document.createElement("span");
+    h.className = "tile-name";
     h.textContent = e.label;
     const chip = document.createElement("span");
     chip.className = "chip";
     chip.textContent = e.exe || "";
-    h.appendChild(chip);
     const st = document.createElement("span");
     st.className = "state-chip";
     st.id = "engState-" + e.id;
     head.appendChild(h);
+    head.appendChild(chip);
     head.appendChild(st);
     card.appendChild(head);
     const sub = document.createElement("p");
-    sub.className = "muted card-sub";
+    sub.className = "muted tile-note";
     sub.textContent = "Скачивается из последнего релиза " + (e.repo || "");
     card.appendChild(sub);
     const root = document.createElement("div");

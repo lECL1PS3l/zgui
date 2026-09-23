@@ -339,8 +339,24 @@ body.fx-paused .topo { animation-play-state: paused; }
 }
 .hidden { display: none !important; }
 
-/* ------- engines ------- */
+/* ------- engines / tiles ------- */
 .engines { display: grid; grid-template-columns: 1fr; gap: 18px; }
+
+/* Компактные плитки: строка с проверкой и движками на «Обновлениях». */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.tile { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.tile-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tile-name { font-size: 13px; font-weight: 600; }
+.tile-head .state-chip { margin-left: auto; }
+.tile-head > .btn { margin-left: auto; }
+.tile-note { font-size: 11px; line-height: 1.4; }
+.tile-field { font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+.tile .root-row { margin-top: auto; }
 
 .chip {
   padding: 2px 8px; border-radius: 6px;

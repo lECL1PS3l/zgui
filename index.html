@@ -138,19 +138,29 @@
         </section>
 
         <section class="page" id="view-updates">
-          <div class="card" id="autoCheckCard">
-            <div class="card-head">
-              <h3>Проверка обновлений</h3>
-              <button class="btn primary" id="btnCheck">Проверить обновления</button>
-            </div>
-            <div class="form-grid">
-              <label>Проверять каждые (ч)
+          <div class="tiles" id="updTiles">
+            <div class="card tile" id="autoCheckCard">
+              <div class="tile-head">
+                <span class="tile-name">Проверка обновлений</span>
+                <button class="btn primary small" id="btnCheck">Проверить</button>
+              </div>
+              <div class="tile-note muted">конфиги, движки и Telegram-мост</div>
+              <label class="tile-field">каждые (ч)
                 <input id="cfInterval" type="number" min="0" step="1" />
               </label>
+              <div class="tile-note muted">0 — отключить автопроверку</div>
             </div>
-            <p class="muted card-sub">
-              0 — отключить автопроверку. Проверяются конфиги, движок и Telegram-мост.
-            </p>
+            <div class="card tile engine" id="engine-flowseal">
+              <div class="tile-head">
+                <span class="tile-name">Flowseal</span>
+                <span class="chip">winws</span>
+                <span class="state-chip" id="fsState">нет</span>
+              </div>
+              <div class="tile-note muted">Встроенный движок; проверка и ручное обновление.</div>
+              <p class="muted card-sub" id="fsUpd"></p>
+              <div class="root-row" id="fsRoot"></div>
+            </div>
+            <!-- Остальные движки (zapret2/goodbyedpi/dpibreak) рендерятся в main.js -->
           </div>
 
           <div class="card">
@@ -168,16 +178,6 @@
             </div>
             <div id="progBar" class="prog hidden"><div class="prog-fill" id="progFill"></div><span id="progLabel"></span></div>
             <div id="updList" class="upd-list"></div>
-          </div>
-
-          <div class="engines">
-            <div class="card engine" id="engine-flowseal">
-              <div class="card-head"><h3>Flowseal <span class="chip">winws</span></h3><span class="state-chip" id="fsState">нет</span></div>
-              <p class="muted card-sub">Встроенный движок; проверка и ручное обновление.</p>
-              <p class="muted card-sub" id="fsUpd"></p>
-              <div class="root-row" id="fsRoot"></div>
-            </div>
-            <!-- Остальные движки (zapret2/goodbyedpi/dpibreak) рендерятся в main.js -->
           </div>
         </section>
 
