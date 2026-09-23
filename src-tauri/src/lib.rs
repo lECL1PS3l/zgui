@@ -997,7 +997,12 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     let err_log = logs.join(format!("stderr-{}.txt", profile.id));
     let pid_file = logs.join(format!("pid-{}.txt", profile.id));
 
-    let wd = root_path.join("bin");
+    // Рабочий каталог: у flowseal exe в bin/, у новых движков — в корне.
+    // Несуществующий wd ломает spawn (Windows «неверно задано имя папки»).
+    let wd = {
+        let bin = root_path.join("bin");
+        if bin.is_dir() { bin } else { exe.parent().map(|p| p.to_path_buf()).unwrap_or(root_path.clone()) }
+    };
 
     // Чистим старые логи: иначе при мгновенном выходе процесса в ошибку попадёт
     // содержимое прошлого запуска (в т.ч. в другой кодировке).
@@ -1283,7 +1288,11 @@ fn test_strategies(
             format!("для «{}» не задан корень движка", p.name)
         })?;
         let exe = locate_exe(&root, p.exe_name())?;
-        let wd = root.join("bin");
+        let args = presets::prepare_args(&p.args, &root, &tcp, &udp);
+        let wd = {
+            let bin = root.join("bin");
+            if bin.is_dir() { bin } else { exe.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| PathBuf::from(root.to_string_lossy().into_owned())) }
+        };
         steps.push(tester::TestStep {
             id: p.id.clone(),
             name: p.name.clone(),
@@ -1291,7 +1300,7 @@ fn test_strategies(
             group: tester::group_of(p),
             exe: exe.to_string_lossy().into_owned(),
             workdir: wd.to_string_lossy().into_owned(),
-            args: presets::prepare_args(&p.args, &root, &tcp, &udp),
+            args,
         });
     }
 
