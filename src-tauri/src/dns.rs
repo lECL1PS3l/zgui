@@ -1,4 +1,4 @@
-use crate::runner::{run_elevated_script, write_ps1};
+use crate::runner::{run_script_privileged, write_ps1};
 use serde::Serialize;
 use std::net::ToSocketAddrs;
 use std::path::Path;
@@ -247,7 +247,7 @@ Write-Output ("DNS: {name}; adapter: " + $alias)
         name = p.name,
     );
     write_ps1(&script, &body)?;
-    let code = run_elevated_script(&script)?;
+    let code = run_script_privileged(&script)?;
     let _ = std::fs::remove_file(&script);
     if code != 0 {
         return Err(format!("применение DNS не удалось, код {}", code));
@@ -273,7 +273,7 @@ Write-Output ("DNS reset: " + $alias)
         adapter = adapter_expr,
     );
     write_ps1(&script, &body)?;
-    let code = run_elevated_script(&script)?;
+    let code = run_script_privileged(&script)?;
     let _ = std::fs::remove_file(&script);
     if code != 0 {
         return Err(format!("сброс DNS не удался, код {}", code));

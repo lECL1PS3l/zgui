@@ -400,30 +400,25 @@ function hideConflict() {
 }
 
 /// Выгружает конфликты (без диалога, т.к. согласие уже дано) и повторяет действие.
-/// Повторяет выгрузку, пока конфликты не уйдут (они могут подниматься не сразу).
-async function autoKillAndProceed(retry, attempt = 0) {
-  if (conflictKilling && attempt === 0) return;
+/// Итоговое уведомление со списком выгруженного показывает бэкенд (один раз),
+/// поэтому здесь никаких тостов — только повтор действия при успехе.
+async function autoKillAndProceed(retry) {
+  if (conflictKilling) return;
   conflictKilling = true;
   try {
-    if (attempt >= 5) {
-      toast("warn", "не удалось выгрузить все конфликты — проверьте вручную");
-      return;
-    }
     try {
       await invoke("kill_conflicts");
     } catch (e) {
       toast("err", String(e));
+      return;
     }
-    // Дать процессам время умереть, затем перепроверить.
-    await new Promise((r) => setTimeout(r, 2000));
+    // Дать процессам умереть, затем перепроверить (backend уже выгрузил списком).
+    await new Promise((r) => setTimeout(r, 1500));
     const report = await invoke("conflict_check").catch(() => null);
     const still =
       report && ((report.processes || []).length || (report.vpn || []).length || report.foreignService);
-    if (still) {
-      // await — чтобы флаг conflictKilling держался до конца цепочки.
-      return await autoKillAndProceed(retry, attempt + 1);
-    }
-    toast("ok", "конфликтующие процессы выгружены");
+    // Не смогли выгрузить — не запускаем (бэкенд уже показал, что осталось).
+    if (still) return;
     if (typeof retry === "function") retry();
   } finally {
     conflictKilling = false;

@@ -1,5 +1,5 @@
 use crate::config::{Profile, SERVICE_NAME};
-use crate::runner::{hidden_command, run_elevated_script, run_powershell};
+use crate::runner::{hidden_command, run_powershell, run_script_privileged};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -298,13 +298,15 @@ pub fn start_service(data_dir: &Path) -> Result<(), String> {
         SERVICE_NAME
     );
     crate::runner::write_ps1(&script, &body)?;
-    let r = run_elevated_script(&script);
+    let r = run_script_privileged(&script);
     let _ = fs::remove_file(&script);
     r.map(|_| ())
 }
 
-/// Гасит чужие процессы и VPN (taskkill от админа). Свои pid-ы не трогает.
-pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &Path) -> Result<(), String> {
+/// Гасит чужие процессы и VPN «намертво» (taskkill по PID и по имени, стоп служб).
+/// Свои pid-ы не трогает. Возвращает список имён, по которым выдана команда
+/// завершения (для итогового уведомления в UI).
+pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &Path) -> Result<Vec<String>, String> {
     let mut pids: Vec<u32> = report
         .processes
         .iter()
@@ -322,9 +324,20 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
         .filter(|p| p.pid == 0)
         .filter_map(|p| p.name.strip_prefix("service:").map(|s| s.to_string()))
         .collect();
+    // Уникальные имена процессов (из pid-записей) — убиваем и по имени: это
+    // ловит все копии и переживает гонку с перезапуском демоном.
+    let mut names: Vec<String> = report
+        .processes
+        .iter()
+        .chain(report.vpn.iter())
+        .filter(|p| p.pid > 0 && !p.name.is_empty() && !p.name.starts_with("service:"))
+        .map(|p| p.name.clone())
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
 
-    if pids.is_empty() && !foreign_service && vpn_services.is_empty() {
-        return Ok(());
+    if pids.is_empty() && !foreign_service && vpn_services.is_empty() && names.is_empty() {
+        return Ok(Vec::new());
     }
 
     let mut body = format!("{}\n", crate::runner::PS_HEADER);
@@ -336,7 +349,23 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
              sc.exe stop '{svc}' 2>$null | Out-Null\n"
         ));
     }
-    if !vpn_services.is_empty() {
+    // Службы, чей путь ведёт к найденным VPN-процессам (имя службы может
+    // отличаться от имени exe — тогда по списку выше её не остановить).
+    if !names.is_empty() {
+        let stems: Vec<String> = names
+            .iter()
+            .map(|n| n.trim_end_matches(".exe").to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let pat = stems.join("|");
+        body.push_str(&format!(
+            "$pat = '{pat}'\n\
+             Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | \
+               Where-Object {{ $_.PathName -and $_.PathName.ToLower() -match $pat }} | \
+               ForEach-Object {{ Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue; sc.exe stop $_.Name 2>$null | Out-Null; sc.exe delete $_.Name 2>$null | Out-Null }}\n"
+        ));
+    }
+    if !vpn_services.is_empty() || !names.is_empty() {
         body.push_str("Start-Sleep -Seconds 2\n");
     }
     if foreign_service {
@@ -347,8 +376,11 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
             SERVICE_NAME, SERVICE_NAME
         ));
     }
-    // Теперь можно безопасно убивать процессы.
-    for pid in pids {
+    // Убиваем по имени (все копии), затем по PID (остатки/деревья).
+    for n in &names {
+        body.push_str(&format!("taskkill /F /T /IM \"{}\" 2>$null | Out-Null\n", n));
+    }
+    for pid in &pids {
         body.push_str(&format!("taskkill /F /T /PID {} 2>$null | Out-Null\n", pid));
     }
     body.push_str("exit 0\n");
@@ -357,9 +389,9 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
         .join("logs")
         .join(format!("conflict_kill_{}.ps1", std::process::id()));
     crate::runner::write_ps1(&script, &body)?;
-    let r = run_elevated_script(&script);
+    let r = run_script_privileged(&script);
     let _ = fs::remove_file(&script);
-    r.map(|_| ())
+    r.map(|_| names)
 }
 
 /// Строит командную строку службы: "C:\...\winws.exe" --arg "v" ...
@@ -404,7 +436,7 @@ pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir
         SERVICE_NAME
     );
     crate::runner::write_ps1(&script, &body)?;
-    let code = run_elevated_script(&script).map_err(|e| e.to_string())?;
+    let code = run_script_privileged(&script).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(&script);
     if code != 0 {
         return Err(format!("установка службы завершилась с кодом {}", code));
@@ -434,7 +466,7 @@ pub fn remove_service(data_dir: &Path) -> Result<(), String> {
         SERVICE_NAME
     );
     crate::runner::write_ps1(&script, &body).map_err(|e| e.to_string())?;
-    let r = run_elevated_script(&script);
+    let r = run_script_privileged(&script);
     let _ = fs::remove_file(&script);
     r.map(|_| ())
 }

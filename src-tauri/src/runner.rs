@@ -126,6 +126,30 @@ pub fn run_elevated_script(script: &Path) -> Result<i32, String> {
     Ok(out.status.code().unwrap_or(-1))
 }
 
+/// Запускает ps1-скрипт с правами администратора и ЖДЁТ результат.
+///
+/// Выбор пути критичен: `Start-Process -Verb RunAs` из УЖЕ повышенного процесса
+/// может не запустить дочерний процесс (или зависнуть) — тогда кнопка «делает
+/// вид, что работает», а действие не выполняется. Если GUI уже админ — запускаем
+/// напрямую; иначе — обычная UAC-элевация.
+pub fn run_script_privileged(script: &Path) -> Result<i32, String> {
+    if is_elevated() {
+        let status = hidden_command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script.to_string_lossy(),
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+        Ok(status.code().unwrap_or(-1))
+    } else {
+        run_elevated_script(script)
+    }
+}
+
 /// Запускает ps1-скрипт с UAC-элевацией, НЕ ожидая завершения (для длительных тестов).
 pub fn spawn_elevated_script(script: &Path) -> Result<(), String> {
     let inner = format!(
@@ -392,7 +416,7 @@ pub fn stop_pid(pid: u32, data_dir: &Path) -> Result<(), String> {
         .join("logs")
         .join(format!("kill_{}_{}.ps1", std::process::id(), pid));
     write_ps1(&script, &format!("{}\ntaskkill /F /T /PID {} | Out-Null\nexit 0", PS_HEADER, pid))?;
-    let r = run_elevated_script(&script);
+    let r = run_script_privileged(&script);
     let _ = fs::remove_file(&script);
     r.map(|_| ())
 }
@@ -410,11 +434,12 @@ pub fn stop_pids(pids: &[u32], data_dir: &Path) -> Result<(), String> {
     }
     body.push_str("exit 0\n");
     write_ps1(&script, &body)?;
-    let r = run_elevated_script(&script);
+    let r = run_script_privileged(&script);
     let _ = fs::remove_file(&script);
     r.map(|_| ())
 }
 
+/// Планирует выключение компьютера/перезагрузку (для UI).
 /// Хвост лог-файла.
 pub fn tail(path: &Path, max_chars: usize) -> String {
     crate::config::tail_file(path, max_chars)

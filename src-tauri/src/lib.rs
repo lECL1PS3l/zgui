@@ -890,7 +890,7 @@ fn stop_service(data: &std::path::Path) -> Result<(), String> {
     let p = data.join("logs").join(format!("svc_stop_{}.ps1", std::process::id()));
     std::fs::write(&p, format!("{}\nnet stop {} 2>$null | Out-Null\nexit 0", rn::PS_HEADER, SERVICE_NAME))
         .map_err(|e| e.to_string())?;
-    let r = rn::run_elevated_script(&p);
+    let r = rn::run_script_privileged(&p);
     let _ = std::fs::remove_file(&p);
     r.map(|_| ())
 }
@@ -1977,14 +1977,42 @@ fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String>
     let app2 = app.clone();
     std::thread::spawn(move || {
         let r = svc::kill_conflicts(&report, our_pid, &data);
+        // Итог считаем по факту: что было до и что осталось после (одно
+        // уведомление в конце со списком выгруженных, а не по каждому процессу).
+        let after = svc::detect_conflicts(&data, our_pid);
+        let names_of = |rep: &svc::ConflictReport| -> std::collections::BTreeMap<String, u32> {
+            let mut m = std::collections::BTreeMap::new();
+            for p in rep.processes.iter().chain(rep.vpn.iter()) {
+                if p.pid > 0 && !p.name.is_empty() && !p.name.starts_with("service:") {
+                    *m.entry(p.name.clone()).or_insert(0) += 1;
+                }
+            }
+            m
+        };
+        let before = names_of(&report);
+        let remain = names_of(&after);
+        let killed: Vec<String> = before
+            .iter()
+            .filter(|(n, _)| !remain.contains_key(*n))
+            .map(|(n, c)| if *c > 1 { format!("{n} ×{c}") } else { n.clone() })
+            .collect();
+        let left: Vec<String> = remain.keys().cloned().collect();
         // После выгрузки VPN его системный прокси часто остаётся «висеть» —
         // чиним сразу, чтобы у пользователя не пропал интернет.
         let healed = heal_orphan_proxy();
-        let (kind, text) = match r {
-            Ok(_) => ("ok", "конфликтующие процессы выгружены".to_string()),
-            Err(e) => ("err", format!("не удалось выгрузить: {}", e)),
-        };
-        emit(&app2, "zgui:toast", serde_json::json!({"kind": kind, "text": text}));
+        match r {
+            Ok(_) => {
+                if !killed.is_empty() {
+                    emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("выгружено: {}", killed.join(", "))}));
+                }
+                if !left.is_empty() {
+                    emit(&app2, "zgui:toast", serde_json::json!({"kind":"warn","text": format!("не удалось выгрузить: {}", left.join(", "))}));
+                } else if killed.is_empty() && !after.has_conflicts() {
+                    emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text":"конфликтов нет"}));
+                }
+            }
+            Err(e) => emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": format!("не удалось выгрузить: {e}")})),
+        }
         if let Some(proxy) = healed {
             emit(
                 &app2,

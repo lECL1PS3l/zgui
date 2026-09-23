@@ -10,7 +10,7 @@
 use serde::Serialize;
 use std::path::Path;
 
-use crate::runner::{run_elevated_script, write_ps1};
+use crate::runner::{run_script_privileged, write_ps1};
 
 #[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -60,7 +60,7 @@ try {{
         header = crate::runner::PS_HEADER,
     );
     write_ps1(&script, &body)?;
-    let code = run_elevated_script(&script);
+    let code = run_script_privileged(&script);
     let _ = std::fs::remove_file(&script);
     match code {
         Ok(0) => {
@@ -170,7 +170,7 @@ pub fn reset(data: &Path) -> Result<NetResetResult, String> {
     body.push_str("Write-Output 'DONE'\nexit 0\n");
 
     write_ps1(&script, &body)?;
-    let code = run_elevated_script(&script);
+    let code = run_script_privileged(&script);
     let _ = std::fs::remove_file(&script);
     code?;
 
