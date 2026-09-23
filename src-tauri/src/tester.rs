@@ -600,11 +600,12 @@ pub fn read_test_progress(out_path: &Path) -> Option<serde_json::Value> {
 
 /// Группирует профили по типу стратегии для UI.
 pub fn group_of(p: &Profile) -> String {
-    if p.source.as_deref().is_some_and(|s| s.starts_with("preset:")) {
-        "flowseal preset".into()
+    let kind = if p.source.as_deref().is_some_and(|s| s.starts_with("preset:")) {
+        "preset"
     } else {
-        "flowseal bat".into()
-    }
+        "bat"
+    };
+    format!("{kind} · {}", crate::config::engine_def(&p.engine).map(|d| d.label).unwrap_or(p.engine.as_str()))
 }
 
 /// Формирует сводку: отсортированные результаты + лучшая стратегия.
@@ -710,7 +711,13 @@ mod tests {
             source: Some("general.bat".into()),
             updated_at: None,
         };
-        assert_eq!(group_of(&p), "flowseal bat");
+        assert_eq!(group_of(&p), "bat · Flowseal (zapret winws)");
+        let q = Profile {
+            engine: crate::config::ENGINE_ZAPRET2.into(),
+            source: Some("preset:zapret2-general".into()),
+            ..p
+        };
+        assert_eq!(group_of(&q), "preset · zapret2 (winws2)");
     }
 
     #[test]

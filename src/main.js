@@ -907,8 +907,10 @@ function closeProfileModal() {
 // ------------------------------------------------------------- test
 
 function flowsealProfiles() {
+  // Все профили УСТАНОВЛЕННЫХ движков (матрица автоподбора).
   // B может быть null в момент перезагрузки (zgui:updates) — не роняем рендер.
-  return ((B && B.profiles) || []).filter((p) => p.engine === "flowseal");
+  const engines = ((B && B.engines) || []).filter((e) => e.ready).map((e) => e.id);
+  return ((B && B.profiles) || []).filter((p) => engines.includes(p.engine));
 }
 
 function renderTestCard() {
@@ -916,7 +918,7 @@ function renderTestCard() {
   if (!pick) return;
   const profs = flowsealProfiles();
   if (!profs.length) {
-    pick.innerHTML = '<div class="empty">Сначала скачайте движок Flowseal — стратегии *.bat появятся здесь.</div>';
+    pick.innerHTML = '<div class="empty">Нет доступных движков — скачайте хотя бы один на вкладке «Обновления».</div>';
     $("#btnRunTest").disabled = true;
     return;
   }
@@ -1037,7 +1039,7 @@ function renderTestResults() {
     head.appendChild(nm);
     const grp = document.createElement("span");
     grp.className = "chip";
-    grp.textContent = "winws";
+    grp.textContent = engineLabel(r.engine) || r.engine;
     head.appendChild(grp);
     const sc = document.createElement("span");
     sc.className = "test-row-score";
@@ -1114,7 +1116,7 @@ async function runTest(already, mode) {
              с базовой пробой без Zapret.</p>
            <p class="sub">Это может занять продолжительное время. Windows запросит права администратора —
              они нужны, чтобы запускать обход (один раз).</p>`
-        : `<p>Будет запущено <b>${useIds.length}</b> стратегий по очереди.</p>
+        : `<p>Будет запущено <b>${useIds.length}</b> стратегий по очереди (все выбранные движки).</p>
            <p class="sub">Windows запросит права администратора — они нужны, чтобы запускать обход
              (один раз на весь тест).</p>`,
     });

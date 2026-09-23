@@ -1248,15 +1248,31 @@ fn test_strategies(
     let (profiles, data, roots_ok) = {
         let s = st(g);
         let all = s.profiles.clone();
+        // По умолчанию — все профили УСТАНОВЛЕННЫХ движков (матрица кандидатов
+        // автоподбора). Неустановленный движок не ломает тест, его пресеты
+        // просто не попадают в прогон. Явно выбранные id идут как есть.
+        let roots = s.roots.clone();
         let selected: Vec<Profile> = if ids.is_empty() {
             all.iter()
-                .filter(|p| p.engine == ENGINE_FLOWSEAL)
+                .filter(|p| {
+                    crate::config::engine_def(&p.engine).is_some()
+                        && roots.path(&p.engine).is_some()
+                })
                 .cloned()
                 .collect()
         } else {
             all.iter().filter(|p| ids.contains(&p.id)).cloned().collect()
         };
-        (selected, s.data.clone(), s.roots.clone())
+        let selected = if ids.is_empty() {
+            selected
+        } else {
+            // Явный выбор не должен падать молча: недоступный движок — честная ошибка.
+            selected
+                .into_iter()
+                .filter(|p| roots.path(&p.engine).is_some())
+                .collect()
+        };
+        (selected, s.data.clone(), roots)
     };
     if profiles.is_empty() {
         return Err("нет стратегий для теста".into());
