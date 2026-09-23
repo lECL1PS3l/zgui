@@ -7,6 +7,12 @@ use std::path::Path;
 
 const ENGINE_ROOT: &str = "%ENGINE_ROOT%";
 
+/// Идентификатор профиля-пресета по его короткому id. Единая точка правды:
+/// и вшитые (PresetDef), и OTA-пресеты (updater.rs) строят id одинаково.
+pub fn preset_profile_id(id: &str) -> String {
+    format!("preset:{id}")
+}
+
 pub struct PresetDef {
     pub id: &'static str,
     pub engine: &'static str,
@@ -21,15 +27,22 @@ impl PresetDef {
 
     /// Пресет как профиль: builtin, источник «preset:» (не редактируется как свой).
     pub fn to_profile(&self) -> Profile {
-        Profile {
-            id: format!("preset:{}", self.id),
-            name: self.name.into(),
-            engine: self.engine.into(),
-            args: self.args_vec(),
-            builtin: true,
-            source: Some(format!("preset:{}", self.id)),
-            updated_at: None,
-        }
+        preset_profile(self.id, self.engine, self.name, self.args_vec())
+    }
+}
+
+/// Собирает builtin-профиль пресета из готовых полей. Используется и вшитой
+/// таблицей (PresetDef::to_profile), и OTA-пресетами (updater.rs).
+pub fn preset_profile(id: &str, engine: &str, name: &str, args: Vec<String>) -> Profile {
+    let pid = preset_profile_id(id);
+    Profile {
+        id: pid.clone(),
+        name: name.into(),
+        engine: engine.into(),
+        args,
+        builtin: true,
+        source: Some(pid),
+        updated_at: None,
     }
 }
 
@@ -239,6 +252,46 @@ pub fn prepare_args(args: &[String], root: &Path, tcp: &str, udp: &str) -> Vec<S
     apply_engine_root(&crate::profiles::apply_game_filter(args, tcp, udp), root)
 }
 
+/// JSON-набор вшитых пресетов для ассета релиза `presets.json`. Формат читает
+/// `updater::parse_preset_set`. Источник правды — эта же таблица, поэтому ассет
+/// при релизе генерируется отсюда (см. `emit_preset_set_json` и env
+/// ZGUI_PRESETS_OUT в тестах).
+#[allow(dead_code)] // генератор ассета релиза: вызов из теста по ZGUI_PRESETS_OUT
+pub fn preset_set_json(version: &str) -> String {
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    let items: Vec<String> = builtin_presets()
+        .iter()
+        .map(|p| {
+            let args = p
+                .args
+                .iter()
+                .map(|a| format!("\"{}\"", esc(a)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"id\":\"{}\",\"engine\":\"{}\",\"name\":\"{}\",\"args\":[{}]}}",
+                esc(p.id),
+                esc(p.engine),
+                esc(p.name),
+                args
+            )
+        })
+        .collect();
+    format!(
+        "{{\"version\":\"{}\",\"presets\":[{}]}}",
+        esc(version),
+        items.join(",")
+    )
+}
+
+/// Выгружает актуальный ассет пресетов в указанный путь (для подготовки релиза).
+#[allow(dead_code)] // генератор ассета релиза: вызов из теста по ZGUI_PRESETS_OUT
+pub fn emit_preset_set_json(path: &Path, version: &str) -> Result<(), String> {
+    std::fs::write(path, preset_set_json(version)).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +317,27 @@ mod tests {
         );
         assert!(out[0].contains(r"D:\e2\lua\zapret-lib.lua") && !out[0].contains('%'));
         assert_eq!(out[1], "plain"); // без плейсхолдера — не трогаем
+    }
+
+    #[test]
+    fn generated_set_round_trips_through_parser() {
+        // Ассет релиза (preset_set_json) должен читаться тем же парсером, что и
+        // OTA-набор — иначе опубликованный presets.json окажется несовместим.
+        let json = preset_set_json("2026.09.24");
+        let set = crate::updater::parse_preset_set(json.as_bytes()).unwrap();
+        assert_eq!(set.version, "2026.09.24");
+        assert_eq!(set.presets.len(), builtin_presets().len(), "все пресеты должны пережить round-trip");
+        assert!(set.presets.iter().any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
+    }
+
+    #[test]
+    fn emit_asset_when_requested() {
+        // Генерация ассета релиза только по запросу (CI/подготовка релиза):
+        // ZGUI_PRESETS_OUT=<путь> ZGUI_PRESETS_VERSION=<версия>
+        if let Ok(out) = std::env::var("ZGUI_PRESETS_OUT") {
+            let ver = std::env::var("ZGUI_PRESETS_VERSION").unwrap_or_else(|_| "0".into());
+            emit_preset_set_json(Path::new(&out), &ver).unwrap();
+            eprintln!("presets.json выгружен в {out} (версия {ver})");
+        }
     }
 }

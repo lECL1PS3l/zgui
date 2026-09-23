@@ -10,6 +10,10 @@ pub const ENGINE_GOODBYEDPI: &str = "goodbyedpi";
 pub const ENGINE_DPIBREAK: &str = "dpibreak";
 pub const SERVICE_NAME: &str = "zapret";
 
+/// Репозиторий самого Z GUI: отсюда качаются движки нашей сборки (self_asset)
+/// и OTA-набор пресетов (presets.json в ассетах последнего релиза).
+pub const SELF_REPO: &str = "lECL1PS3l/zgui";
+
 /// Описание встроенного движка. Единая точка правды: exe, репозиторий релизов,
 /// человекочитаемое имя. Все проверки «какой движок» идут через реестр.
 pub struct EngineDef {

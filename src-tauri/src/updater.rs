@@ -1,4 +1,4 @@
-use crate::config::{Roots, Settings, UpdEntry};
+use crate::config::{Roots, Settings, UpdEntry, SELF_REPO};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -276,7 +276,11 @@ pub fn check_all(data: &Path, roots: &Roots, settings: &Settings) -> Result<Vec<
             .collect()
     });
     out.sort_by_key(|(i, _)| *i);
-    Ok(out.into_iter().map(|(_, u)| u).collect())
+    let mut result: Vec<UpdEntry> = out.into_iter().map(|(_, u)| u).collect();
+    // OTA-набор пресетов — не файловая запись (живёт в state.json), добавляем
+    // сводной строкой в конец каталога.
+    result.push(check_preset_entry(&archive));
+    Ok(result)
 }
 
 /// Применяет выбранные обновления (ид-ы или все доступные).
@@ -339,6 +343,170 @@ pub fn apply_updates(data: &Path, roots: &Roots, settings: &Settings, ids: Vec<S
 
     archive.save(data);
     Ok(out)
+}
+
+// ------------------------------------------------- OTA: набор пресетов
+
+/// Один пресет из HTTP-набора (presets.json в ассетах релиза SELF_REPO).
+#[derive(Clone, Debug)]
+pub struct RemotePreset {
+    pub id: String,
+    pub engine: String,
+    pub name: String,
+    pub args: Vec<String>,
+}
+
+/// Разобранный набор: версия + сами пресеты.
+#[derive(Clone, Debug, Default)]
+pub struct RemotePresetSet {
+    pub version: String,
+    pub presets: Vec<RemotePreset>,
+}
+
+/// id сводной записи набора пресетов в каталоге обновлений и в applied.json.
+pub const PRESETS_ENTRY_ID: &str = "presets:set";
+/// Группа набора пресетов в UI.
+pub const PRESETS_GROUP: &str = "Набор пресетов";
+
+/// Разбирает presets.json: объект `{version, presets:[...]}` либо голый массив
+/// пресетов. Пресеты с неизвестным движком пропускаются (набор мог быть новее
+/// программы), у которых пустой id или args — тоже.
+pub fn parse_preset_set(bytes: &[u8]) -> Result<RemotePresetSet, String> {
+    let v: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("presets.json: {e}"))?;
+    let (version, arr) = match &v {
+        serde_json::Value::Array(a) => (String::new(), a.clone()),
+        serde_json::Value::Object(_) => (
+            v["version"].as_str().unwrap_or("").trim().to_string(),
+            v["presets"].as_array().cloned().unwrap_or_default(),
+        ),
+        _ => return Err("presets.json: ожидался объект или массив".into()),
+    };
+
+    let mut presets = Vec::new();
+    for item in arr {
+        let id = item["id"].as_str().unwrap_or("").trim().to_string();
+        let engine = item["engine"].as_str().unwrap_or("").trim().to_string();
+        let name = item["name"].as_str().unwrap_or("").trim().to_string();
+        let args: Vec<String> = item["args"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        if id.is_empty() || args.is_empty() {
+            continue;
+        }
+        if crate::config::engine_def(&engine).is_none() {
+            continue;
+        }
+        let name = if name.is_empty() { id.clone() } else { name };
+        presets.push(RemotePreset { id, engine, name, args });
+    }
+    if presets.is_empty() {
+        return Err("presets.json: нет валидных пресетов".into());
+    }
+    Ok(RemotePresetSet { version, presets })
+}
+
+/// Качает presets.json из ассетов последнего релиза SELF_REPO.
+pub fn fetch_preset_set() -> Result<RemotePresetSet, String> {
+    let cli = client()?;
+    let resp = cli
+        .get(format!("https://api.github.com/repos/{}/releases/latest", SELF_REPO))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API: HTTP {}", resp.status()));
+    }
+    let rel: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    let url = rel["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some("presets.json")))
+        .and_then(|x| x["browser_download_url"].as_str())
+        .map(str::to_string);
+    let Some(url) = url else {
+        return Err("в релизе нет ассета presets.json".into());
+    };
+    parse_preset_set(&fetch_bytes(&cli, &url)?)
+}
+
+/// Сводная запись набора пресетов для каталога обновлений.
+pub fn check_preset_entry(archive: &UpdArchive) -> UpdEntry {
+    let mut u = UpdEntry {
+        id: PRESETS_ENTRY_ID.into(),
+        group: PRESETS_GROUP.into(),
+        label: "presets.json".into(),
+        dest: String::new(),
+        exists: false,
+        status: "unknown".into(),
+        remote_hash: None,
+        applied_hash: None,
+        local_hash: None,
+        size: 0,
+        error: None,
+    };
+    match fetch_preset_set() {
+        Ok(set) => {
+            u.exists = true;
+            u.remote_hash = Some(set.version.clone());
+            let applied = archive.applied(PRESETS_ENTRY_ID);
+            u.applied_hash = applied.clone();
+            // Версия набора пустая — не с чем сравнивать; считаем актуальным,
+            // если набор уже применялся, иначе предлагаем применить.
+            u.status = if (!set.version.is_empty() && applied.as_deref() == Some(set.version.as_str()))
+                || (set.version.is_empty() && applied.is_some())
+            {
+                "ok".into()
+            } else {
+                "avail".into()
+            };
+        }
+        Err(e) => {
+            u.status = "err".into();
+            u.error = Some(e);
+        }
+    }
+    u
+}
+
+/// Применяет набор пресетов к профилям: обновляет builtin-пресеты
+/// (id `preset:<id>`) и добавляет недостающие. Кастомные профили не трогаются.
+/// Возвращает (обновлено, добавлено).
+pub fn apply_preset_set(profiles: &mut Vec<crate::config::Profile>, set: &RemotePresetSet) -> (usize, usize) {
+    let (mut updated, mut added) = (0usize, 0usize);
+    for rp in &set.presets {
+        let p = crate::presets::preset_profile(&rp.id, &rp.engine, &rp.name, rp.args.clone());
+        match profiles.iter_mut().find(|x| x.id == p.id) {
+            Some(ex) => {
+                if ex.builtin {
+                    if ex.args != p.args || ex.name != p.name || ex.engine != p.engine {
+                        ex.args = p.args;
+                        ex.name = p.name;
+                        ex.engine = p.engine;
+                        updated += 1;
+                    }
+                }
+                // кастомный профиль с тем же id — не трогаем.
+            }
+            None => {
+                profiles.push(p);
+                added += 1;
+            }
+        }
+    }
+    (updated, added)
+}
+
+/// Применяет уже скачанный набор пресетов: обновляет builtin-пресеты в
+/// `profiles`, фиксирует версию в applied.json. Кастомные профили не трогаются.
+/// Возвращает (обновлено, добавлено). Сеть здесь НЕ используется — вызывающая
+/// сторона качает набор заранее (вне блокировки state).
+pub fn apply_presets(data: &Path, profiles: &mut Vec<crate::config::Profile>, set: &RemotePresetSet) -> (usize, usize) {
+    let (updated, added) = apply_preset_set(profiles, set);
+    let mut archive = UpdArchive::load(data);
+    archive.record(PRESETS_ENTRY_ID, &set.version, crate::profiles::now_str());
+    archive.save(data);
+    (updated, added)
 }
 
 /// Заглушка Flowseal для режима ipset «none» (по ней service.bat определяет режим).
@@ -538,6 +706,89 @@ mod tg_tests {
         assert!(!version_is_newer("2.3.4", "2.3.4-zui.2"));
         assert!(version_is_newer("2.3.4-zui.3", "2.3.4-zui.2"));
         assert!(!version_is_newer("2.3.4-zui.2", "2.3.4-zui.2"));
+    }
+
+    #[test]
+    fn preset_set_parses_object_and_array_and_skips_unknown() {
+        // Объект с version + массивом. Неизвестный движок и пустые args — пропуск.
+        let body = r#"{"version":"2026.09.24","presets":[
+            {"id":"z2-x","engine":"zapret2","name":"Z2 X","args":["--wf-tcp-out=80,443"]},
+            {"id":"bad-engine","engine":"nope","name":"X","args":["-9"]},
+            {"id":"no-args","engine":"goodbyedpi","name":"Y","args":[]}
+        ]}"#;
+        let set = parse_preset_set(body.as_bytes()).unwrap();
+        assert_eq!(set.version, "2026.09.24");
+        assert_eq!(set.presets.len(), 1, "пропуск неизвестного движка/пустых args");
+        assert_eq!(set.presets[0].id, "z2-x");
+
+        // Голый массив без версии.
+        let arr = r#"[{"id":"gd","engine":"goodbyedpi","args":["-9"]}]"#;
+        let set2 = parse_preset_set(arr.as_bytes()).unwrap();
+        assert!(set2.version.is_empty());
+        assert_eq!(set2.presets.len(), 1);
+
+        // Мусор и пустой набор — ошибки.
+        assert!(parse_preset_set(b"not json").is_err());
+        assert!(parse_preset_set(br#"{"version":"1","presets":[]}"#).is_err());
+    }
+
+    #[test]
+    fn apply_preset_set_updates_builtin_adds_new_keeps_custom() {
+        let set = RemotePresetSet {
+            version: "2026.09.24".into(),
+            presets: vec![
+                RemotePreset {
+                    id: "z2-x".into(),
+                    engine: "zapret2".into(),
+                    name: "Z2 X".into(),
+                    args: vec!["--wf-tcp-out=80,443".into()],
+                },
+                RemotePreset {
+                    id: "new-one".into(),
+                    engine: "goodbyedpi".into(),
+                    name: "New".into(),
+                    args: vec!["-9".into()],
+                },
+            ],
+        };
+        let mut profiles = vec![
+            // builtin с тем же id, старыми аргументами — обновляется.
+            crate::presets::preset_profile("z2-x", "zapret2", "старое", vec!["old".into()]),
+            // кастомный профиль с СВОИМ id (не пресет) — не трогаем.
+            crate::config::Profile {
+                id: "мой".into(),
+                name: "мой".into(),
+                engine: "flowseal".into(),
+                args: vec!["keep".into()],
+                builtin: false,
+                source: Some("manual".into()),
+                updated_at: None,
+            },
+        ];
+        let (updated, added) = apply_preset_set(&mut profiles, &set);
+        assert_eq!(updated, 1, "builtin z2-x должен обновиться");
+        assert_eq!(added, 1, "new-one должен добавиться");
+        let z2 = profiles.iter().find(|p| p.id == "preset:z2-x").unwrap();
+        assert_eq!(z2.args, vec!["--wf-tcp-out=80,443".to_string()]);
+        assert!(z2.builtin);
+        let custom = profiles.iter().find(|p| p.id == "мой").unwrap();
+        assert_eq!(custom.args, vec!["keep".to_string()]);
+
+        // Кастомный профиль, занявший id пресета, не перезаписывается.
+        let mut profiles2 = vec![crate::config::Profile {
+            id: "preset:z2-x".into(),
+            name: "мой".into(),
+            engine: "flowseal".into(),
+            args: vec!["keep".into()],
+            builtin: false,
+            source: None,
+            updated_at: None,
+        }];
+        let (upd2, add2) = apply_preset_set(&mut profiles2, &set);
+        // z2-x занят кастомным (не трогаем), new-one добавляется.
+        assert_eq!(upd2, 0);
+        assert_eq!(add2, 1);
+        assert_eq!(profiles2.iter().find(|p| p.id == "preset:z2-x").unwrap().args, vec!["keep".to_string()]);
     }
 
     #[test]

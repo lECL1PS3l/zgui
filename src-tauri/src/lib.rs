@@ -1,6 +1,6 @@
 use crate::config::{
     AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL, ENGINE_ZAPRET2,
-    SERVICE_NAME,
+    SERVICE_NAME, SELF_REPO,
 };
 use crate::profiles as pf;
 use crate::runner as rn;
@@ -18,8 +18,6 @@ use std::sync::{Mutex, MutexGuard};
 /// Правило порядка: всегда берётся ДО `Global::state` (иначе дедлок).
 static OPS: Mutex<()> = Mutex::new(());
 
-/// Репо самого Z GUI: отсюда качаются движки нашей сборки (self_asset).
-const SELF_REPO: &str = "lECL1PS3l/zgui";
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -2216,13 +2214,68 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
     };
     let app2 = app.clone();
     std::thread::spawn(move || {
-        match up::apply_updates(&data, &roots, &settings, ids) {
-            Ok(entries) => {
+        let wants_presets = ids.is_empty() || ids.iter().any(|i| i == up::PRESETS_ENTRY_ID);
+        // OTA-набор пресетов качаем ЗАРАНЕЕ, вне блокировки state (сеть до 45 с).
+        let preset_set = if wants_presets {
+            up::fetch_preset_set().ok()
+        } else {
+            None
+        };
+        let preset_err = if wants_presets && preset_set.is_none() {
+            Some("не удалось скачать набор пресетов".to_string())
+        } else {
+            None
+        };
+        // Файловые записи: id набора пресетов — не файл, исключаем. Если после
+        // фильтра список пуст, а выбор был непустой — файловых записей не выбрано,
+        // apply_updates не зовём (пустой список у него означает «все»).
+        let file_ids: Vec<String> = ids.iter().filter(|i| *i != up::PRESETS_ENTRY_ID).cloned().collect();
+        let file_applied = if ids.is_empty() || !file_ids.is_empty() {
+            up::apply_updates(&data, &roots, &settings, file_ids)
+        } else {
+            Ok(Vec::new())
+        };
+        match file_applied {
+            Ok(mut entries) => {
                 let ga2 = app2.state::<Global>();
                 let mut s = ga2.state.lock().unwrap();
+                let mut preset_note: Option<String> = None;
+                if let Some(set) = &preset_set {
+                    let (updated, added) = up::apply_presets(&data, &mut s.profiles, set);
+                    preset_note = Some(format!("пресеты: обновлено {updated}, добавлено {added}"));
+                    entries.push(crate::config::UpdEntry {
+                        id: up::PRESETS_ENTRY_ID.into(),
+                        group: up::PRESETS_GROUP.into(),
+                        label: format!("presets.json ({updated} обновлено, {added} добавлено)"),
+                        dest: String::new(),
+                        exists: true,
+                        status: "ok".into(),
+                        remote_hash: Some(set.version.clone()),
+                        applied_hash: Some(set.version.clone()),
+                        local_hash: None,
+                        size: 0,
+                        error: None,
+                    });
+                } else if let Some(err) = &preset_err {
+                    entries.push(crate::config::UpdEntry {
+                        id: up::PRESETS_ENTRY_ID.into(),
+                        group: up::PRESETS_GROUP.into(),
+                        label: "presets.json".into(),
+                        dest: String::new(),
+                        exists: false,
+                        status: "err".into(),
+                        remote_hash: None,
+                        applied_hash: None,
+                        local_hash: None,
+                        size: 0,
+                        error: Some(err.clone()),
+                    });
+                }
                 for e in &entries {
                     if let Some(old) = s.updater.entries.iter_mut().find(|x| x.id == e.id) {
                         *old = e.clone();
+                    } else {
+                        s.updater.entries.push(e.clone());
                     }
                 }
                 if entries.iter().any(|e| e.group.starts_with("flowseal strategies") && e.status == "ok") {
@@ -2240,9 +2293,13 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
                 logger::log(
                     if failed.is_empty() { "ok" } else { "warn" },
                     "updates",
-                    &format!("обновлено файлов: {ok_count}{}", if failed.is_empty() { String::new() } else { format!(", ошибки: {}", failed.join("; ")) }),
+                    &format!(
+                        "обновлено записей: {ok_count}{}{}",
+                        preset_note.map(|n| format!(" ({n})")).unwrap_or_default(),
+                        if failed.is_empty() { String::new() } else { format!(", ошибки: {}", failed.join("; ")) }
+                    ),
                 );
-                emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("обновлено файлов: {}", ok_count)}));
+                emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("обновлено записей: {}", ok_count)}));
             }
             Err(e) => {
                 logger::log("err", "updates", &format!("применение обновлений не удалось: {e}"));
