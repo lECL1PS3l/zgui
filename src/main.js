@@ -306,6 +306,7 @@ function onBootstrap() {
   renderWarnings();
   renderProfiles();
   renderTestCard();
+  renderAutotune();
   renderAutostart();
   renderEngineUpd();
   renderSettings();
@@ -855,6 +856,12 @@ function renderProfiles() {
       b.textContent = "шаблон";
       chips.appendChild(b);
     }
+    if (p.source && p.source.startsWith("auto:")) {
+      const b = document.createElement("span");
+      b.className = "chip";
+      b.textContent = "автоподбор";
+      chips.appendChild(b);
+    }
     if (autoProfile === p.id) {
       const b = document.createElement("span");
       b.className = "chip best";
@@ -1130,6 +1137,145 @@ function renderTestResults() {
       row.appendChild(details);
     }
     box.appendChild(row);
+  }
+}
+
+// ------------------------------------------------------------- autotune
+
+// Выбранный движок и id последних кандидатов подбора.
+let autotuneEngine = null;
+let autotuneIds = null;
+let autotuneTabsSig = "";
+
+function autotuneEngineDefault() {
+  const ready = ((B && B.engines) || []).filter((e) => e.ready);
+  return ready.length ? ready[0].id : null;
+}
+
+function renderAutotune() {
+  const wrap = $("#autoTabs");
+  if (!wrap) return;
+  if (!autotuneEngine) autotuneEngine = autotuneEngineDefault();
+  const sig =
+    ((B && B.engines) || []).map((e) => `${e.id}:${e.ready ? 1 : 0}`).join(",") + "|" + (autotuneEngine || "");
+  if (sig !== autotuneTabsSig) {
+    autotuneTabsSig = sig;
+    buildEngineTabs(wrap, autotuneEngine || "all", (f) => {
+      autotuneEngine = f === "all" ? autotuneEngineDefault() : f;
+      autotuneIds = null;
+      renderAutotune();
+    });
+  }
+  const running = !!(testState && testState.running);
+  $("#btnRunAutotune").disabled = running || !autotuneEngine;
+  $("#btnStopAutotune").disabled = !running;
+
+  const bar = $("#autoProgBar");
+  if (testState && testState.total && (testState.running || testState.phase !== "done")) {
+    bar.classList.remove("hidden");
+    $("#autoProgFill").style.width = Math.max(0, Math.min(100, testState.pct || 0)) + "%";
+    $("#autoProgLabel").textContent = `${testState.msg || ""} (${testState.index}/${testState.total})`;
+  } else {
+    bar.classList.add("hidden");
+  }
+
+  const ids = autotuneIds || [];
+  const results = ((testState && testState.results) || []).filter((r) => ids.includes(r.id));
+  const bestBox = $("#autoBest");
+  bestBox.classList.add("hidden");
+  bestBox.innerHTML = "";
+  const list = $("#autoList");
+  list.innerHTML = "";
+  if (!results.length) {
+    list.innerHTML = `<div class="empty">Нажмите «Подобрать»${autotuneEngine ? " для " + engineLabel(autotuneEngine) : ""} — переберём кандидатов.</div>`;
+    return;
+  }
+  const best = testState && testState.bestId && ids.includes(testState.bestId) ? testState.bestId : null;
+  if (best && testState.done) {
+    const bo = results.find((r) => r.id === best);
+    bestBox.classList.remove("hidden");
+    const t = document.createElement("div");
+    t.className = "test-best-title";
+    t.textContent = `Лучшая: ${bo ? bo.name : best}`;
+    bestBox.appendChild(t);
+    const keep = btn("Оставить в профилях", "primary small", async () => {
+      btnBusy(keep, true);
+      try {
+        await invoke("autotune_keep", { engine: autotuneEngine, id: best });
+        toast("ok", "лучшая стратегия оставлена в «Стратегиях» (чип «автоподбор»)");
+        await refreshAll();
+      } catch (e) {
+        toast("err", String(e));
+      }
+      btnBusy(keep, false);
+    });
+    const apply = btn("Применить: автозапуск + запустить", "ghost small", async () => {
+      btnBusy(apply, true);
+      try {
+        await invoke("apply_best_strategy", { id: best });
+        toast("ok", "применено: автозапуск включён, стратегия запущена");
+      } catch (e) {
+        toast("err", String(e));
+      }
+      btnBusy(apply, false);
+      await refreshAll();
+    });
+    bestBox.appendChild(keep);
+    bestBox.appendChild(apply);
+  }
+  for (const r of results.slice().sort((a, b) => b.score - a.score)) {
+    const row = document.createElement("div");
+    row.className = "test-row " + (r.criticalOk ? "ok" : r.started && r.score > 0 ? "part" : "bad");
+    const head = document.createElement("div");
+    head.className = "test-row-head";
+    const nm = document.createElement("span");
+    nm.className = "test-row-name";
+    nm.textContent = r.name;
+    head.appendChild(nm);
+    const sc = document.createElement("span");
+    sc.className = "test-row-score";
+    sc.textContent = r.started ? `${r.score}/${r.maxScore}` : "не запустилась";
+    head.appendChild(sc);
+    row.appendChild(head);
+    if (r.error) {
+      const er = document.createElement("div");
+      er.className = "muted";
+      er.style.fontSize = "11px";
+      er.textContent = r.error;
+      row.appendChild(er);
+    }
+    list.appendChild(row);
+  }
+}
+
+async function runAutotune() {
+  const eng = autotuneEngine || autotuneEngineDefault();
+  if (!eng) {
+    toast("warn", "нет установленных движков — скачайте движок на вкладке «Обновления»");
+    return;
+  }
+  if (B && B.opRunning) {
+    toast("warn", "идёт другая операция — дождитесь завершения");
+    return;
+  }
+  try {
+    const profs = await invoke("autotune_prepare", { engine: eng });
+    autotuneIds = profs.map((p) => p.id);
+    if (!autotuneIds.length) {
+      toast("warn", "нет кандидатов для подбора");
+      return;
+    }
+    const ok = await showConfirm({
+      title: "Подбор стратегии",
+      okLabel: "Запустить",
+      html: `<p>Будет перебрано <b>${autotuneIds.length}</b> вариантов движка ${engineLabel(eng)}.</p>
+             <p class="sub">Windows запросит права администратора — один раз на весь подбор.</p>`,
+    });
+    if (!ok) return;
+    await invoke("test_strategies", { ids: autotuneIds, mode: "main" });
+    toast("info", "подбор запущен");
+  } catch (e) {
+    toast("err", String(e));
   }
 }
 
@@ -1905,6 +2051,23 @@ function bindStatic() {
 
   $("#btnRunTest").addEventListener("click", () => runTest(false, "main"));
   $("#btnRunGeoblock").addEventListener("click", () => runTest(false, "geoblock"));
+  if ($("#btnRunAutotune")) $("#btnRunAutotune").addEventListener("click", runAutotune);
+  if ($("#btnStopAutotune"))
+    $("#btnStopAutotune").addEventListener("click", async () => {
+      btnBusy($("#btnStopAutotune"), true);
+      try {
+        await invoke("cancel_test");
+        toast("info", "останавливаю подбор…");
+        await new Promise((r) => setTimeout(r, 2500));
+        testState = null;
+        renderAutotune();
+        await refreshAll();
+      } catch (e) {
+        toast("err", String(e));
+      } finally {
+        btnBusy($("#btnStopAutotune"), false);
+      }
+    });
   $("#btnStopTest").addEventListener("click", async () => {
     btnBusy($("#btnStopTest"), true);
     try {
@@ -2243,6 +2406,7 @@ async function wireEvents() {
     testState = ev.payload;
     renderTestProgress();
     renderTestResults();
+    renderAutotune();
     // Пока идёт тест — тулбар показывает «идёт тест», «Остановить» заблокирована.
     renderRunBar();
     if (testState && testState.done) {

@@ -28,6 +28,9 @@
           <button class="nav-item" data-view="tests">
             <span class="nav-ico"></span><span>Тест стратегий</span>
           </button>
+          <button class="nav-item" data-view="autotune">
+            <span class="nav-ico"></span><span>Подбор стратегии</span>
+          </button>
           <button class="nav-item" data-view="updates">
             <span class="nav-ico"></span><span>Обновления</span>
           </button>
@@ -134,6 +137,26 @@
             <div id="testProgBar" class="prog hidden"><div class="prog-fill" id="testProgFill"></div><span id="testProgLabel"></span></div>
             <div id="testBest" class="test-best hidden"></div>
             <div id="testResults" class="test-results"></div>
+          </div>
+        </section>
+
+        <section class="page" id="view-autotune">
+          <div class="card" id="autoCard">
+            <div class="card-head">
+              <h3>Подбор стратегии <span class="chip">авто</span></h3>
+              <button class="btn primary small" id="btnRunAutotune">Подобрать</button>
+              <button class="btn danger small" id="btnStopAutotune" disabled>Остановить</button>
+            </div>
+            <p class="hint">
+              Для выбранного движка перебираются вшитые пресеты и сгенерированные варианты обхода
+              (матрица кандидатов), проверяются контрольные домены и выбирается лучший под ваше
+              подключение. Удачную стратегию можно оставить — она появится в «Стратегиях» с чипом
+              «автоподбор».
+            </p>
+            <div class="tabs test-tabs" id="autoTabs"></div>
+            <div id="autoProgBar" class="prog hidden"><div class="prog-fill" id="autoProgFill"></div><span id="autoProgLabel"></span></div>
+            <div id="autoBest" class="test-best hidden"></div>
+            <div id="autoList" class="test-results"></div>
           </div>
         </section>
 

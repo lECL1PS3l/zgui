@@ -22,6 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub mod config;
+mod autotune;
 mod dns;
 mod embedded;
 mod human;
@@ -856,6 +857,64 @@ fn save_profile(ga: State<'_, Global>, id: Option<String>, name: String, engine:
             }
         }
     }
+    s.save();
+    Ok(s.profiles.clone())
+}
+
+/// Готовит кандидатов автоподбора как профили (id `auto:<движок>:<slug>`,
+/// тег source `auto:<движок>`). Существующие обновляются, новых добавляем.
+#[tauri::command(async)]
+fn autotune_prepare(ga: State<'_, Global>, engine: String) -> Result<Vec<Profile>, String> {
+    if crate::config::engine_def(&engine).is_none() {
+        return Err("неизвестный движок".into());
+    }
+    let cands = autotune::candidates(&engine);
+    if cands.is_empty() {
+        return Err(format!("для движка «{engine}» нет кандидатов для подбора"));
+    }
+    let g = ga.inner();
+    let mut s = st(g);
+    let tag = format!("auto:{engine}");
+    for c in cands {
+        let id = format!("auto:{engine}:{}", c.id);
+        if let Some(p) = s.profiles.iter_mut().find(|p| p.id == id) {
+            p.name = c.name;
+            p.args = c.args;
+            p.source = Some(tag.clone());
+            p.builtin = false;
+            p.updated_at = Some(pf::now_str());
+        } else {
+            s.profiles.push(Profile {
+                id,
+                name: c.name,
+                engine: engine.clone(),
+                args: c.args,
+                builtin: false,
+                source: Some(tag.clone()),
+                updated_at: Some(pf::now_str()),
+            });
+        }
+    }
+    s.save();
+    Ok(s.profiles
+        .iter()
+        .filter(|p| p.source.as_deref() == Some(tag.as_str()))
+        .cloned()
+        .collect())
+}
+
+/// Оставляет только выбранного кандидата автоподбора (остальные `auto:<движок>:*`
+/// удаляются). Профиль остаётся в «Стратегиях» с чипом «автоподбор».
+#[tauri::command(async)]
+fn autotune_keep(ga: State<'_, Global>, engine: String, id: String) -> Result<Vec<Profile>, String> {
+    let g = ga.inner();
+    let mut s = st(g);
+    let tag = format!("auto:{engine}");
+    if s.profile(&id).is_none() {
+        return Err("профиль не найден".into());
+    }
+    s.profiles
+        .retain(|p| p.id == id || p.source.as_deref() != Some(tag.as_str()));
     s.save();
     Ok(s.profiles.clone())
 }
@@ -3274,6 +3333,8 @@ pub fn run() {
             fetch_engine,
             refresh_catalog,
             save_profile,
+            autotune_prepare,
+            autotune_keep,
             delete_profile,
             start_profile,
             stop_running,
