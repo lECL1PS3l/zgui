@@ -1,4 +1,4 @@
-﻿use crate::config::{
+use crate::config::{
     AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL, SERVICE_NAME,
 };
 use crate::profiles as pf;
