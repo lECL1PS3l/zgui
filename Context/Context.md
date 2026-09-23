@@ -80,3 +80,15 @@
 План реализации написан и закоммичен: docs/superpowers/plans/2026-09-23-multiengine-phase12.md (коммит b15649e). 6 задач: 1) реестр EngineDef + Roots-map с совместимостью старого state.json; 2) presets.rs с вшитыми пресетами всех движков и подстановкой %ENGINE_ROOT%; 3) обобщение set_root/fetch_engine/bootstrap; 4) конфликты+netreset на 4 exe + кавычки службы; 5) скрипт fetch-engines.ps1 + ensure_engine; 6) UI-селектор движка. Фазы 3–5 (тестер+автоподбор, OTA-пресеты, Telegram-автопрокид) — отдельные планы после этой партии. Верификация: cargo check/test --lib + ручной прогон службы с zapret2/goodbyedpi.
 
 Ждём выбора способа исполнения (субагенты или нативно).
+
+## СМС от пользователя (23.09.2026, автоцикл исполнения)
+
+<нативно. далее мне нужно будет надолго отойти, сможешь без меня, нужно проверить очень тщательно, чтобы ни одна кнопка ничего не ломала + подключи big pickle, чтобы сессия не падала>
+
+## Ответ агента: исполнение фазы 1-2 нативно (пользователь ушёл)
+
+big pickle — отказано (механизма нет), вместо него коммиты на каждом шаге + прогресс здесь.
+Task 1 (коммит 1304c76): реестр EngineDef в config.rs, Roots -> map с легаси-совместимостью, exe_name через реестр. Тест registry_and_roots_migration.
+Task 2 (коммит 980703f + 01da6d1): presets.rs — PresetDef/builtin_presets()/apply_engine_root() (плейсхолдер %ENGINE_ROOT%, нормализация слэшей, аргументы без плейсхолдера не трогаются), 14 пресетов: flowseal-general (из general.bat), zapret2-general + zapret2-youtube (дословно из README bol-van: --lua-init, --blob=quic_google:, --out-range=-d10, --payload, --new), goodbyedpi -1/-3/-5..-9 + RU+DNS, dpibreak 0,1 / 0,5+a / -a. Сверка с первоисточником выполнена (README zapret2 скачан, официальная сигнатура preset2 получена). ensure_presets в lib.rs теперь сеет пресеты всех движков по id preset:<id>. prepare_args() (game_filter + engine_root) подключён во все 4 места запуска: do_start, start_or_switch, тест-шаги, install_service. 51/51 тестов зелёные, cargo check 0 warnings. Убран мёртвый builtin_flowseal_presets.
+НАЙДЕН КОНФЛИКТ (будущий фикс Task 3): migrate_removed_engine в lib.rs:671 (вызов 2916) — остаток старой вырезки winws2, на каждом старте удаляет профили zapret2 и каталог data/engines/zapret2. Должен быть удалён при обобщении set_root/bootstrap (Task 3).
+Далее: Task 3 (set_root/fetch_engine/engine_meta/bootstrap EngineInfo + удаление migrate_removed_engine).
