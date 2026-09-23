@@ -87,10 +87,7 @@
           <div class="card" id="profilesCard">
             <div class="card-head">
               <h3>Профили</h3>
-              <div class="tabs" id="profileTabs">
-                <button class="tab active" data-filter="all">Все</button>
-                <button class="tab" data-filter="flowseal">Flowseal (.bat)</button>
-              </div>
+              <div class="tabs" id="profileTabs"></div>
               <button class="btn primary small" id="btnNewProfile">+ Новый профиль</button>
             </div>
             <div id="profileList" class="profile-list"></div>
@@ -103,6 +100,9 @@
             </div>
             <div class="form-grid">
               <label>Название<input id="npName" placeholder="Моя стратегия" /></label>
+              <label>Движок
+                <select id="npEngine" class="np-engine"></select>
+              </label>
             </div>
             <label>Аргументы (по одному на строку)
               <textarea id="npArgs" rows="7" placeholder="--wf-tcp-out=80,443&#10;--filter-tcp=80 --filter-l7=http --new"></textarea>
@@ -177,6 +177,7 @@
               <p class="muted card-sub" id="fsUpd"></p>
               <div class="root-row" id="fsRoot"></div>
             </div>
+            <!-- Остальные движки (zapret2/goodbyedpi/dpibreak) рендерятся в main.js -->
           </div>
         </section>
 

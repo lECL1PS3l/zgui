@@ -408,6 +408,17 @@ body.fx-paused .topo { animation-play-state: paused; }
 }
 .tab.active { background: var(--panel2); color: var(--accent); }
 
+/* Точка-индикатор «движок не установлен» в табе стратегий. */
+.tab-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 /* ------- profiles ------- */
 .profile-list {
   display: grid;

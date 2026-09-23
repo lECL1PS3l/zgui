@@ -296,6 +296,8 @@ async function refreshAll(notify = false) {
 function onBootstrap() {
   applyTheme(currentTheme());
   renderRunBar();
+  ensureEngineCards();
+  renderEngineTabs();
   renderEngines();
   renderWarnings();
   renderProfiles();
@@ -592,10 +594,11 @@ function renderWatchdog(s) {
 }
 
 function renderEngines() {
-  for (const [eng, keys] of [
-    ["flowseal", { state: "fsState", root: "fsRoot", card: "engine-flowseal" }],
-  ]) {
-    const info = B && B[eng];
+  const list = B && B.engines;
+  if (!list) return;
+  for (const info of list) {
+    const eng = info.id;
+    const keys = { state: eng === "flowseal" ? "fsState" : `engState-${eng}`, root: eng === "flowseal" ? "fsRoot" : `engRoot-${eng}`, card: `engine-${eng}` };
     const st = $("#" + keys.state);
     const rootEl = $("#" + keys.root);
     if (!info || !st || !rootEl) continue;
@@ -658,10 +661,58 @@ function renderEngines() {
 
 function doFetch(eng) {
   btnBusy($("#engine-" + eng + " .btn.primary"), true);
-  toast("info", "Скачиваю движок Flowseal… это может занять пару минут");
+  const label = engineLabel(eng);
+  toast("info", `Скачиваю движок ${label}… это может занять пару минут`);
   invoke("fetch_engine", { engine: eng, dest: null })
     .catch((e) => toast("err", String(e)))
     .finally(() => setTimeout(() => btnBusy($("#engine-" + eng + " .btn.primary"), false), 3000));
+}
+
+// ------------------------------------------------------------- engine registry
+
+function engineLabel(id) {
+  const e = ((B && B.engines) || []).find((x) => x.id === id);
+  return e ? e.label : id;
+}
+
+/// Карточки движков на вкладке «Обновления»: статичные для flowseal (HTML),
+/// остальные создаём из bootstrap.engines (id, label, статус, кнопки).
+let engineCardsBuilt = "";
+function ensureEngineCards() {
+  const wrap = document.querySelector(".engines");
+  if (!wrap || !B.engines) return;
+  const sig = B.engines.map((e) => e.id).join(",");
+  if (sig === engineCardsBuilt) return;
+  engineCardsBuilt = sig;
+  for (const e of B.engines) {
+    if (e.id === "flowseal" || $("#engine-" + e.id)) continue;
+    const card = document.createElement("div");
+    card.className = "card engine";
+    card.id = "engine-" + e.id;
+    const head = document.createElement("div");
+    head.className = "card-head";
+    const h = document.createElement("h3");
+    h.textContent = e.label;
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = e.exe || "";
+    h.appendChild(chip);
+    const st = document.createElement("span");
+    st.className = "state-chip";
+    st.id = "engState-" + e.id;
+    head.appendChild(h);
+    head.appendChild(st);
+    card.appendChild(head);
+    const sub = document.createElement("p");
+    sub.className = "muted card-sub";
+    sub.textContent = "Скачивается из последнего релиза " + (e.repo || "");
+    card.appendChild(sub);
+    const root = document.createElement("div");
+    root.className = "root-row";
+    root.id = "engRoot-" + e.id;
+    card.appendChild(root);
+    wrap.appendChild(card);
+  }
 }
 
 // ------------------------------------------------------------- profiles
@@ -673,6 +724,41 @@ let sigProfiles = "";
 let sigUpdates = "";
 let sigSettings = "";
 let sigTestResults = "";
+
+/// Табы движков на вкладке «Стратегии»: рендерятся из bootstrap.engines.
+/// Пустой профиль-фильтр «all» + по движку; статус готовности виден прямо в табе.
+let engineTabsBuilt = "";
+function renderEngineTabs() {
+  const wrap = $("#profileTabs");
+  if (!wrap || !B.engines) return;
+  const sig = B.engines.map((e) => `${e.id}:${e.ready ? 1 : 0}`).join(",");
+  if (sig === engineTabsBuilt) return;
+  engineTabsBuilt = sig;
+  wrap.innerHTML = "";
+  const mkTab = (filter, label, ready) => {
+    const t = document.createElement("button");
+    t.className = "tab" + (profileFilter === filter ? " active" : "");
+    t.dataset.filter = filter;
+    t.textContent = label;
+    if (ready === false) {
+      const dot = document.createElement("span");
+      dot.className = "tab-dot";
+      dot.title = "движок не установлен — нажмите «Скачать» на вкладке «Обновления»";
+      t.appendChild(dot);
+    }
+    t.addEventListener("click", () => {
+      $$("#profileTabs .tab").forEach((x) => x.classList.remove("active"));
+      t.classList.add("active");
+      profileFilter = filter;
+      renderProfiles();
+    });
+    wrap.appendChild(t);
+  };
+  mkTab("all", "Все");
+  for (const e of B.engines) {
+    mkTab(e.id, e.label, e.ready);
+  }
+}
 // Таймер отложенного автосохранения настроек (см. «Настройки»).
 let saveSettingsTimer = 0;
 
@@ -724,7 +810,7 @@ function renderProfiles() {
     chips.className = "profile-chips";
     const eng = document.createElement("span");
     eng.className = "chip";
-    eng.textContent = "winws";
+    eng.textContent = p.engine === "flowseal" ? "winws" : engineLabel(p.engine);
     chips.appendChild(eng);
     if (bestId === p.id) {
       const b = document.createElement("span");
@@ -802,7 +888,7 @@ function openProfileModal(p) {
   pmProfile = p;
   $("#pmTitle").textContent = p.name;
   const bits = [];
-  bits.push("движок winws");
+  bits.push(p.engine === "flowseal" ? "движок winws" : "движок " + engineLabel(p.engine));
   if (p.updatedAt) bits.push("обновлён " + tsText(Number(p.updatedAt)));
   if (p.source) bits.push(p.source);
   $("#pmMeta").textContent = bits.join(" · ");
@@ -1072,6 +1158,18 @@ function showNewProfileCard(on) {
   if (on) {
     $("#npName").value = "";
     $("#npArgs").value = "";
+    const sel = $("#npEngine");
+    if (sel && B.engines) {
+      sel.innerHTML = "";
+      for (const e of B.engines) {
+        const o = document.createElement("option");
+        o.value = e.id;
+        o.textContent = e.label + (e.ready ? "" : " (не установлен)");
+        sel.appendChild(o);
+      }
+      // Открыт с активного фильтра движка — сразу подставляем его.
+      if (profileFilter !== "all") sel.value = profileFilter;
+    }
   }
 }
 
@@ -1718,15 +1816,6 @@ function bindStatic() {
       }
     });
 
-  $$("#profileTabs .tab").forEach((t) =>
-    t.addEventListener("click", () => {
-      $$("#profileTabs .tab").forEach((x) => x.classList.remove("active"));
-      t.classList.add("active");
-      profileFilter = t.dataset.filter;
-      renderProfiles();
-    }),
-  );
-
   $("#btnNewProfile").addEventListener("click", () => showNewProfileCard(true));
   $("#btnCancelProfile").addEventListener("click", () => showNewProfileCard(false));
 
@@ -1757,13 +1846,14 @@ function bindStatic() {
   $("#btnSaveProfile").addEventListener("click", async () => {
     const name = $("#npName").value.trim();
     const raw = $("#npArgs").value;
+    const engine = ($("#npEngine") && $("#npEngine").value) || "flowseal";
     const args = raw.split("\n").map((x) => x.trim()).filter(Boolean);
     if (!name || !args.length) {
       toast("warn", "Укажите название и хотя бы один аргумент");
       return;
     }
     try {
-      await invoke("save_profile", { id: null, name, engine: "flowseal", args });
+      await invoke("save_profile", { id: null, name, engine, args });
       await refreshAll();
       showNewProfileCard(false);
       toast("ok", "Профиль сохранён");
