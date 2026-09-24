@@ -489,6 +489,23 @@ function Measure-Step($step) {{
       $client.Dispose()
       $res.domains = $doms
       $res.score = @($doms | Where-Object {{ $_.ok }}).Count
+      # Critical domains are probed once more (parallel): a single timeout/RST
+      # must not label a strategy as broken.
+      $critKeys = @($plan.domains | Where-Object {{ $_.critical }} | ForEach-Object {{ $_.key }})
+      $failedCrit = @($doms | Where-Object {{ -not $_.ok -and ($critKeys -contains $_.key) }})
+      if ($failedCrit.Count -gt 0) {{
+        $client2 = New-ProbeClient
+        $again = @()
+        foreach ($d in $failedCrit) {{
+          $again += [pscustomobject]@{{ d = $d; task = (Start-Probe $client2 $d.host) }}
+        }}
+        foreach ($x in $again) {{
+          $r2 = Finish-Probe $x.task
+          if ($r2.ok) {{ $x.d.ok = $true; $x.d.detail = $r2.detail + ' (retry)' }}
+        }}
+        $client2.Dispose()
+        $res.score = @($doms | Where-Object {{ $_.ok }}).Count
+      }}
       $groupRows = @()
       foreach ($group in @($plan.domains | Group-Object group)) {{
         $items = @($doms | Where-Object {{ $_.group -eq $group.Name }})

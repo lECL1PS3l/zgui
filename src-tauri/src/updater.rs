@@ -434,7 +434,9 @@ pub fn parse_preset_set(bytes: &[u8]) -> Result<RemotePresetSet, String> {
 }
 
 /// Качает presets.json из ассетов последнего релиза SELF_REPO.
-pub fn fetch_preset_set() -> Result<RemotePresetSet, String> {
+/// `Ok(None)` — ассет ещё не опубликован: это НЕ ошибка (встроенные пресеты
+/// актуальны), иначе «Применить доступные» падало бы на пустом месте.
+pub fn fetch_preset_set() -> Result<Option<RemotePresetSet>, String> {
     let cli = client()?;
     let resp = cli
         .get(format!("https://api.github.com/repos/{}/releases/latest", SELF_REPO))
@@ -451,9 +453,9 @@ pub fn fetch_preset_set() -> Result<RemotePresetSet, String> {
         .and_then(|x| x["browser_download_url"].as_str())
         .map(str::to_string);
     let Some(url) = url else {
-        return Err("в релизе нет ассета presets.json".into());
+        return Ok(None);
     };
-    parse_preset_set(&fetch_bytes(&cli, &url)?)
+    Ok(Some(parse_preset_set(&fetch_bytes(&cli, &url)?)?))
 }
 
 /// Сводная запись набора пресетов для каталога обновлений.
@@ -472,7 +474,12 @@ pub fn check_preset_entry(archive: &UpdArchive) -> UpdEntry {
         error: None,
     };
     match fetch_preset_set() {
-        Ok(set) => {
+        // Ассета в релизе ещё нет — не ошибка: работают встроенные пресеты.
+        Ok(None) => {
+            u.label = "presets.json — не опубликован (встроенные пресеты)".into();
+            u.status = "skip-user".into();
+        }
+        Ok(Some(set)) => {
             u.exists = true;
             u.remote_hash = Some(set.version.clone());
             let applied = archive.applied(PRESETS_ENTRY_ID);
@@ -488,14 +495,8 @@ pub fn check_preset_entry(archive: &UpdArchive) -> UpdEntry {
             };
         }
         Err(e) => {
-            // Набор ещё не опубликован в релизе — это не ошибка, а «нет данных».
-            if e.contains("нет ассета presets.json") {
-                u.label = "presets.json — ещё не опубликован (появится после релиза)".into();
-                u.status = "skip-user".into();
-            } else {
-                u.status = "err".into();
-                u.error = Some(e);
-            }
+            u.status = "err".into();
+            u.error = Some(e);
         }
     }
     u

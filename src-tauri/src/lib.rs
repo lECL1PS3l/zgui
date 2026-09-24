@@ -772,10 +772,57 @@ fn ensure_presets(s: &mut AppState) {
     }
     // Сеем вшитые пресеты всех движков: недостающие добавляем, существующие
     // (по id «preset:<id>») не трогаем — пользователь мог их скрыть/переименовать.
+    // Вшитые пресеты: недостающие добавляем, существующие ПРИВОДИМ к таблице.
+    // Без обновления аргументов исправленный в коде пресет оставался у
+    // пользователя в старой (битой) версии из state.json — так GoodbyeDPI
+    // «RU + DNS» держал несуществующий `-9` и падал с «unknown option».
+    // Приоритет у OTA-набора, но только если он НОВЕЕ вшитой таблицы: иначе
+    // после правки пресета в коде уже применённый старый набор не давал бы
+    // починить профили пользователя.
+    let ota_version = up::UpdArchive::load(&s.data).applied(up::PRESETS_ENTRY_ID);
+    let ota_applied = ota_version
+        .as_deref()
+        .is_some_and(|v| v > presets::BUILTIN_PRESETS_VERSION);
+    let mut refreshed = 0usize;
     for def in presets::builtin_presets() {
-        if !s.profiles.iter().any(|p| p.id == format!("preset:{}", def.id)) {
-            s.profiles.push(def.to_profile());
+        let pid = presets::preset_profile_id(def.id);
+        match s.profiles.iter_mut().find(|p| p.id == pid) {
+            Some(existing) => {
+                if ota_applied {
+                    continue;
+                }
+                let args = def.args_vec();
+                if existing.args != args || existing.name != def.name || existing.engine != def.engine {
+                    existing.args = args;
+                    existing.name = def.name.into();
+                    existing.engine = def.engine.into();
+                    existing.builtin = true;
+                    existing.source = Some(pid);
+                    refreshed += 1;
+                }
+            }
+            None => s.profiles.push(def.to_profile()),
         }
+    }
+    if refreshed > 0 {
+        logger::log(
+            "info",
+            "profiles",
+            &format!("обновлены вшитые пресеты: {refreshed}"),
+        );
+    }
+    // Кэш тестов: результаты по профилям, которых больше нет (вырезанные пресеты,
+    // удалённые auto:-кандидаты), иначе висят в списке как «битые» стратегии.
+    let mut cache = tester::TestCache::load(&s.data);
+    let before = cache.results.len();
+    cache.results.retain(|r| s.profiles.iter().any(|p| p.id == r.id));
+    if cache.results.len() != before {
+        logger::log(
+            "info",
+            "test",
+            &format!("удалены устаревшие результаты тестов: {}", before - cache.results.len()),
+        );
+        cache.save(&s.data);
     }
     // Автозапуск мог указывать на удалённый пресет.
     if let Some(pid) = s.settings.autostart_profile.clone() {
@@ -1458,7 +1505,7 @@ fn test_strategies(
     // Мост «тест ⇄ автоподбор»: при `reuse` не гоняем повторно стратегии, которые
     // уже проверялись с теми же аргументами (свежие результаты из tests.json).
     let (reused, profiles): (Vec<tester::StrategyResult>, Vec<Profile>) = if reuse == Some(true) {
-        let cache = tester::TestCache::load(&data);
+        let cache = crate::tester::TestCache::load(&data);
         let fresh = cache
             .tested_at
             .as_deref()
@@ -1862,11 +1909,20 @@ fn test_strategies(
             return;
         }
         if !geoblock {
-            let cache = tester::TestCache {
-                tested_at: Some(now_ts().to_string()),
-                best_id: best.clone(),
-                results: sorted.clone(),
-            };
+            // Результаты ДОБАВляем к прежним: прогон одного движка не должен
+            // стирать то, что уже намерено по другим (вкладка «Все» иначе
+            // показывает только последний запуск).
+            let mut cache = tester::TestCache::load(&data);
+            for r in &sorted {
+                match cache.results.iter_mut().find(|x| x.id == r.id) {
+                    Some(old) => *old = r.clone(),
+                    None => cache.results.push(r.clone()),
+                }
+            }
+            cache.tested_at = Some(now_ts().to_string());
+            if best.is_some() {
+                cache.best_id = best.clone();
+            }
             cache.save(&data);
         }
         let msg = if geoblock {
@@ -2652,15 +2708,15 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
     std::thread::spawn(move || {
         let wants_presets = ids.is_empty() || ids.iter().any(|i| i == up::PRESETS_ENTRY_ID);
         // OTA-набор пресетов качаем ЗАРАНЕЕ, вне блокировки state (сеть до 45 с).
-        let preset_set = if wants_presets {
-            up::fetch_preset_set().ok()
+        let (preset_set, preset_err) = if wants_presets {
+            match up::fetch_preset_set() {
+                Ok(Some(set)) => (Some(set), None),
+                // Ассет ещё не опубликован — это не ошибка: встроенные пресеты актуальны.
+                Ok(None) => (None, None),
+                Err(e) => (None, Some(format!("не удалось скачать набор пресетов: {e}"))),
+            }
         } else {
-            None
-        };
-        let preset_err = if wants_presets && preset_set.is_none() {
-            Some("не удалось скачать набор пресетов".to_string())
-        } else {
-            None
+            (None, None)
         };
         // Файловые записи: id набора пресетов — не файл, исключаем. Если после
         // фильтра список пуст, а выбор был непустой — файловых записей не выбрано,
@@ -3673,7 +3729,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        autostart_wants_task, engine_meta, local_proxy_port, unzip, winws_owner_of, WinwsOwner,
+        autostart_wants_task, engine_meta, ensure_presets, local_proxy_port, unzip, winws_owner_of,
+        WinwsOwner,
     };
     use crate::config;
 
@@ -3753,6 +3810,83 @@ mod tests {
         assert_eq!(local_proxy_port("proxy.corp.example:3128"), None);
         assert_eq!(local_proxy_port("10.0.0.1:8080"), None);
         assert_eq!(local_proxy_port("nonsense"), None);
+    }
+
+    #[test]
+    fn ensure_presets_refreshes_builtin_args_and_purges_stale_cache() {
+        // Регресс: исправленный в коде пресет оставался у пользователя в старой
+        // (битой) версии из state.json — так GoodbyeDPI «RU + DNS» годами держал
+        // несуществующий `-9`. Плюс кэш тестов хранил результаты удалённых пресетов.
+        let data = std::env::temp_dir().join(format!("zgui-presets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let mut state = crate::config::AppState {
+            data: data.clone(),
+            roots: Default::default(),
+            settings: Default::default(),
+            profiles: vec![],
+            runtime: None,
+            updater: Default::default(),
+            service_checked_at: 0,
+            service_running: None,
+            service_strategy: None,
+            boot_pending: false,
+            external_winws: false,
+            engine_version: None,
+        };
+        state.profiles.push(crate::presets::preset_profile(
+            "goodbyedpi-ru-dns",
+            "goodbyedpi",
+            "GoodbyeDPI · RU + DNS (старое)",
+            vec!["-9".into(), "--dns-addr".into(), "77.88.8.8".into()],
+        ));
+        let mut own = crate::presets::preset_profile("my-own", "goodbyedpi", "Мой", vec!["-9".into()]);
+        own.builtin = false;
+        own.source = None;
+        state.profiles.push(own);
+
+        let mk = |id: &str| crate::tester::StrategyResult {
+            id: id.into(),
+            name: id.into(),
+            engine: "flowseal".into(),
+            group: "g".into(),
+            started: true,
+            score: 1,
+            max_score: 2,
+            domains: vec![],
+            error: None,
+            groups: vec![],
+            critical_ok: false,
+            args_key: None,
+        };
+        crate::tester::TestCache {
+            tested_at: Some("1".into()),
+            best_id: None,
+            results: vec![mk("preset:goodbyedpi-9"), mk("preset:flowseal-general")],
+        }
+        .save(&data);
+
+        ensure_presets(&mut state);
+
+        let fixed = state
+            .profiles
+            .iter()
+            .find(|p| p.id == "preset:goodbyedpi-ru-dns")
+            .expect("пресет на месте");
+        assert_eq!(fixed.args[0], "-5", "битый `-9` должен быть заменён на `-5`");
+        assert_eq!(fixed.args.last().map(String::as_str), Some("1253"), "аргументы из таблицы");
+        assert!(fixed.builtin, "пресет остаётся вшитым");
+        let mine = state.profiles.iter().find(|p| p.id == "preset:my-own").expect("свой на месте");
+        assert_eq!(mine.args, vec!["-9".to_string()], "пользовательский профиль не трогаем");
+        assert_eq!(
+            state.profiles.iter().filter(|p| p.builtin).count(),
+            crate::presets::builtin_presets().len(),
+            "все вшитые пресеты на месте"
+        );
+        let cache = crate::tester::TestCache::load(&data);
+        assert_eq!(cache.results.len(), 1, "результат удалённого пресета вычищен");
+        assert_eq!(cache.results[0].id, "preset:flowseal-general");
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

@@ -1082,33 +1082,44 @@ function renderTestResults() {
   const box = $("#testResults");
   const bestBox = $("#testBest");
   if (!box) return;
-  const results = (testState && testState.results && testState.results.length
-    ? testState.results
-    : (testCache && testCache.results) || []) || [];
+  // Результаты: свежий прогон важнее кэша; ключ — id профиля.
+  const byId = new Map();
+  for (const r of (testCache && testCache.results) || []) byId.set(r.id, r);
+  for (const r of (testState && testState.results) || []) byId.set(r.id, r);
+  // Строки — ВСЕ стратегии текущего вида (движок или «Все»), а не только
+  // последний прогон: непроверенные показываем серым «не тестировалась».
+  const rows = visibleTestProfiles().map((p) => ({ p, r: byId.get(p.id) || null }));
+  const tested = rows.filter((x) => x.r);
+  const untested = rows.filter((x) => !x.r);
+  tested.sort(
+    (a, b) =>
+      b.r.score - a.r.score ||
+      (b.r.criticalOk ? 1 : 0) - (a.r.criticalOk ? 1 : 0) ||
+      a.p.name.localeCompare(b.p.name),
+  );
   // Прогресс теста прилетает каждые ~0.7 с — перерисовываем список только при
-  // реальном изменении набора результатов (иначе лишние тысячи DOM-узлов на кадр).
+  // реальном изменении набора строк (иначе лишние тысячи DOM-узлов на кадр).
   const sig = JSON.stringify([
-    results.length,
-    (testState && testState.done) || false,
-    (testState && testState.bestName) || "",
-    results.length ? (results[results.length - 1].id || "") + ":" + results[results.length - 1].score : "",
-    testState && testState.index,
     testEngineFilter,
+    (testState && testState.done) || false,
+    (testState && testState.bestId) || "",
+    (testCache && testCache.bestId) || "",
+    rows.map((x) => x.p.id + (x.r ? `:${x.r.score}:${x.r.criticalOk ? 1 : 0}:${x.r.started ? 1 : 0}` : "")),
   ]);
   if (sig === sigTestResults) return;
   sigTestResults = sig;
-  if (!results.length) {
+  if (!rows.length) {
     box.innerHTML = "";
     bestBox.classList.add("hidden");
     return;
   }
-  const shown = testEngineFilter ? results.filter((r) => r.engine === testEngineFilter) : results;
   // «Лучшая» показывается ТОЛЬКО если она среди текущего вида (движка/фильтра):
   // иначе после прогона dpibreak висел бы best от flowseal — путаница.
-  const bestId = testState && testState.bestId;
-  const bestInView = bestId && shown.some((r) => r.id === bestId) ? bestId : null;
-  const bestRes = bestInView ? results.find((r) => r.id === bestInView) : null;
-  if (testState && testState.done && bestRes) {
+  const bestId = (testState && testState.bestId) || (testCache && testCache.bestId) || null;
+  const bestInView = bestId && tested.some((x) => x.r.id === bestId) ? bestId : null;
+  const bestRes = bestInView ? byId.get(bestInView) : null;
+  const runDone = (testState && testState.done) || false;
+  if (runDone && bestRes) {
     bestBox.classList.remove("hidden");
     bestBox.innerHTML = "";
     const t = document.createElement("div");
@@ -1127,7 +1138,7 @@ function renderTestResults() {
       await refreshAll();
     });
     bestBox.appendChild(b);
-  } else if (testState && testState.done && shown.length) {
+  } else if (runDone && tested.length) {
     // Прогон завершён, но успешной стратегии нет (или best не из этого движка).
     bestBox.classList.remove("hidden");
     bestBox.innerHTML = "";
@@ -1142,7 +1153,30 @@ function renderTestResults() {
   }
 
   box.innerHTML = "";
-  for (const r of shown) {
+  for (const { p, r } of [...tested, ...untested]) {
+    if (!r) {
+      // Стратегия ещё не тестировалась — строка-заглушка, чтобы «Все» реально
+      // показывал весь список, а не один последний прогон.
+      const row = document.createElement("div");
+      row.className = "test-row muted";
+      const head = document.createElement("div");
+      head.className = "test-row-head";
+      const nm = document.createElement("span");
+      nm.className = "test-row-name";
+      nm.textContent = p.name;
+      head.appendChild(nm);
+      const grp = document.createElement("span");
+      grp.className = "chip";
+      grp.textContent = engineLabel(p.engine) || p.engine;
+      head.appendChild(grp);
+      const sc = document.createElement("span");
+      sc.className = "test-row-score";
+      sc.textContent = "не тестировалась";
+      head.appendChild(sc);
+      row.appendChild(head);
+      box.appendChild(row);
+      continue;
+    }
     const row = document.createElement("div");
     row.className = "test-row " + (r.criticalOk ? "ok" : r.started && r.score > 0 ? "part" : "bad");
     const head = document.createElement("div");
@@ -1175,6 +1209,12 @@ function renderTestResults() {
         const chip = document.createElement("span");
         chip.className = `group-chip ${g.ok ? "ok" : "bad"} ${g.critical ? "critical" : "secondary"}`;
         chip.textContent = `${g.label}: ${g.passed}/${g.total}`;
+        // Точный список упавших доменов — чтобы «не прошли крит. домены» не было
+        // приговором без доказательств.
+        const badHosts = (r.domains || []).filter((d) => !d.ok && d.group === g.id).map((d) => d.host);
+        chip.title = badHosts.length
+          ? `Не ответили: ${badHosts.join(", ")}`
+          : `Ответили все проверенные домены группы`;
         chip.appendChild(chipMark(g.ok));
         summary.appendChild(chip);
       }
