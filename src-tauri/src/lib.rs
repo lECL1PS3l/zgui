@@ -1308,11 +1308,11 @@ fn clear_test_markers(data: &std::path::Path) {
 #[tauri::command(async)]
 fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
     let g = ga.inner();
-    let mut cur = g.testing.lock().unwrap_or_else(|e| e.into_inner());
+    let cur = g.testing.lock().unwrap_or_else(|e| e.into_inner());
     if cur.running {
         return cur.clone();
     }
-    // Подхват теста, оставленного предыдущей сессией: раннер живёт в фоне.
+    // Раннер прошлой сессии живёт в фоне (GUI закрывали) — гасим его, не подхватываем.
     let data = st(g).data.clone();
     let (flag, run_pid, _win_pid) = test_marker(&data);
     let alive = std::fs::read_to_string(&run_pid)
@@ -1323,20 +1323,18 @@ fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
     let (out_exists, out_fresh) = test_out_state(&data);
     let live_runner = alive && !flag.exists() && (out_fresh || !out_exists);
     if live_runner {
-        *cur = tester::TestProgress {
-            running: true,
-            phase: "resume".into(),
-            current_id: None,
-            current_name: None,
-            index: 0,
-            total: 0,
-            pct: 0,
-            msg: "тест продолжается в фоне — его можно остановить".into(),
-            results: Vec::new(),
-            best_id: None,
-            best_name: None,
-            done: false,
-        };
+        // Фоновый ранер прошлой сессии (GUI закрывали — он elevated и живёт вне
+        // GUI). Не подхватываем и НЕ показываем «тест идёт»: гасим его.
+        let _ = std::fs::write(&flag, now_ts().to_string());
+        if let Ok(txt) = std::fs::read_to_string(&run_pid) {
+            if let Ok(pid) = txt.trim().parse::<u32>() {
+                let _ = rn::hidden_command("taskkill.exe")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .output();
+            }
+        }
+        logger::log("info", "test", "фоновый ранер прошлой сессии остановлен");
+        clear_test_markers(&data);
     } else if alive && !flag.exists() {
         // PID жив, но прогресс устарел → фантом (PID переиспользован). Чистим,
         // иначе «тест уже выполняется» блокирует новые прогоны.
@@ -3648,8 +3646,28 @@ pub fn run() {
             reset_dns,
             dns_benchmark
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running zgui");
+        .build(tauri::generate_context!())
+        .expect("error while building zgui")
+        .run(|app, event| {
+            // При выходе гасим фоновый тестовый раннер: он elevated и сам по
+            // закрытию GUI не умирает, а при следующем старте подхватывался как
+            // «тест запустился сам». Пишем стоп-флаг (раннер сам завершит цикл);
+            // PID убиваем без эскалации — если не хватит прав, сработает флаг.
+            if matches!(event, tauri::RunEvent::Exit) {
+                let data = app.state::<Global>().state.lock().unwrap_or_else(|e| e.into_inner()).data.clone();
+                let (flag, run_pid, win_pid) = test_marker(&data);
+                let _ = std::fs::write(&flag, now_ts().to_string());
+                for p in [&run_pid, &win_pid] {
+                    if let Ok(txt) = std::fs::read_to_string(p) {
+                        if let Ok(pid) = txt.trim().parse::<u32>() {
+                            let _ = rn::hidden_command("taskkill.exe")
+                                .args(["/F", "/T", "/PID", &pid.to_string()])
+                                .output();
+                        }
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]
