@@ -101,6 +101,10 @@ pub struct StrategyResult {
     pub groups: Vec<GroupResult>,
     #[serde(default)]
     pub critical_ok: bool,
+    /// Ключ аргументов стратегии на момент прогона. Позволяет переиспользовать
+    /// результат (мост «тест ⇄ автоподбор»), если аргументы не изменились.
+    #[serde(default)]
+    pub args_key: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone, Debug, Default)]
@@ -672,6 +676,7 @@ mod tests {
             error: None,
             groups: vec![],
             critical_ok: true,
+            args_key: None,
         };
         let (v, best) = summarize(&[mk("a", "A", 2), mk("b", "B", 5), mk("c", "C", 5)]);
         assert_eq!(best.as_deref(), Some("b"));
@@ -708,6 +713,7 @@ mod tests {
                 priority: 1,
             }],
             critical_ok: true,
+            args_key: None,
         };
         let (v, best) = summarize(&[
             mk("slow", true, 900),

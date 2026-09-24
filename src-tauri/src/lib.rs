@@ -755,11 +755,38 @@ fn provision_engines(s: &mut AppState) {
 }
 
 fn ensure_presets(s: &mut AppState) {
+    let builtin = presets::builtin_presets();
+    let current: std::collections::HashSet<String> =
+        builtin.iter().map(|d| format!("preset:{}", d.id)).collect();
+    // Чистим устаревшие вшитые пресеты (переименованные/вырезанные в новых
+    // версиях): иначе в списке остаются мёртвые стратегии вроде
+    // «GoodbyeDPI - 9 (максимальный)» → `unknown option -9` и шум в тестах.
+    // Кастомные профили (builtin=false) не трогаем.
+    let before = s.profiles.len();
+    s.profiles.retain(|p| {
+        !(p.builtin
+            && p.source.as_deref().is_some_and(|x| x.starts_with("preset:"))
+            && !current.contains(&p.id))
+    });
+    if s.profiles.len() != before {
+        logger::log(
+            "info",
+            "profiles",
+            &format!("удалено устаревших пресетов: {}", before - s.profiles.len()),
+        );
+    }
     // Сеем вшитые пресеты всех движков: недостающие добавляем, существующие
     // (по id «preset:<id>») не трогаем — пользователь мог их скрыть/переименовать.
-    for def in presets::builtin_presets() {
+    for def in builtin {
         if !s.profiles.iter().any(|p| p.id == format!("preset:{}", def.id)) {
             s.profiles.push(def.to_profile());
+        }
+    }
+    // Автозапуск мог указывать на удалённый пресет.
+    if let Some(pid) = s.settings.autostart_profile.clone() {
+        if !s.profiles.iter().any(|p| p.id == pid) {
+            s.settings.autostart_mode = "none".into();
+            s.settings.autostart_profile = None;
         }
     }
 }
@@ -1315,6 +1342,17 @@ fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
 /// Запускает каждую выбранную стратегию по очереди, проверяет контрольные домены
 /// и определяет лучшую (аналог теста стратегий в GUI Flowseal).
 /// `mode`: "main" — ручной список (выбирает лучшую), "geoblock" — онлайн-списки (диагностика).
+/// Ключ аргументов стратегии: по нему результат теста переиспользуется
+/// (мост «тест ⇄ автоподбор»), если аргументы не менялись.
+fn args_key(p: &Profile, tcp: &str, udp: &str) -> String {
+    let mut s = format!("{}\u{1}{}\u{1}{}\u{1}", p.engine, tcp, udp);
+    for a in &p.args {
+        s.push_str(a);
+        s.push('\u{2}');
+    }
+    crate::config::sha256_hex(s.as_bytes())
+}
+
 #[tauri::command(async)]
 fn test_strategies(
     app: AppHandle,
@@ -1322,6 +1360,7 @@ fn test_strategies(
     ids: Vec<String>,
     domains_limit: Option<usize>,
     mode: Option<String>,
+    reuse: Option<bool>,
 ) -> Result<bool, String> {
     let _ = domains_limit;
     let geoblock = mode.as_deref() == Some("geoblock");
@@ -1415,6 +1454,46 @@ fn test_strategies(
 
     // Готовим шаги: exe, рабочий каталог, аргументы с game-filter.
     let (tcp, udp) = pf::game_filter_ports(&st(g).settings.game_filter);
+
+    // Мост «тест ⇄ автоподбор»: при `reuse` не гоняем повторно стратегии, которые
+    // уже проверялись с теми же аргументами (свежие результаты из tests.json).
+    let (reused, profiles): (Vec<tester::StrategyResult>, Vec<Profile>) = if reuse == Some(true) {
+        let cache = tester::TestCache::load(&data);
+        let fresh = cache
+            .tested_at
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|t| now_ts().saturating_sub(t) < 3600)
+            .unwrap_or(false);
+        if fresh {
+            let mut reused = Vec::new();
+            let mut to_run = Vec::new();
+            for p in profiles {
+                let key = args_key(&p, &tcp, &udp);
+                match cache
+                    .results
+                    .iter()
+                    .find(|r| r.id == p.id && r.args_key.as_deref() == Some(key.as_str()))
+                {
+                    Some(r) => reused.push(r.clone()),
+                    None => to_run.push(p),
+                }
+            }
+            if !reused.is_empty() {
+                logger::log(
+                    "info",
+                    "test",
+                    &format!("переиспользую прежние результаты: {} стратегий", reused.len()),
+                );
+            }
+            (reused, to_run)
+        } else {
+            (Vec::new(), profiles)
+        }
+    } else {
+        (Vec::new(), profiles)
+    };
+
     let mut steps: Vec<tester::TestStep> = Vec::new();
     for p in &profiles {
         let root = st(g).roots.path(&p.engine).ok_or_else(|| {
@@ -1435,6 +1514,37 @@ fn test_strategies(
             workdir: wd.to_string_lossy().into_owned(),
             args,
         });
+    }
+
+    // Все кандидаты уже проверены — не поднимаем раннер вообще.
+    if steps.is_empty() {
+        let (sorted, best) = tester::summarize(&reused);
+        let best_name = best
+            .as_ref()
+            .and_then(|id| reused.iter().find(|r| &r.id == id))
+            .map(|r| r.name.clone());
+        logger::log("info", "test", "повторный прогон не нужен — используем прежние результаты");
+        set_test(
+            &app,
+            g,
+            tester::TestProgress {
+                running: false,
+                phase: "done".into(),
+                current_id: None,
+                current_name: None,
+                index: 0,
+                total: 0,
+                pct: 100,
+                msg: "использованы прежние результаты (повторный прогон не нужен)".into(),
+                results: sorted,
+                best_id: best,
+                best_name,
+                done: true,
+            },
+        );
+        g.set_op_running(false);
+        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "test"}));
+        return Ok(true);
     }
 
     let (_plan, script, out_path) = tester::write_test_runner(&data, &steps, &custom, geoblock)?;
@@ -1529,7 +1639,9 @@ fn test_strategies(
         }
 
         // Поллим промежуточный JSON, пока раннер пишет результаты.
-        let mut results: Vec<tester::StrategyResult> = Vec::new();
+        // `results` сразу содержит переиспользованные (из кэша) — они не гоняются.
+        let mut results: Vec<tester::StrategyResult> = reused.clone();
+        let mut parsed_count = 0usize;
         let started = std::time::Instant::now();
         loop {
             if test_marker(&data).0.exists() {
@@ -1563,12 +1675,16 @@ fn test_strategies(
                 let cur_id = v["currentId"].as_str().map(|s| s.to_string());
                 let cur_name = v["currentName"].as_str().map(|s| s.to_string());
                 if let Some(arr) = v["results"].as_array() {
-                    results = arr
+                    let parsed: Vec<tester::StrategyResult> = arr
                         .iter()
                         .filter_map(|r| serde_json::from_value::<tester::StrategyResult>(r.clone()).ok())
                         .collect();
+                    parsed_count = parsed.len();
+                    let mut merged = reused.clone();
+                    merged.extend(parsed);
+                    results = merged;
                 }
-                let done = idx >= total && results.len() >= total;
+                let done = idx >= total && parsed_count >= total;
                 let prog = tester::TestProgress {
                     running: !done,
                     phase: if done { "done".into() } else { "probe".into() },
@@ -1609,8 +1725,9 @@ fn test_strategies(
         let _ = std::fs::remove_file(&out_path);
 
         // Если раннер не оставил результатов — вероятнее всего UAC отклонён.
-        if results.is_empty() {
-            results = steps
+        // Переиспользованные (из кэша) оставляем, добавляем только «не стартовала».
+        if parsed_count == 0 {
+            let mut failed: Vec<tester::StrategyResult> = steps
                 .iter()
                 .map(|s| tester::StrategyResult {
                     id: s.id.clone(),
@@ -1628,8 +1745,10 @@ fn test_strategies(
                     }),
                     groups: Vec::new(),
                     critical_ok: false,
+                    args_key: None,
                 })
                 .collect();
+            results.append(&mut failed);
         }
 
         // Диагностика «стратегия не запустилась»: причины уже собраны раннером,
@@ -1695,7 +1814,13 @@ fn test_strategies(
             emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": msg}));
         }
 
-        let (sorted, best) = tester::summarize(&results);
+        let (mut sorted, best) = tester::summarize(&results);
+        // Помечаем результаты ключом аргументов — для переиспользования в автоподборе.
+        for r in sorted.iter_mut() {
+            if let Some(p) = profiles.iter().find(|p| p.id == r.id) {
+                r.args_key = Some(args_key(p, &tcp, &udp));
+            }
+        }
         let best_name = best
             .as_ref()
             .and_then(|id| results.iter().find(|r| &r.id == id))
@@ -1795,6 +1920,24 @@ fn test_cache(ga: State<'_, Global>) -> tester::TestCache {
 #[tauri::command(async)]
 fn open_task_manager() -> Result<(), String> {
     rn::hidden_command("taskmgr.exe")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Открывает внешнюю ссылку (http/https) или системное окно `.cpl` в оболочке
+/// Windows. Разрешены только эти цели — произвольные команды из фронта закрыты.
+/// Нужно для «Отправить отчёт» (GitHub Issues) и «Показать адаптеры» (`ncpa.cpl`).
+#[tauri::command(async)]
+fn open_external(target: String) -> Result<(), String> {
+    let ok = target.starts_with("https://")
+        || target.starts_with("http://")
+        || target.eq_ignore_ascii_case("ncpa.cpl");
+    if !ok {
+        return Err("разрешены только ссылки http(s) и ncpa.cpl".into());
+    }
+    rn::hidden_command("cmd.exe")
+        .args(["/c", "start", "", &target])
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3415,6 +3558,7 @@ pub fn run() {
             tg_vpn_guard,
             watchdog_status,
             open_task_manager,
+            open_external,
             cancel_test,
             apply_best_strategy,
             install_service,

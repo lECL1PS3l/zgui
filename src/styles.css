@@ -322,6 +322,16 @@ body.fx-paused .topo { animation-play-state: paused; }
 .card-head h3 { font-size: 15px; font-weight: 600; }
 
 .banner { padding: 12px 16px; border-radius: 12px; margin-bottom: 18px; font-size: 13px; }
+/* Компактный фильтр-селект в шапке карточки (профили). */
+.mini-select {
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg2);
+  color: var(--text);
+  margin-left: 8px;
+}
 /* Баннер «нужны права администратора»: текст + кнопки в строку. */
 #adminBanner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .banner.alert {

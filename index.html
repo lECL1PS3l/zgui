@@ -100,6 +100,10 @@
             <div class="card-head">
               <h3>Профили</h3>
               <div class="tabs" id="profileTabs"></div>
+              <select id="profSort" class="mini-select" title="Фильтр профилей">
+                <option value="all">Все профили</option>
+                <option value="auto">Автоподбор</option>
+              </select>
               <button class="btn primary small" id="btnNewProfile">+ Новый профиль</button>
             </div>
             <div id="profileList" class="profile-list"></div>
@@ -330,6 +334,7 @@
             </p>
             <div class="form-actions log-actions">
               <button class="btn primary" id="btnReportSave">Сохранить отчёт</button>
+              <button class="btn ghost" id="btnReportIssue">Отправить отчёт</button>
               <button class="btn ghost" id="btnLogOpenDir">Открыть папку логов</button>
               <button class="btn ghost" id="btnLogCopy">Скопировать</button>
               <button class="btn ghost" id="btnLogClear">Очистить</button>

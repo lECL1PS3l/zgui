@@ -191,6 +191,8 @@ function stopLogPoll() {
 
 let B = null; // bootstrap snapshot
 let profileFilter = "all";
+// Фильтр профилей: "all" | "auto" (только стратегии, подобранные автоподбором).
+let profSort = "all";
 let lastUpdRender = "";
 let testState = null; // TestProgress
 let testCache = null;
@@ -827,6 +829,7 @@ function renderProfiles() {
   // не входила в sig, и чипы «автозапуск»/«служба»/счёт не обновлялись.
   const sig = JSON.stringify([
     profileFilter,
+    profSort,
     B.profiles,
     B.runtime,
     B.busy,
@@ -839,7 +842,11 @@ function renderProfiles() {
   if (sig === sigProfiles) return;
   sigProfiles = sig;
   list.innerHTML = "";
-  const profs = (B.profiles || []).filter((p) => profileFilter === "all" || p.engine === profileFilter);
+  const profs = (B.profiles || []).filter(
+    (p) =>
+      (profileFilter === "all" || p.engine === profileFilter) &&
+      (profSort !== "auto" || String(p.source || "").startsWith("auto:")),
+  );
   if (!profs.length) {
     list.innerHTML = '<div class="empty">Нет профилей. Синхронизируйте каталог или создайте свой.</div>';
     return;
@@ -1321,7 +1328,8 @@ async function runAutotune() {
       toast("warn", "нет кандидатов для подбора");
       return;
     }
-    await invoke("test_strategies", { ids: autotuneIds, mode: "main" });
+    // Мост «тест ⇄ подбор»: свежие результаты прежних прогонов не гоняем повторно.
+    await invoke("test_strategies", { ids: autotuneIds, mode: "main", reuse: true });
     toast("info", "подбор запущен");
   } catch (e) {
     toast("err", String(e));
@@ -2077,6 +2085,25 @@ function bindStatic() {
         btnBusy($("#btnReportSave"), false);
       }
     });
+    if ($("#btnReportIssue"))
+      $("#btnReportIssue").addEventListener("click", async () => {
+        // Сначала сохраняем отчёт (его можно приложить), затем открываем форму issue.
+        let path = "";
+        try {
+          path = await invoke("report_save");
+        } catch (_) {}
+        const body = encodeURIComponent(
+          "**Что случилось:**\n\n\n**Как воспроизвести:**\n\n\n" +
+            (path ? `Отчёт сохранён рядом с журналом: ${path}\n` : ""),
+        );
+        const url = `https://github.com/lECL1PS3l/zgui/issues/new?title=${encodeURIComponent("Баг: ")}&body=${body}`;
+        try {
+          await invoke("open_external", { target: url });
+          toast("ok", "открыл форму отчёта в браузере — приложите файл отчёта из папки журнала");
+        } catch (e) {
+          toast("err", String(e));
+        }
+      });
   }
   if ($("#cmCancel")) $("#cmCancel").addEventListener("click", () => closeConfirm(false));
   if ($("#cmX")) $("#cmX").addEventListener("click", () => closeConfirm(false));
@@ -2104,6 +2131,12 @@ function bindStatic() {
     });
 
   $("#btnNewProfile").addEventListener("click", () => showNewProfileCard(true));
+  if ($("#profSort"))
+    $("#profSort").addEventListener("change", (e) => {
+      profSort = e.target.value;
+      sigProfiles = "";
+      renderProfiles();
+    });
   $("#btnCancelProfile").addEventListener("click", () => showNewProfileCard(false));
 
   $("#btnRunTest").addEventListener("click", () => runTest(false, "main"));
@@ -2441,6 +2474,15 @@ async function showAdapters() {
         list.map((a) => "• " + a).join("<br>");
     }
     out.className = "muted";
+    // Открываем «Сетевые подключения», где адаптеры видны по именам.
+    try {
+      await invoke("open_external", { target: "ncpa.cpl" });
+    } catch (_) {
+      toast(
+        "warn",
+        "не удалось открыть «Сетевые подключения» автоматически — откройте вручную: Панель управления → Сеть и Интернет → Сетевые подключения",
+      );
+    }
   } catch (e) {
     out.textContent = "Ошибка: " + e;
     out.className = "muted err";
