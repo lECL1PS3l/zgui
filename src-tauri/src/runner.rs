@@ -282,6 +282,27 @@ pub fn write_utf8_bom(path: &Path, body: &[u8]) -> Result<(), String> {
     fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
+/// Временный файл, который удаляется при выходе из области видимости — в том
+/// числе при ошибке (`?`) или панике. Иначе .ps1-скрипты привилегированных
+/// операций копились в `logs/`.
+pub struct TempFile(PathBuf);
+
+impl TempFile {
+    pub fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 /// Запускает процесс НАПРЯМУЮ (без UAC) — используется, когда GUI уже elevated.
 /// Возвращает реальный PID процесса и пишет stdout/stderr в лог-файлы.
 /// Без ShellExecute: Rust сам корректно квотит аргументы с пробелами.
@@ -320,7 +341,7 @@ pub fn spawn_direct(
 /// а обёртка через `cmd /c` ломается на разборе кавычек. Поэтому здесь — простой
 /// запуск без редиректов; логи в этом пути не собираются (для elevated GUI
 /// используется `spawn_direct`, который их пишет).
-pub fn write_launcher(exe: &Path, wd: &Path, args: &[String], _out_log: &Path, _err_log: &Path, pid_file: &Path) -> PathBuf {
+pub fn write_launcher(exe: &Path, wd: &Path, args: &[String], pid_file: &Path) -> PathBuf {
     let script_path = pid_file.with_extension("ps1");
     let mut s = String::new();
     s.push_str(PS_HEADER);
@@ -458,8 +479,6 @@ mod tests {
             Path::new("C:\\Program Files\\Zapret\\winws.exe"),
             Path::new("C:\\Program Files\\Zapret\\bin"),
             &["--hostlist=C:\\Program Files\\Zapret\\lists\\list.txt".into()],
-            &dir.join("out.txt"),
-            &dir.join("err.txt"),
             &dir.join("pid.txt"),
         );
         let raw = fs::read(&script).unwrap();

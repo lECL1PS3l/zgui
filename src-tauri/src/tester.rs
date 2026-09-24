@@ -637,8 +637,9 @@ pub fn group_of(p: &Profile) -> String {
 /// (Раньше при равных очках «лучшей» становилась первая по алфавиту — случайность.)
 pub fn summarize(results: &[StrategyResult]) -> (Vec<StrategyResult>, Option<String>) {
     let mut v = results.to_vec();
+    // Не стартовавшая стратегия не может считаться прошедшей критические группы.
     let critical_passed =
-        |r: &StrategyResult| r.groups.iter().filter(|g| g.critical && g.ok).count();
+        |r: &StrategyResult| if r.started { r.groups.iter().filter(|g| g.critical && g.ok).count() } else { 0 };
     let avg_ms = |r: &StrategyResult| -> u64 {
         if r.domains.is_empty() {
             u64::MAX

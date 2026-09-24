@@ -169,6 +169,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn busy_port_reports_bind_error() {
+        // Занятый порт: пользователь должен увидеть причину («занят»), а не
+        // «не запустился за 20 секунд» — ошибка бинда идёт через listen-канал.
+        let holder = std::net::TcpListener::bind("0.0.0.0:0").expect("тестовый сокет");
+        let port = holder.local_addr().expect("адрес").port();
+        let s = TgState::default();
+        let err = s.start(port, None, None).await.expect_err("порт занят — ожидалась ошибка");
+        assert!(err.contains("занят"), "ожидалось сообщение о занятом порте, получено: {err}");
+        assert!(!s.status().running, "упавший старт не должен оставлять статус running");
+        drop(holder);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn start_with_fixed_secret_is_stable() {
         let s = TgState::default();
         let secret = "0123456789abcdef0123456789abcdef";

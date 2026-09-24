@@ -213,7 +213,9 @@ pub fn benchmark(ids: Option<Vec<String>>) -> Vec<DnsPing> {
 
 pub fn apply(data: &Path, id: &str, adapter: Option<&str>) -> Result<String, String> {
     let p = provider(id).ok_or("неизвестный DNS-провайдер")?;
-    let script = data.join("logs").join(format!("dns_apply_{}.ps1", std::process::id()));
+    let script = crate::runner::TempFile::new(
+        data.join("logs").join(format!("dns_apply_{}.ps1", std::process::id())),
+    );
     let adapter_expr = match adapter.filter(|s| !s.trim().is_empty()) {
         Some(name) => crate::runner::ps_quote(name),
         None => "(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Select-Object -First 1 -ExpandProperty InterfaceAlias)".into(),
@@ -225,14 +227,16 @@ if (-not $alias) {{ throw 'не найдено активное сетевое �
 $primary = '{primary}'
 $secondary = '{secondary}'
 $doh = '{doh}'
-& netsh.exe dns add encryption server=$primary dohtemplate=$doh autoupgrade=yes udpfallback=no 2>$null | Out-Null
+# Полный путь: админский скрипт не должен зависеть от PATH (подмена netsh.exe).
+$netsh = 'C:\Windows\System32\netsh.exe'
+& $netsh dns add encryption server=$primary dohtemplate=$doh autoupgrade=yes udpfallback=no 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {{
-  & netsh.exe dns set encryption server=$primary dohtemplate=$doh autoupgrade=yes udpfallback=no | Out-Null
+  & $netsh dns set encryption server=$primary dohtemplate=$doh autoupgrade=yes udpfallback=no | Out-Null
   if ($LASTEXITCODE -ne 0) {{ throw "не удалось задать профиль DoH для $primary" }}
 }}
-& netsh.exe dns add encryption server=$secondary dohtemplate=$doh autoupgrade=yes udpfallback=no 2>$null | Out-Null
+& $netsh dns add encryption server=$secondary dohtemplate=$doh autoupgrade=yes udpfallback=no 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {{
-  & netsh.exe dns set encryption server=$secondary dohtemplate=$doh autoupgrade=yes udpfallback=no | Out-Null
+  & $netsh dns set encryption server=$secondary dohtemplate=$doh autoupgrade=yes udpfallback=no | Out-Null
   if ($LASTEXITCODE -ne 0) {{ throw "не удалось задать профиль DoH для $secondary" }}
 }}
 Set-DnsClientServerAddress -InterfaceAlias $alias -ServerAddresses @($primary, $secondary)
@@ -246,9 +250,8 @@ Write-Output ("DNS: {name}; adapter: " + $alias)
         doh = p.doh_template,
         name = p.name,
     );
-    write_ps1(&script, &body)?;
-    let code = run_script_privileged(&script)?;
-    let _ = std::fs::remove_file(&script);
+    write_ps1(script.path(), &body)?;
+    let code = run_script_privileged(script.path())?;
     if code != 0 {
         return Err(format!("применение DNS не удалось, код {}", code));
     }
@@ -256,7 +259,9 @@ Write-Output ("DNS: {name}; adapter: " + $alias)
 }
 
 pub fn reset(data: &Path, adapter: Option<&str>) -> Result<String, String> {
-    let script = data.join("logs").join(format!("dns_reset_{}.ps1", std::process::id()));
+    let script = crate::runner::TempFile::new(
+        data.join("logs").join(format!("dns_reset_{}.ps1", std::process::id())),
+    );
     let adapter_expr = match adapter.filter(|s| !s.trim().is_empty()) {
         Some(name) => crate::runner::ps_quote(name),
         None => "(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Select-Object -First 1 -ExpandProperty InterfaceAlias)".into(),
@@ -272,9 +277,8 @@ Write-Output ("DNS reset: " + $alias)
         header = crate::runner::PS_HEADER,
         adapter = adapter_expr,
     );
-    write_ps1(&script, &body)?;
-    let code = run_script_privileged(&script)?;
-    let _ = std::fs::remove_file(&script);
+    write_ps1(script.path(), &body)?;
+    let code = run_script_privileged(script.path())?;
     if code != 0 {
         return Err(format!("сброс DNS не удался, код {}", code));
     }

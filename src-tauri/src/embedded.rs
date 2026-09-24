@@ -83,40 +83,54 @@ fn engine_root_for(dir: &Path) -> Option<PathBuf> {
     Some(dir.to_path_buf())
 }
 
-/// Полная распаковка архива с обрезкой общего верхнего каталога (безопасно от zip-slip).
-fn extract_all(bytes: &[u8], dest: &Path) -> Result<usize, String> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
-
+/// Имя общего верхнего каталога-обёртки: `Some(name)` только если ВСЕ записи
+/// лежат внутри одного каталога. Корневой файл означает, что обёртки нет —
+/// иначе плоский архив (exe и файлы в корне) распаковывался бы без своего
+/// корня и `find_exe` его не находил. Чистая логика отдельно от zip-архива.
+fn root_of_entries(entries: &[(String, bool)]) -> Option<String> {
     let mut top: Option<String> = None;
-    let mut uniform = true;
-    for i in 0..archive.len() {
-        let name = archive.by_index(i).map_err(|e| e.to_string())?.name().to_string();
+    for (name, is_dir) in entries {
         let trimmed = name.trim_end_matches('/');
         if trimmed.is_empty() {
             continue;
         }
         match trimmed.split_once('/') {
-            // Запись внутри каталога: проверяем общий верхний каталог.
             Some((first, _)) => match &top {
                 None => top = Some(first.to_string()),
                 Some(t) if t == first => {}
-                Some(_) => {
-                    uniform = false;
-                    break;
-                }
+                Some(_) => return None,
             },
-            // Запись самого каталога-обёртки нередко идёт до его содержимого.
-            // Не считаем её отдельным верхним каталогом.
+            // Запись верхнего уровня: каталог-обёртка может идти до содержимого,
+            // поэтому он допустим (и совпадает с уже найденным top).
             None => {
-                if let Some(top) = top.as_deref() {
-                    if top != trimmed {
-                        uniform = false;
-                    }
+                if !*is_dir {
+                    return None;
+                }
+                match &top {
+                    None => {}
+                    Some(t) if t == trimmed => {}
+                    Some(_) => return None,
                 }
             }
         }
     }
-    let strip = if uniform { top } else { None };
+    top
+}
+
+/// Общий верхний каталог архива (или `None`, если его нет).
+pub fn common_root<R: std::io::Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> Option<String> {
+    let mut entries: Vec<(String, bool)> = Vec::with_capacity(archive.len());
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).ok()?;
+        entries.push((entry.name().to_string(), entry.is_dir()));
+    }
+    root_of_entries(&entries)
+}
+
+/// Полная распаковка архива с обрезкой общего верхнего каталога (безопасно от zip-slip).
+fn extract_all(bytes: &[u8], dest: &Path) -> Result<usize, String> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let strip = common_root(&mut archive);
 
     let mut written = 0;
     for i in 0..archive.len() {
@@ -344,5 +358,19 @@ mod tests {
         assert!(crate::config::find_exe(&root, "winws2.exe").is_some());
 
         let _ = fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn common_root_detects_wrapper_flat_and_mixed() {
+        let e = |n: &str, d: bool| (n.to_string(), d);
+        // Обёртка: все записи внутри одного каталога (сам каталог может идти первым).
+        assert_eq!(root_of_entries(&[e("w/", true), e("w/bin/winws.exe", false)]), Some("w".into()));
+        assert_eq!(root_of_entries(&[e("w/bin/winws.exe", false), e("w/lists/x.txt", false)]), Some("w".into()));
+        // Плоский архив (наш engine-zapret2.zip): корневые файлы → обёртки нет.
+        assert_eq!(root_of_entries(&[e("winws2.exe", false), e("lua/", true), e("lua/z.lua", false)]), None);
+        assert_eq!(root_of_entries(&[e("lua/", true), e("lua/z.lua", false)]), Some("lua".into()));
+        // Корневой файл перед каталогом-обёрткой тоже отменяет срезку.
+        assert_eq!(root_of_entries(&[e("readme.txt", false), e("w/", true), e("w/bin/x.exe", false)]), None);
+        assert_eq!(root_of_entries(&[]), None);
     }
 }

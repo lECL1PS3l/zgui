@@ -284,8 +284,6 @@ function shortPath(p) {
 // ------------------------------------------------------------- bootstrap
 
 async function refreshAll(notify = false) {
-  const refreshButton = $("#btnRefresh");
-  btnBusy(refreshButton, true);
   try {
     B = await invoke("bootstrap");
     onBootstrap();
@@ -294,8 +292,6 @@ async function refreshAll(notify = false) {
     if (notify) toast("ok", "статус обновлён");
   } catch (e) {
     toast("err", "bootstrap: " + e);
-  } finally {
-    btnBusy(refreshButton, false);
   }
 }
 
@@ -990,11 +986,26 @@ function visibleTestProfiles() {
   return testEngineFilter ? all.filter((p) => p.engine === testEngineFilter) : all;
 }
 
+let sigTestCard = "";
+
 function renderTestCard() {
   const pick = $("#testPick");
   if (!pick) return;
-  renderTestTabs();
   const all = flowsealProfiles();
+  // Перерисовываем только при реальном изменении (таб, набор стратегий, флаги,
+  // ход теста, кэш) — иначе каждый refreshAll пересоздавал бы список и сбрасывал
+  // прокрутку/фокус.
+  const sig = JSON.stringify([
+    testEngineFilter,
+    testPicked === null ? null : Array.from(testPicked).sort(),
+    all.map((p) => `${p.id}:${p.engine}`),
+    testState && testState.running,
+    testCache && testCache.bestId,
+    ((testCache && testCache.results) || []).map((r) => `${r.id}:${r.score}`),
+  ]);
+  if (sig === sigTestCard) return;
+  sigTestCard = sig;
+  renderTestTabs();
   if (!all.length) {
     pick.innerHTML = '<div class="empty">Нет доступных движков — скачайте хотя бы один на вкладке «Обновления».</div>';
     $("#btnRunTest").disabled = true;
@@ -1640,7 +1651,9 @@ function collectSettings() {
     always_admin: $("#cfAlwaysAdmin").checked,
     tg_autostart: $("#tgAutostart")?.checked || false,
     tg_offer: $("#tgOffer") ? $("#tgOffer").checked : (B && B.settings ? B.settings.tg_offer !== false : true),
-    tg_port: Number($("#tgPort")?.value) || 1443,
+    tg_port: $("#tgPort")
+      ? Number($("#tgPort").value) || 1443
+      : (B && B.settings ? B.settings.tg_port || 1443 : 1443),
   };
 }
 

@@ -321,7 +321,11 @@ fn bootstrap(ga: State<'_, Global>) -> Bootstrap {
         r
     });
     Bootstrap {
-        flowseal: root_info(&s.roots, ENGINE_FLOWSEAL, "winws.exe"),
+        flowseal: root_info(
+            &s.roots,
+            ENGINE_FLOWSEAL,
+            crate::config::engine_def(ENGINE_FLOWSEAL).map(|d| d.exe).unwrap_or("winws.exe"),
+        ),
         engines,
         settings: s.settings.clone(),
         profiles: s.profiles.clone(),
@@ -589,6 +593,8 @@ fn fetch_engine_impl(app: &AppHandle, meta: &EngineMeta, dest: &str, data: &std:
     }
 
     let tmp_zip = data.join("tmp").join(format!("{}-{}.zip", engine, tag_name));
+    // Удаляется при выходе из функции (в т.ч. при ошибке скачивания/распаковки).
+    let _zip_guard = rn::TempFile::new(tmp_zip.clone());
     let mut resp = cli.get(&asset_url).send().map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("скачивание: HTTP {}", resp.status()));
@@ -649,20 +655,10 @@ fn unzip(zip_path: &std::path::Path, dest: &std::path::Path) -> Result<(), Strin
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
-    let mut top: Option<String> = None;
-    for i in 0..archive.len() {
-        let name = archive.by_index(i).map_err(|e| e.to_string())?.name().to_string();
-        let trimmed = name.trim_end_matches('/');
-        if trimmed.is_empty() {
-            continue;
-        }
-        let first = trimmed.split('/').next().unwrap_or("").to_string();
-        top = Some(match top {
-            None => first,
-            Some(t) if t == first => t,
-            Some(_) => return Err("архив с неоднородной структурой".into()),
-        });
-    }
+    // Общий каталог-обёртка срезается, если он есть у ВСЕХ записей. Раньше
+    // разнородный/плоский архив (например наш engine-zapret2.zip) считался
+    // ошибкой «неоднородная структура» и не распаковывался вообще.
+    let top: Option<String> = embedded::common_root(&mut archive);
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
@@ -1129,7 +1125,7 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
         std::thread::sleep(Duration::from_millis(900));
         pid
     } else {
-        let launcher = rn::write_launcher(&exe, &wd, &args, &out_log, &err_log, &pid_file);
+        let launcher = rn::write_launcher(&exe, &wd, &args, &pid_file);
         let pid = rn::spawn_and_wait_pid(&launcher, &pid_file, Duration::from_secs(60))?;
         let _ = std::fs::remove_file(&launcher);
         pid
@@ -2750,8 +2746,12 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
         );
         if let Some(e) = &file_err {
             emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось применить обновления конфигов", e)}));
-        } else {
+        } else if failed.is_empty() {
             emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("обновлено записей: {}", ok_count)}));
+        } else {
+            // Часть записей (в т.ч. набор пресетов) не применилась — иначе тост
+            // сообщал бы только «обновлено: N» и ошибка терялась для пользователя.
+            emit(&app2, "zgui:toast", serde_json::json!({"kind":"warn","text": format!("обновлено записей: {ok_count}, ошибки: {}", failed.join("; "))}));
         }
         app2.state::<Global>().set_op_running(false);
         emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "updates"}));
@@ -3673,7 +3673,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        autostart_wants_task, engine_meta, local_proxy_port, winws_owner_of, WinwsOwner,
+        autostart_wants_task, engine_meta, local_proxy_port, unzip, winws_owner_of, WinwsOwner,
     };
     use crate::config;
 
@@ -3753,5 +3753,50 @@ mod tests {
         assert_eq!(local_proxy_port("proxy.corp.example:3128"), None);
         assert_eq!(local_proxy_port("10.0.0.1:8080"), None);
         assert_eq!(local_proxy_port("nonsense"), None);
+    }
+
+    #[test]
+    fn unzip_handles_flat_wrapped_and_traversal_archives() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("zgui-unzip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = zip::write::SimpleFileOptions::default();
+        let make = |zip_path: &std::path::Path, entries: &[(&str, &[u8])], dirs: &[&str]| {
+            let mut w = zip::ZipWriter::new(std::fs::File::create(zip_path).unwrap());
+            for d in dirs {
+                w.add_directory(format!("{d}/"), opts).unwrap();
+            }
+            for (name, data) in entries {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(data).unwrap();
+            }
+            w.finish().unwrap();
+        };
+
+        // Плоский архив (наш engine-zapret2.zip): без каталога-обёртки.
+        let flat = dir.join("flat.zip");
+        make(&flat, &[("winws2.exe", b"exe"), ("lua/x.lua", b"lua")], &["lua"]);
+        let out_flat = dir.join("out-flat");
+        unzip(&flat, &out_flat).expect("плоский архив должен распаковаться");
+        assert!(out_flat.join("winws2.exe").is_file());
+        assert!(out_flat.join("lua/x.lua").is_file());
+
+        // Архив с каталогом-обёрткой: обёртка срезается.
+        let wrapped = dir.join("wrapped.zip");
+        make(&wrapped, &[("pkg/bin/winws.exe", b"exe")], &["pkg", "pkg/bin"]);
+        let out_wrapped = dir.join("out-wrapped");
+        unzip(&wrapped, &out_wrapped).expect("архив с обёрткой должен распаковаться");
+        assert!(out_wrapped.join("bin/winws.exe").is_file());
+
+        // Zip-slip: запись наружу не должна появиться рядом с целевым каталогом.
+        let evil = dir.join("evil.zip");
+        make(&evil, &[("../escape.txt", b"x"), ("ok.txt", b"y")], &[]);
+        let out_evil = dir.join("out-evil");
+        unzip(&evil, &out_evil).expect("zip-slip не должен ломать распаковку");
+        assert!(!dir.join("escape.txt").exists(), "запись вне dest не должна создаваться");
+        assert!(out_evil.join("ok.txt").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

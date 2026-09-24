@@ -36,7 +36,7 @@ fn api(repo: &str, path: &str) -> String {
 }
 
 /// Строит каталог обновляемых конфигов (whitelist). Бинарники и user-файлы не трогаются.
-pub fn collect_entries(data: &Path, roots: &Roots, _settings: &Settings) -> Result<Vec<CatEntry>, String> {
+pub fn collect_entries(data: &Path, roots: &Roots) -> Result<Vec<CatEntry>, String> {
     let cli = client()?;
     let mut out: Vec<CatEntry> = Vec::new();
 
@@ -200,8 +200,8 @@ fn fetch_bytes(cli: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, St
         .map_err(|e| e.to_string())
 }
 
-fn check_entry(cli: &reqwest::blocking::Client, e: &CatEntry, settings: &Settings, archive: &UpdArchive) -> UpdEntry {
-    let mut u = UpdEntry {
+fn entry_base(e: &CatEntry) -> UpdEntry {
+    UpdEntry {
         id: e.id.clone(),
         group: e.group.clone(),
         label: e.label.clone(),
@@ -213,24 +213,20 @@ fn check_entry(cli: &reqwest::blocking::Client, e: &CatEntry, settings: &Setting
         local_hash: None,
         size: 0,
         error: None,
-    };
-
-    // ipset-all: уважаем ручной режим none/any
-    if e.label == "ipset-all.txt" && settings.ipset_mode != "loaded" {
-        u.status = "skip-user".into();
-        return u;
     }
+}
 
-    let bytes = match fetch_bytes(cli, &e.url) {
-        Ok(b) => b,
-        Err(err) => {
-            u.status = "err".into();
-            u.error = Some(err);
-            return u;
-        }
-    };
+/// ipset-all: уважаем ручной режим none/any — файл ведёт пользователь.
+fn ipset_skipped(e: &CatEntry, settings: &Settings) -> bool {
+    e.label == "ipset-all.txt" && settings.ipset_mode != "loaded"
+}
+
+/// Классифицирует запись по УЖЕ скачанному содержимому: удалённый hash,
+/// локальный файл, applied.json → статус ok/avail/modified/new.
+fn classify_entry(e: &CatEntry, archive: &UpdArchive, bytes: &[u8]) -> UpdEntry {
+    let mut u = entry_base(e);
     u.size = bytes.len() as u64;
-    let remote = crate::config::sha256_hex(&bytes);
+    let remote = crate::config::sha256_hex(bytes);
     u.remote_hash = Some(remote.clone());
     let applied = archive.applied(e.id.as_str());
     u.applied_hash = applied.clone();
@@ -254,12 +250,29 @@ fn check_entry(cli: &reqwest::blocking::Client, e: &CatEntry, settings: &Setting
     u
 }
 
+fn check_entry(cli: &reqwest::blocking::Client, e: &CatEntry, settings: &Settings, archive: &UpdArchive) -> UpdEntry {
+    if ipset_skipped(e, settings) {
+        let mut u = entry_base(e);
+        u.status = "skip-user".into();
+        return u;
+    }
+    match fetch_bytes(cli, &e.url) {
+        Ok(b) => classify_entry(e, archive, &b),
+        Err(err) => {
+            let mut u = entry_base(e);
+            u.status = "err".into();
+            u.error = Some(err);
+            u
+        }
+    }
+}
+
 /// Проверяет все конфиги из каталога. Записи проверяются параллельно
 /// (45+ сетевых запросов), порядок в результате сохраняется исходный.
 pub fn check_all(data: &Path, roots: &Roots, settings: &Settings) -> Result<Vec<UpdEntry>, String> {
     let cli = Arc::new(client()?);
     let archive = Arc::new(UpdArchive::load(data));
-    let entries = collect_entries(data, roots, settings)?;
+    let entries = collect_entries(data, roots)?;
     let settings = Arc::new(settings.clone());
     let mut out: Vec<(usize, UpdEntry)> = std::thread::scope(|scope| {
         let handles: Vec<_> = entries
@@ -284,39 +297,47 @@ pub fn check_all(data: &Path, roots: &Roots, settings: &Settings) -> Result<Vec<
 }
 
 /// Применяет выбранные обновления (ид-ы или все доступные).
+///
+/// Атомарности нет: записи применяются по одной, при сбое на середине уже
+/// применённое остаётся применённым (бэкапы лежат рядом: `<dir>/.backups/<ts>`).
 pub fn apply_updates(data: &Path, roots: &Roots, settings: &Settings, ids: Vec<String>) -> Result<Vec<UpdEntry>, String> {
     let cli = client()?;
     let mut archive = UpdArchive::load(data);
-    let entries = collect_entries(data, roots, settings)?;
+    let entries = collect_entries(data, roots)?;
     let ts = crate::profiles::now_str();
     let mut out: Vec<UpdEntry> = Vec::new();
 
     for e in entries {
-        let u0 = check_entry(&cli, &e, settings, &archive);
-        let selected = if ids.is_empty() {
-            matches!(u0.status.as_str(), "avail" | "new")
-        } else {
-            ids.contains(&e.id)
-        };
-        if !selected {
-            out.push(u0);
+        if ipset_skipped(&e, settings) {
+            let mut u = entry_base(&e);
+            u.status = "skip-user".into();
+            out.push(u);
             continue;
         }
-        if matches!(u0.status.as_str(), "err" | "skip-user") {
-            out.push(u0);
-            continue;
-        }
+        // Файл качается ОДИН раз: этот же ответ даёт и статус (hash), и
+        // содержимое для записи. Раньше check_entry качал файл, а следом
+        // fetch_bytes — то есть каждое обновление тянулось из сети дважды.
         let bytes = match fetch_bytes(&cli, &e.url) {
             Ok(b) => b,
             Err(err) => {
-                let mut u = u0.clone();
+                let mut u = entry_base(&e);
                 u.status = "err".into();
                 u.error = Some(err);
                 out.push(u);
                 continue;
             }
         };
-        let remote = crate::config::sha256_hex(&bytes);
+        let u0 = classify_entry(&e, &archive, &bytes);
+        let selected = if ids.is_empty() {
+            matches!(u0.status.as_str(), "avail" | "new")
+        } else {
+            ids.contains(&e.id)
+        };
+        if !selected || matches!(u0.status.as_str(), "err" | "skip-user") {
+            out.push(u0);
+            continue;
+        }
+        let remote = u0.remote_hash.clone().unwrap_or_default();
         if e.dest.exists() {
             backup(&e.dest, &ts, data, e.catalog_only);
         }
@@ -324,10 +345,11 @@ pub fn apply_updates(data: &Path, roots: &Roots, settings: &Settings, ids: Vec<S
             let _ = fs::create_dir_all(parent);
         }
         if crate::config::atomic_write(&e.dest, &bytes).is_err() {
-            let mut u = u0.clone();
+            let mut u = u0;
             u.status = "err".into();
             u.error = Some("не удалось записать файл".into());
-            archive.record(&e.id, &remote, ts.clone());
+            // ВАЖНО: в applied.json не пишем — иначе следующий check показал бы
+            // «ok», считая применённым файл, которого на диске нет.
             out.push(u);
             continue;
         }

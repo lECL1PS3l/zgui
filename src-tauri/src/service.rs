@@ -1,7 +1,6 @@
 use crate::config::{Profile, SERVICE_NAME};
 use crate::runner::{hidden_command, run_powershell, run_script_privileged};
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -92,6 +91,16 @@ const VPN_SERVICES: &[&str] = &[
     "Happ",
 ];
 
+/// Разбирает строку `tasklist /FO CSV /NH`: `"имя","PID","...` в (имя, PID).
+/// Простая резка по `","` ломалась на именах процессов с запятой и молча
+/// пропускала их — PID не находился, процесс не считался конфликтом.
+fn tasklist_name_pid(line: &str) -> Option<(String, u32)> {
+    let rest = line.trim().strip_prefix('"')?;
+    let (name, rest) = rest.split_once("\",\"")?;
+    let (pid, _) = rest.split_once("\",\"")?;
+    Some((name.to_string(), pid.parse::<u32>().ok()?))
+}
+
 /// Перечисляет процессы из tasklist, отфильтрованные по предикату имени.
 fn list_processes(mut want: impl FnMut(&str) -> bool) -> Vec<(String, u32)> {
     let out = hidden_command("tasklist.exe")
@@ -101,12 +110,7 @@ fn list_processes(mut want: impl FnMut(&str) -> bool) -> Vec<(String, u32)> {
     let txt = String::from_utf8_lossy(&o.stdout);
     let mut found = Vec::new();
     for line in txt.lines() {
-        let cols: Vec<&str> = line.split("\",\"").collect();
-        if cols.len() < 2 {
-            continue;
-        }
-        let name = cols[0].trim_matches('"').to_string();
-        let Ok(pid) = cols[1].trim_matches('"').parse::<u32>() else { continue };
+        let Some((name, pid)) = tasklist_name_pid(line) else { continue };
         if want(&name) {
             found.push((name, pid));
         }
@@ -194,12 +198,7 @@ pub fn detect_conflicts(data_dir: &Path, our_pid: Option<u32>) -> ConflictReport
         let Ok(o) = out else { continue };
         let txt = String::from_utf8_lossy(&o.stdout);
         for line in txt.lines() {
-            let cols: Vec<&str> = line.split("\",\"").collect();
-            if cols.len() < 2 {
-                continue;
-            }
-            let name = cols[0].trim_matches('"').to_string();
-            let Ok(pid) = cols[1].trim_matches('"').parse::<u32>() else { continue };
+            let Some((name, pid)) = tasklist_name_pid(line) else { continue };
             if Some(pid) == our_pid {
                 continue;
             }
@@ -295,16 +294,16 @@ pub fn any_winws_running() -> bool {
 
 /// Запускает установленную службу zapret (нужна после теста, который её глушил).
 pub fn start_service(data_dir: &Path) -> Result<(), String> {
-    let script = data_dir.join("logs").join(format!("svc_start_{}.ps1", std::process::id()));
+    let script = crate::runner::TempFile::new(
+        data_dir.join("logs").join(format!("svc_start_{}.ps1", std::process::id())),
+    );
     let body = format!(
         "{}\nnet start {} 2>$null | Out-Null\nexit 0",
         crate::runner::PS_HEADER,
         SERVICE_NAME
     );
-    crate::runner::write_ps1(&script, &body)?;
-    let r = run_script_privileged(&script);
-    let _ = fs::remove_file(&script);
-    r.map(|_| ())
+    crate::runner::write_ps1(script.path(), &body)?;
+    run_script_privileged(script.path()).map(|_| ())
 }
 
 /// Строит PowerShell-скрипт выгрузки конфликтов и список имён, по которым выдана
@@ -366,7 +365,9 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
         body.push_str(&format!(
             "$zguiNames = @({arr})\n\
              Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | ForEach-Object {{ \
-               $leaf = [System.IO.Path]::GetFileNameWithoutExtension((($_.PathName -replace '\"','') -split ' ')[0]); \
+               $m = [regex]::Match([string]$_.PathName, '^\\s*\"([^\"]+)\"'); \
+               $exe = if ($m.Success) {{ $m.Groups[1].Value }} elseif ($_.PathName) {{ ($_.PathName -split '\\s+')[0] }} else {{ '' }}; \
+               $leaf = [System.IO.Path]::GetFileNameWithoutExtension($exe); \
                if ($leaf -and ($zguiNames -contains $leaf.ToLower())) {{ \
                  Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue; \
                  Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue; \
@@ -413,12 +414,11 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
     let Some((body, names)) = build_kill_script(report, our_pid) else {
         return Ok(Vec::new());
     };
-    let script = data_dir
-        .join("logs")
-        .join(format!("conflict_kill_{}.ps1", std::process::id()));
-    crate::runner::write_ps1(&script, &body)?;
-    let r = run_script_privileged(&script);
-    let _ = fs::remove_file(&script);
+    let script = crate::runner::TempFile::new(
+        data_dir.join("logs").join(format!("conflict_kill_{}.ps1", std::process::id())),
+    );
+    crate::runner::write_ps1(script.path(), &body)?;
+    let r = run_script_privileged(script.path());
     r.map(|_| names)
 }
 
@@ -431,9 +431,11 @@ pub(crate) fn build_service_cmdline(root: &Path, profile: &Profile, args: &[Stri
         .unwrap_or_else(|| root.join("bin").join(profile.exe_name()));
     let mut s = format!("\"{}\"", bin.to_string_lossy());
     for a in args {
-        if a.contains(' ') {
+        // Квотируем не только пробел: табуляция/новая строка тоже разделяют
+        // аргументы; кавычки внутри аргумента экранируем.
+        if a.is_empty() || a.chars().any(char::is_whitespace) || a.contains('"') {
             s.push_str(" \"");
-            s.push_str(a);
+            s.push_str(&a.replace('"', "\\\""));
             s.push('"');
         } else {
             s.push(' ');
@@ -450,7 +452,9 @@ fn ps_single_quote(text: &str) -> String {
 
 pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir: &Path) -> Result<(), String> {
     let cmdline = build_service_cmdline(root, profile, args);
-    let script = data_dir.join("logs").join(format!("svc_install_{}.ps1", std::process::id()));
+    let script = crate::runner::TempFile::new(
+        data_dir.join("logs").join(format!("svc_install_{}.ps1", std::process::id())),
+    );
     // ВАЖНО (почему не sc.exe): `sc` в PowerShell — алиас Set-Content, а передать
     // binPath с кавычками через нативную командную строку PS 5.1 надёжно нельзя.
     // New-Service принимает готовую строку как есть — кавычки и пробелы не ломаются.
@@ -463,9 +467,8 @@ pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir
         ps_single_quote(&cmdline),
         SERVICE_NAME
     );
-    crate::runner::write_ps1(&script, &body)?;
-    let code = run_script_privileged(&script).map_err(|e| e.to_string())?;
-    let _ = fs::remove_file(&script);
+    crate::runner::write_ps1(script.path(), &body)?;
+    let code = run_script_privileged(script.path()).map_err(|e| e.to_string())?;
     if code != 0 {
         return Err(format!("установка службы завершилась с кодом {}", code));
     }
@@ -486,17 +489,17 @@ pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir
 }
 
 pub fn remove_service(data_dir: &Path) -> Result<(), String> {
-    let script = data_dir.join("logs").join(format!("svc_remove_{}.ps1", std::process::id()));
+    let script = crate::runner::TempFile::new(
+        data_dir.join("logs").join(format!("svc_remove_{}.ps1", std::process::id())),
+    );
     let body = format!(
         "{}\nStop-Service -Name '{}' -Force -ErrorAction SilentlyContinue\n& sc.exe delete {} 2>$null | Out-Null\nexit 0",
         crate::runner::PS_HEADER,
         SERVICE_NAME,
         SERVICE_NAME
     );
-    crate::runner::write_ps1(&script, &body).map_err(|e| e.to_string())?;
-    let r = run_script_privileged(&script);
-    let _ = fs::remove_file(&script);
-    r.map(|_| ())
+    crate::runner::write_ps1(script.path(), &body).map_err(|e| e.to_string())?;
+    run_script_privileged(script.path()).map(|_| ())
 }
 
 /// Служба `zapret` с путём в наш layout (`...\data\engines\...`) — наша, даже
@@ -649,6 +652,59 @@ mod tests {
         assert_eq!(names, vec![malicious.clone()], "список имён для UI — как есть");
         assert!(body.contains("evil''-x.exe"), "кавычка в имени должна быть удвоена: {body}");
         assert!(!body.contains("'evil'-x"), "неэкранированной кавычки быть не должно");
+    }
+
+    #[test]
+    fn kill_script_reads_pathname_quoted() {
+        // Путь службы с пробелом: имя exe берём из кавычек, а не из первого
+        // слова строки (иначе "C:\Program Files\..." → "C:\Program").
+        let report = ConflictReport {
+            vpn: vec![ConflictProcess { pid: 1, name: "app.exe".into(), note: "vpn".into() }],
+            ..Default::default()
+        };
+        let (body, _) = build_kill_script(&report, None).expect("должен быть скрипт");
+        assert!(body.contains(r#"[regex]::Match([string]$_.PathName, '^\s*"([^"]+)"')"#), "разбор PathName по кавычкам: {body}");
+    }
+
+    #[test]
+    fn kill_script_is_valid_powershell() {
+        // Скрипт клеится из строк с regex и экранированием — проверяем, что
+        // PowerShell его реально разбирает (без выполнения).
+        let report = ConflictReport {
+            processes: vec![ConflictProcess { pid: 42, name: "evil'-x.exe".into(), note: String::new() }],
+            vpn: vec![ConflictProcess { pid: 7, name: "Happ.exe".into(), note: String::new() }],
+            foreign_service: true,
+            ..Default::default()
+        };
+        let (body, _) = build_kill_script(&report, None).expect("должен быть скрипт");
+        let path = std::env::temp_dir().join(format!("zgui-kill-parse-{}.ps1", std::process::id()));
+        crate::runner::write_ps1(&path, &body).unwrap();
+        let script = format!(
+            "$t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile({}, [ref]$t, [ref]$e); if ($e.Count) {{ $e[0].Message; exit 1 }} else {{ exit 0 }}",
+            crate::runner::ps_quote(&path.to_string_lossy())
+        );
+        let out = hidden_command("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .expect("powershell");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "скрипт не разбирается PowerShell: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    #[test]
+    fn tasklist_csv_parses_names_with_commas() {
+        let (name, pid) =
+            tasklist_name_pid(r#""my,app.exe","1234","Console","1","12,345 К""#).expect("строка должна разобраться");
+        assert_eq!(name, "my,app.exe");
+        assert_eq!(pid, 1234);
+        assert!(tasklist_name_pid("ИНФО: нет задач для заданных критериев.").is_none());
+        // Экранированные кавычки внутри имени тоже не ломают разбор.
+        let (n2, p2) = tasklist_name_pid(r#""odd""name.exe","7","Console","1","1 К""#).unwrap();
+        assert_eq!((n2.as_str(), p2), ("odd\"\"name.exe", 7));
     }
 
     #[test]
