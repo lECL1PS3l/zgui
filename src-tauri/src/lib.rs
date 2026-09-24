@@ -1692,11 +1692,17 @@ fn test_strategies(
         let mut results: Vec<tester::StrategyResult> = reused.clone();
         let mut parsed_count = 0usize;
         let started = std::time::Instant::now();
+        // Таймаут — по НЕАКТИВНОСТИ, а не от старта: разовая неудачная чита
+        // `test-out.json` (файл пишется после каждой стратегии, 2+ МБ) раньше
+        // объявляла завершённый тест, хотя раннер продолжал работать —
+        // остальные стратегии оставались «не тестировалась».
+        let mut last_progress = started;
         loop {
             if test_marker(&data).0.exists() {
                 break;
             }
             if let Some(v) = tester::read_test_progress(&out_path) {
+                last_progress = std::time::Instant::now();
                 // Фаза базовой пробы геоблок-теста (без Zapret): показываем прогресс,
                 // иначе UI выглядит «замершим» до первого winws.
                 if let Some(b) = v.get("baseline") {
@@ -1757,14 +1763,15 @@ fn test_strategies(
                 }
             } else {
                 // Вотчдог запуска: если PID раннера так и не появился — не висим 120 с,
-                // а выходим с понятной ошибкой. PID есть, но нет вывода — ждём дольше.
+                // а выходим с понятной ошибкой. PID есть, но нет вывода — ждём, пока
+                // не пройдёт 120 с БЕЗ успешных чтений (см. `last_progress`).
                 let pid_seen = data.join("logs/test-runner.pid").exists();
-                let limit = if pid_seen {
-                    Duration::from_secs(120)
+                let (base, limit) = if pid_seen {
+                    (last_progress, Duration::from_secs(120))
                 } else {
-                    Duration::from_secs(20)
+                    (started, Duration::from_secs(20))
                 };
-                if started.elapsed() > limit {
+                if base.elapsed() > limit {
                     break;
                 }
             }

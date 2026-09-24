@@ -441,7 +441,8 @@ if ($plan.baseline) {{
       $bi++
     }}
     $state = [ordered]@{{ baseline = [ordered]@{{ done = $bi; total = $plan.domains.Count }}; results = @() }}
-    ($state | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $out -Encoding utf8
+    ($state | ConvertTo-Json -Depth 4) | Out-File -LiteralPath "$out.tmp" -Encoding utf8
+    Move-Item -LiteralPath "$out.tmp" -Destination $out -Force
   }}
   $baseClient.Dispose()
   ($baseOut | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $plan.baselineOut -Encoding utf8
@@ -553,7 +554,11 @@ foreach ($step in $plan.steps) {{
   Start-Sleep -Milliseconds 400
   $all += [pscustomobject]$res
   $state = [ordered]@{{ index = $i; total = $plan.steps.Count; currentId = $step.id; currentName = $step.name; results = $all }}
-  ($state | ConvertTo-Json -Depth 8) | Out-File -LiteralPath $out -Encoding utf8
+  # Atomic write: the GUI reads this file while the runner writes it; a partially
+  # written 2+ MB JSON made the poll treat the test as finished (absolute 120 s
+  # watchdog used to break on the first unreadable read).
+  ($state | ConvertTo-Json -Depth 8) | Out-File -LiteralPath "$out.tmp" -Encoding utf8
+  Move-Item -LiteralPath "$out.tmp" -Destination $out -Force
 }}
 $marker = if ($stopRun) {{ 'STOPPED' }} else {{ 'DONE' }}
 $marker | Out-File -LiteralPath $out -Encoding utf8 -Append
