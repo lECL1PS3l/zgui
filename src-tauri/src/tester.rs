@@ -423,10 +423,11 @@ function Finish-Probe($task) {{
 if ($plan.baseline) {{
   # Baseline probe WITHOUT Zapret: distinguishes "site down / not resolving"
   # from "blocked but bypassable". Written to a separate file.
-  # Probes run in batches: thousands of geoblock domains must not open all at once.
+  # Probes run in small batches: with many parallel handshakes the WinDivert
+  # queue chokes and even healthy sites answer at ~6 s (timeout) - see below.
   $baseOut = @()
   $baseClient = New-ProbeClient
-  $batchSize = 300
+  $batchSize = 8
   $bi = 0
   for ($offset = 0; $offset -lt $plan.domains.Count; $offset += $batchSize) {{
     $end = [Math]::Min($offset + $batchSize - 1, $plan.domains.Count - 1)
@@ -469,11 +470,13 @@ function Measure-Step($step) {{
     }}
     if ($p -and -not $p.HasExited) {{
       $res.started = $true
-      # HTTPS probes in batches: connections inside a batch run in parallel,
-      # timeouts do not add up (100+ domains cost ~one timeout, not a hundred).
+      # HTTPS probes in small parallel batches (like the author's own tester,
+      # "parallel: 8"). One hundred simultaneous handshakes overload the
+      # WinDivert desync path: every host then answers at ~6 s and honest
+      # strategies look broken (author's harness: 92/105, ours: 19/115).
       $doms = @()
       $client = New-ProbeClient
-      $batchSize = 300
+      $batchSize = 8
       for ($offset = 0; $offset -lt $plan.domains.Count; $offset += $batchSize) {{
         $end = [Math]::Min($offset + $batchSize - 1, $plan.domains.Count - 1)
         $checks = @()
