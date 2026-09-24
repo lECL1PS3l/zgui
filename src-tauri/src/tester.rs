@@ -218,35 +218,64 @@ pub const REQUIRED_DOMAINS: &[&str] = &[
     "cloudflare.com",
 ];
 
-/// Основной тест: обязательные + ручной вшитый список.
-/// Онлайн-геоблок сюда НЕ попадает — для него есть отдельный `load_geoblock_domains`.
-pub fn load_domains_from_lists(_data: &Path, limit: usize) -> Vec<(String, String)> {
+/// Онлайн-списки геоблока — отдельный диагностический тест (лимит задаёт UI).
+/// Основной набор теста: критические домены (YouTube, Discord) и вторые по
+/// приоритету (Microsoft/Xbox, Google, Cloudflare — сообщаются, но для успеха
+/// не обязательны). Доп. домены в стандартный тест НЕ входят: они в отдельном
+/// редактируемом файле, для них отдельная кнопка (см. `load_extra_domains`).
+pub fn main_domains(limit: usize) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
     for host in REQUIRED_DOMAINS {
         let host = host.to_string();
-        seen.insert(host.clone());
         out.push((host.split('.').next().unwrap_or(&host).to_string(), host));
+        if out.len() >= limit {
+            break;
+        }
     }
-    if out.len() >= limit {
-        out.truncate(limit);
-        return out;
-    }
+    out
+}
 
-    let text = String::from_utf8_lossy(BUILTIN_TEST_DOMAINS);
-    for raw in text.lines() {
-        if let Some(d) = parse_rule_line(raw, &mut seen) {
-            out.push(d);
-            if out.len() >= limit {
-                return out;
+/// Путь к редактируемому списку доп. доменов (рядом с данными программы).
+pub fn extra_domains_path(data: &Path) -> std::path::PathBuf {
+    data.join("catalog").join("test-domains-extra.lst")
+}
+
+/// Создаёт файл доп. доменов из вшитого списка, если его ещё нет: пользователь
+/// правит файл руками, вшитая таблица — только стартовое наполнение.
+pub fn ensure_extra_domains_file(data: &Path) -> std::path::PathBuf {
+    let p = extra_domains_path(data);
+    if !p.exists() {
+        let mut text = String::from(
+            "# Дополнительные домены для отдельного теста «Доп. домены».\r\n\
+             # Формат: один домен в строке; строки с # игнорируются.\r\n\
+             # В стандартном тесте эти домены НЕ проверяются (там только YouTube/Discord\r\n\
+             # и вторые по приоритету Microsoft/Xbox, Google, Cloudflare).\r\n\
+             # Этот список гоняется отдельной кнопкой «Доп. домены».\r\n",
+        );
+        text.push_str(&String::from_utf8_lossy(BUILTIN_TEST_DOMAINS));
+        let _ = crate::config::atomic_write(&p, text.as_bytes());
+    }
+    p
+}
+
+/// Читает список доп. доменов (при отсутствии файла — создаёт из вшитого).
+pub fn load_extra_domains(data: &Path, limit: usize) -> Vec<(String, String)> {
+    let p = ensure_extra_domains_file(data);
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(text) = crate::config::read_text_auto(&p) {
+        for raw in text.lines() {
+            if let Some(d) = parse_rule_line(raw, &mut seen) {
+                out.push(d);
+                if out.len() >= limit {
+                    break;
+                }
             }
         }
     }
     out
 }
 
-/// Онлайн-списки геоблока — отдельный диагностический тест (лимит задаёт UI).
 pub fn load_geoblock_domains(data: &Path, limit: usize) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -946,22 +975,41 @@ mod tests {
 
     #[test]
     fn load_domains_parses() {
+        // Разбор списка доп. доменов из файла (он же — формат, который правит юзер).
         let tmp = std::env::temp_dir().join(format!("zgui-test-{}", std::process::id()));
-        let dir = tmp.join("catalog/geoblock");
+        let dir = tmp.join("catalog");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("allow-domains-youtube.lst"),
-            "# comment\nwww.youtube.com/abc\n.googlevideo.com\n.ua\n123.45.67.89\n*.wild.bad\nbad.domain.\ngooglevideo.com\n",
+            dir.join("test-domains-extra.lst"),
+            "# comment\nwww.youtube.com/abc\n.googlevideo.com\n.ua\n123.45.67.89\n*.wild.bad\nbad.domain.\ngooglevideo.com\nchess.com\n",
         )
         .unwrap();
-        let d = load_domains_from_lists(&tmp, 10);
+        let d = load_extra_domains(&tmp, 10);
         assert!(d.iter().any(|(_, h)| h == "www.youtube.com"));
         assert!(d.iter().any(|(_, h)| h == "googlevideo.com"));
+        assert!(d.iter().any(|(_, h)| h == "chess.com"));
         assert!(!d.iter().any(|(_, h)| h.starts_with(".")));
         assert!(!d.iter().any(|(_, h)| h.contains('*')));
-        assert!(!d.iter().any(|(_, h)| h == "123.45.67.89"), "IP в списке доменов недопустим");
+        assert!(!d.iter().any(|(_, h)| h == "123.45.67.89"), "IP в списке хостов недопустим");
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn main_domains_only_critical_and_secondary() {
+        let d = main_domains(500);
+        assert_eq!(d.len(), REQUIRED_DOMAINS.len(), "стандартный тест — ровно критичные и вторые");
+        for (_, host) in &d {
+            let group = classify_domain(host);
+            assert!(
+                group.critical || group.priority == 2,
+                "доп. домен {host} не должен попадать в стандартный тест (группа {})",
+                group.id
+            );
+        }
+        // Доп. домены из вшитого списка — только в отдельном наборе.
+        assert!(!d.iter().any(|(_, h)| h == "hdrezka.fm" || h == "chess.com"));
+    }
+
 
     #[test]
     fn usable_host_rejects_junk() {
@@ -975,14 +1023,17 @@ mod tests {
     }
 
     #[test]
-    fn builtin_domains_are_available_without_updates() {
+    fn extra_domains_seeded_from_builtin_and_filtered() {
+        // Файла нет — он создаётся из вшитого списка (стартовое наполнение),
+        // который потом правит пользователь.
         let tmp = std::env::temp_dir().join(format!("zgui-builtin-domains-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let domains = load_domains_from_lists(&tmp, 500);
-        // Обязательные критичные группы + домены из ручного списка.
-        assert!(domains.iter().any(|(_, host)| host == "music.youtube.com"));
-        assert!(domains.iter().any(|(_, host)| host == "discord.com"));
+        let domains = load_extra_domains(&tmp, 500);
+        let path = extra_domains_path(&tmp);
+        assert!(path.is_file(), "файл доп. доменов должен создаться: {path:?}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# Дополнительные домены"), "в файле должна быть шапка-подсказка");
         assert!(domains.iter().any(|(_, host)| host == "hdrezka.fm"));
         assert!(domains.len() >= 100);
         // Вычищенные категории не должны вернуться (почта/СМИ/.ua).

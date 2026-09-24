@@ -1411,6 +1411,8 @@ fn test_strategies(
 ) -> Result<bool, String> {
     let _ = domains_limit;
     let geoblock = mode.as_deref() == Some("geoblock");
+    // Отдельный прогон по редактируемому списку доп. доменов (кнопка «Доп. домены»).
+    let extra = mode.as_deref() == Some("extra");
     let g = ga.inner();
     {
         let data = st(g).data.clone();
@@ -1475,14 +1477,15 @@ fn test_strategies(
         }
     }
 
-    // Основной тест идёт ровно по ручному списку (обязательные + вшитые) — без геоблока.
-    // Если есть калибровка geoblock-теста, недоступные домены (не обходятся Zapret) отсекаем,
-    // но обязательные критические группы не трогаем.
-    // Диагностический геоблок-тест берёт ВЕСЬ онлайн-список (без лимита) + базовую пробу.
+    // Стандартный тест идёт по критическим доменам (YouTube/Discord) и вторым по
+    // приоритету; доп. домены — только отдельной кнопкой (mode="extra"), геоблок —
+    // своим диагностическим прогоном с базовой пробой.
     let custom = if geoblock {
         tester::load_geoblock_domains(&data, usize::MAX)
+    } else if extra {
+        tester::load_extra_domains(&data, usize::MAX)
     } else {
-        let mut list = tester::load_domains_from_lists(&data, usize::MAX);
+        let mut list = tester::main_domains(usize::MAX);
         // Вырезаем ТОЛЬКО те домены, что калибровка отметила как «требует VPN»
         // (недоступны через Zapret). Reachable-список НЕ используется как белый:
         // иначе домены ручного списка, которых нет в онлайн-геоблоке, выпадали бы.
@@ -1915,7 +1918,7 @@ fn test_strategies(
             emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "test"}));
             return;
         }
-        if !geoblock {
+        if !geoblock && !extra {
             // Результаты ДОБАВляем к прежним: прогон одного движка не должен
             // стирать то, что уже намерено по другим (вкладка «Все» иначе
             // показывает только последний запуск).

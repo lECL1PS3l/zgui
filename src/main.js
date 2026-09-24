@@ -1020,6 +1020,7 @@ function renderTestCard() {
   }
   $("#btnRunTest").disabled = !!(testState && testState.running);
   if ($("#btnRunGeoblock")) $("#btnRunGeoblock").disabled = !!(testState && testState.running);
+  if ($("#btnRunExtra")) $("#btnRunExtra").disabled = !!(testState && testState.running);
   if ($("#btnStopTest")) $("#btnStopTest").disabled = !(testState && testState.running);
   const ids = profs.map((p) => p.id);
   $("#testSelectAll").checked = testPicked === null || ids.every((id) => testPicked.has(id));
@@ -1394,6 +1395,7 @@ async function runAutotune() {
 
 async function runTest(already, mode) {
   const geoblock = mode === "geoblock";
+  const extra = mode === "extra";
   const profs = visibleTestProfiles();
   // Учитываем текущий вид (движок/таб): если выбор пуст или содержит id не из
   // текущего вида, берём все видимые стратегии. Иначе тест уходил бы по чужим id.
@@ -1403,32 +1405,44 @@ async function runTest(already, mode) {
     toast("warn", "не выбрано ни одной стратегии");
     return;
   }
-  const btn = geoblock ? $("#btnRunGeoblock") : $("#btnRunTest");
+  const btn = geoblock ? $("#btnRunGeoblock") : extra ? $("#btnRunExtra") : $("#btnRunTest");
   // Взаимная блокировка: тест не запускается параллельно с другой операцией.
   if (B && B.opRunning) {
     toast("warn", "идёт другая операция — дождитесь завершения");
     return;
   }
   if (!already) {
+    const extraPath = ((B && B.data_dir) || "") + "\\catalog\\test-domains-extra.lst";
+    const adminHint = `<p class="sub">Windows запросит права администратора — они нужны, чтобы
+             запускать обход (один раз на весь тест).</p>`;
+    const html = geoblock
+      ? `<p>Будет прогнан <b>весь онлайн-список geoblock</b> (без лимита) по выбранным стратегиям,
+           с базовой пробой без Zapret.</p>
+         <p class="sub"><b>Проверка может занять от 10 до 20 часов.</b> Не рекомендуется гонять
+           сразу все движки и конфиги — выберите один-два движка и ограниченный список стратегий.</p>` + adminHint
+      : extra
+      ? `<p>Будет прогнан <b>ваш список доп. доменов</b> по ${useIds.length} выбранным стратегиям.
+           В стандартном тесте эти домены не проверяются.</p>
+         <p class="sub">Список лежит в файле <code>${extraPath}</code> — правьте его в блокноте
+           (один домен в строке, строки с # игнорируются).</p>
+         <p class="sub"><b>Не рекомендуется гонять сразу все движки и конфиги</b> — это долго.
+           Выберите один-два движка.</p>` + adminHint
+      : `<p>Будет запущено <b>${useIds.length}</b> стратегий по очереди (все выбранные движки).</p>
+         <p class="sub">Проверяются критические домены (YouTube, Discord); Microsoft/Xbox, Google,
+           Cloudflare — вторые по приоритету (для успеха не обязательны). Доп. домены — отдельной
+           кнопкой «Доп. домены».</p>` + adminHint;
     const ok = await showConfirm({
-      title: geoblock ? "Геоблок-тест" : "Тест стратегий",
+      title: geoblock ? "Геоблок-тест" : extra ? "Тест доп. доменов" : "Тест стратегий",
       okLabel: "Запустить",
       cancelLabel: "Отмена",
-      html: geoblock
-        ? `<p>Будет прогнан <b>весь онлайн-список geoblock</b> (без лимита) по выбранным стратегиям,
-             с базовой пробой без Zapret.</p>
-           <p class="sub">Это может занять продолжительное время. Windows запросит права администратора —
-             они нужны, чтобы запускать обход (один раз).</p>`
-        : `<p>Будет запущено <b>${useIds.length}</b> стратегий по очереди (все выбранные движки).</p>
-           <p class="sub">Windows запросит права администратора — они нужны, чтобы запускать обход
-             (один раз на весь тест).</p>`,
+      html,
     });
     if (!ok) return;
   }
   btnBusy(btn, true);
   try {
-    await invoke("test_strategies", { ids: useIds, mode: geoblock ? "geoblock" : "main" });
-    toast("info", geoblock ? "геоблок-тест запущен" : "тест стратегий запущен");
+    await invoke("test_strategies", { ids: useIds, mode: geoblock ? "geoblock" : extra ? "extra" : "main" });
+    toast("info", geoblock ? "геоблок-тест запущен" : extra ? "тест доп. доменов запущен" : "тест стратегий запущен");
   } catch (e) {
     const msg = String(e);
     if (msg.includes("VPN_RUNNING")) {
@@ -2199,6 +2213,7 @@ function bindStatic() {
 
   $("#btnRunTest").addEventListener("click", () => runTest(false, "main"));
   $("#btnRunGeoblock").addEventListener("click", () => runTest(false, "geoblock"));
+  if ($("#btnRunExtra")) $("#btnRunExtra").addEventListener("click", () => runTest(false, "extra"));
   if ($("#btnRunAutotune")) $("#btnRunAutotune").addEventListener("click", runAutotune);
   if ($("#btnStopAutotune"))
     $("#btnStopAutotune").addEventListener("click", async () => {
