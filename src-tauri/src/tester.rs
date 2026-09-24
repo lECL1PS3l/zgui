@@ -441,9 +441,7 @@ if ($plan.baseline) {{
   $baseClient.Dispose()
   ($baseOut | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $plan.baselineOut -Encoding utf8
 }}
-foreach ($step in $plan.steps) {{
-  if (Test-Path -LiteralPath $plan.flag) {{ $stopRun = $true; break }}
-  $i++
+function Measure-Step($step) {{
   $res = [ordered]@{{ id = $step.id; name = $step.name; engine = $step.engine; group = $step.group; started = $false; score = 0; maxScore = $plan.domains.Count; domains = @(); groups = @(); criticalOk = $false; error = $null }}
   $safe = ($step.id -replace '[^A-Za-z0-9._-]', '_')
   $errFile = Join-Path $errDir ("run-$safe.err.txt")
@@ -456,7 +454,7 @@ foreach ($step in $plan.steps) {{
       if ($a -match '[\s"]') {{ '"' + $a.Replace('"', '\"') + '"' }} else {{ $a }}
     }}) -join ' '
     $p = Start-Process -FilePath $step.exe -WorkingDirectory $step.workdir -WindowStyle Hidden -ArgumentList $argLine -PassThru -RedirectStandardError $errFile -RedirectStandardOutput $outFile
-      $p.Id | Out-File -LiteralPath $plan.winPid -Encoding ascii
+    $p.Id | Out-File -LiteralPath $plan.winPid -Encoding ascii
     Start-Sleep -Milliseconds 1800
     # One retry when the process died instantly (Driver load race, transient
     # WinDivert state). Not retried: a healthy run (probes already measured).
@@ -513,6 +511,20 @@ foreach ($step in $plan.steps) {{
     }}
   }} catch {{
     $res.error = $_.Exception.Message
+  }}
+  return $res
+}}
+foreach ($step in $plan.steps) {{
+  if (Test-Path -LiteralPath $plan.flag) {{ $stopRun = $true; break }}
+  $i++
+  $res = Measure-Step $step
+  # Second chance for a near-zero result: an early run right after the test
+  # starts often does not apply due to the WinDivert driver load race (the very
+  # first strategy especially). Retry once and keep the better result, otherwise
+  # a bad strategy and a warm-up failure look identical.
+  if ($res.started -and $res.score -le 1) {{
+    $r2 = Measure-Step $step
+    if ($r2.started -and $r2.score -gt $res.score) {{ $res = $r2 }}
   }}
   Start-Sleep -Milliseconds 400
   $all += [pscustomobject]$res

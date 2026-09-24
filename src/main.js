@@ -797,6 +797,9 @@ function renderTestTabs() {
   tabsSigTests = sig;
   buildEngineTabs(wrap, testEngineFilter || "all", (filter) => {
     testEngineFilter = filter === "all" ? null : filter;
+    // Смена движка сбрасывает выбор стратегий: иначе прогон ушёл бы по id
+    // прошлого движка, а результаты отфильтровались бы по новому (пусто).
+    testPicked = null;
     renderTestTabs();
     renderTestCard();
     renderTestResults();
@@ -1071,17 +1074,22 @@ function renderTestResults() {
     return;
   }
   const shown = testEngineFilter ? results.filter((r) => r.engine === testEngineFilter) : results;
-  if (testState && testState.done && testState.bestName) {
+  // «Лучшая» показывается ТОЛЬКО если она среди текущего вида (движка/фильтра):
+  // иначе после прогона dpibreak висел бы best от flowseal — путаница.
+  const bestId = testState && testState.bestId;
+  const bestInView = bestId && shown.some((r) => r.id === bestId) ? bestId : null;
+  const bestRes = bestInView ? results.find((r) => r.id === bestInView) : null;
+  if (testState && testState.done && bestRes) {
     bestBox.classList.remove("hidden");
     bestBox.innerHTML = "";
     const t = document.createElement("div");
     t.className = "test-best-title";
-    t.textContent = `Лучшая стратегия: ${testState.bestName}`;
+    t.textContent = `Лучшая стратегия: ${bestRes.name}`;
     bestBox.appendChild(t);
     const b = btn("Применить: автозапуск + запустить сейчас", "primary small", async () => {
       btnBusy(b, true);
       try {
-        await invoke("apply_best_strategy", { id: testState.bestId });
+        await invoke("apply_best_strategy", { id: bestInView });
         toast("ok", "готово: автозапуск включён, стратегия запущена");
       } catch (e) {
         toast("err", String(e));
@@ -1090,6 +1098,16 @@ function renderTestResults() {
       await refreshAll();
     });
     bestBox.appendChild(b);
+  } else if (testState && testState.done && shown.length) {
+    // Прогон завершён, но успешной стратегии нет (или best не из этого движка).
+    bestBox.classList.remove("hidden");
+    bestBox.innerHTML = "";
+    const t = document.createElement("div");
+    t.className = "test-best-title muted";
+    t.textContent =
+      "Нет успешной стратегии среди выбранных — все варианты не прошли контрольные домены."
+      + (testEngineFilter ? " Попробуйте другой движок или «Подбор стратегии»." : "");
+    bestBox.appendChild(t);
   } else {
     bestBox.classList.add("hidden");
   }
@@ -1302,7 +1320,10 @@ async function runAutotune() {
 async function runTest(already, mode) {
   const geoblock = mode === "geoblock";
   const profs = visibleTestProfiles();
-  const useIds = testPicked === null ? profs.map((p) => p.id) : [...testPicked];
+  // Учитываем текущий вид (движок/таб): если выбор пуст или содержит id не из
+  // текущего вида, берём все видимые стратегии. Иначе тест уходил бы по чужим id.
+  let useIds = testPicked === null ? profs.map((p) => p.id) : [...testPicked].filter((id) => profs.some((p) => p.id === id));
+  if (!useIds.length) useIds = profs.map((p) => p.id);
   if (!useIds.length) {
     toast("warn", "не выбрано ни одной стратегии");
     return;
