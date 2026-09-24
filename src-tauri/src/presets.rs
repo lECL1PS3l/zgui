@@ -46,6 +46,13 @@ pub fn preset_profile(id: &str, engine: &str, name: &str, args: Vec<String>) -> 
     }
 }
 
+/// Вшитые пресеты, вырезанные в новых версиях (id без префикса `preset:`).
+/// Их профили удаляются при старте — иначе остаются мёртвые стратегии
+/// (например `-7/-8/-9` у GoodbyeDPI v0.2.2 → `unknown option`).
+/// Чистим ТОЛЬКО этот явный список: пресеты, доставленные по воздуху (OTA),
+/// могут иметь id, которых нет во вшитой таблице, и удалять их нельзя.
+pub const REMOVED_PRESET_IDS: [&str; 3] = ["goodbyedpi-7", "goodbyedpi-8", "goodbyedpi-9"];
+
 pub fn builtin_presets() -> Vec<PresetDef> {
     vec![
         PresetDef {

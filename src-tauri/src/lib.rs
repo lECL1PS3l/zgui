@@ -755,29 +755,28 @@ fn provision_engines(s: &mut AppState) {
 }
 
 fn ensure_presets(s: &mut AppState) {
-    let builtin = presets::builtin_presets();
-    let current: std::collections::HashSet<String> =
-        builtin.iter().map(|d| format!("preset:{}", d.id)).collect();
-    // Чистим устаревшие вшитые пресеты (переименованные/вырезанные в новых
-    // версиях): иначе в списке остаются мёртвые стратегии вроде
-    // «GoodbyeDPI - 9 (максимальный)» → `unknown option -9` и шум в тестах.
-    // Кастомные профили (builtin=false) не трогаем.
-    let before = s.profiles.len();
-    s.profiles.retain(|p| {
-        !(p.builtin
-            && p.source.as_deref().is_some_and(|x| x.starts_with("preset:"))
-            && !current.contains(&p.id))
-    });
-    if s.profiles.len() != before {
-        logger::log(
-            "info",
-            "profiles",
-            &format!("удалено устаревших пресетов: {}", before - s.profiles.len()),
-        );
+    // Чистим ТОЛЬКО явно вырезанные вшитые пресеты (id из REMOVED_PRESET_IDS):
+    // иначе остаются мёртвые стратегии вроде «GoodbyeDPI - 9» → `unknown option`.
+    // Не трогаем пресеты, доставленные по воздуху (OTA): их id могут не входить
+    // во вшитую таблицу, но они актуальны.
+    let removed: std::collections::HashSet<String> = presets::REMOVED_PRESET_IDS
+        .iter()
+        .map(|id| format!("preset:{}", id))
+        .collect();
+    if !removed.is_empty() {
+        let before = s.profiles.len();
+        s.profiles.retain(|p| !removed.contains(&p.id));
+        if s.profiles.len() != before {
+            logger::log(
+                "info",
+                "profiles",
+                &format!("удалено устаревших пресетов: {}", before - s.profiles.len()),
+            );
+        }
     }
     // Сеем вшитые пресеты всех движков: недостающие добавляем, существующие
     // (по id «preset:<id>») не трогаем — пользователь мог их скрыть/переименовать.
-    for def in builtin {
+    for def in presets::builtin_presets() {
         if !s.profiles.iter().any(|p| p.id == format!("preset:{}", def.id)) {
             s.profiles.push(def.to_profile());
         }
@@ -822,7 +821,14 @@ fn refresh_catalog(app: AppHandle, ga: State<'_, Global>) -> Result<Vec<Profile>
         let imported_ids: std::collections::HashSet<String> = imported.iter().map(|p| p.id.clone()).collect();
         // держим ручные (custom) профили, убираем потерянные импортированные
         s.profiles.retain(|p| {
-            !(p.engine == ENGINE_FLOWSEAL && p.source.is_some() && !p.builtin && !imported_ids.contains(&p.id))
+            // Кандидаты автоподбора (source «auto:») не из .bat-каталога —
+            // синхронизация не должна их удалять.
+            let is_auto = p.source.as_deref().is_some_and(|s| s.starts_with("auto:"));
+            !(p.engine == ENGINE_FLOWSEAL
+                && p.source.is_some()
+                && !p.builtin
+                && !is_auto
+                && !imported_ids.contains(&p.id))
         });
         for p in imported {
             if p.builtin {
@@ -1470,11 +1476,9 @@ fn test_strategies(
             let mut to_run = Vec::new();
             for p in profiles {
                 let key = args_key(&p, &tcp, &udp);
-                match cache
-                    .results
-                    .iter()
-                    .find(|r| r.id == p.id && r.args_key.as_deref() == Some(key.as_str()))
-                {
+                match cache.results.iter().find(|r| {
+                    r.id == p.id && r.started && r.args_key.as_deref() == Some(key.as_str())
+                }) {
                     Some(r) => reused.push(r.clone()),
                     None => to_run.push(p),
                 }
@@ -1815,8 +1819,9 @@ fn test_strategies(
         }
 
         let (mut sorted, best) = tester::summarize(&results);
-        // Помечаем результаты ключом аргументов — для переиспользования в автоподборе.
-        for r in sorted.iter_mut() {
+        // Помечаем ТОЛЬКО реально стартовавшие результаты ключом аргументов —
+        // иначе «не запустилась» из кэша переиспользовалась бы как успешная.
+        for r in sorted.iter_mut().filter(|r| r.started) {
             if let Some(p) = profiles.iter().find(|p| p.id == r.id) {
                 r.args_key = Some(args_key(p, &tcp, &udp));
             }
@@ -1925,6 +1930,44 @@ fn open_task_manager() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Открывает цель через оболочку Windows (ShellExecuteW). В отличие от
+/// `cmd /c start`, не режет цель по `&` — ссылки с query-параметрами целы.
+#[cfg(windows)]
+fn shell_open(target: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = std::ffi::OsStr::new(target)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let op: Vec<u16> = std::ffi::OsStr::new("open")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let h = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    if (h as isize) <= 32 {
+        return Err(format!("не удалось открыть (код {})", h as isize));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn shell_open(target: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Открывает внешнюю ссылку (http/https) или системное окно `.cpl` в оболочке
 /// Windows. Разрешены только эти цели — произвольные команды из фронта закрыты.
 /// Нужно для «Отправить отчёт» (GitHub Issues) и «Показать адаптеры» (`ncpa.cpl`).
@@ -1936,11 +1979,7 @@ fn open_external(target: String) -> Result<(), String> {
     if !ok {
         return Err("разрешены только ссылки http(s) и ncpa.cpl".into());
     }
-    rn::hidden_command("cmd.exe")
-        .args(["/c", "start", "", &target])
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    shell_open(&target)
 }
 
 #[tauri::command(async)]
