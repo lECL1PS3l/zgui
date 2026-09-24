@@ -82,18 +82,24 @@ pub fn builtin_presets() -> Vec<PresetDef> {
                 "--dpi-desync-split-seqovl-pattern=%ENGINE_ROOT%bin/tls_clienthello_www_google_com.bin",
             ],
         },
-        // Портирован из README bol-van/zapret2 (preset2_example, блок winws2):
-        // HTTP fake/fakedsplit + TLS fake/multidisorder + QUIC. Это «ядерный»
-        // пресет без Discord-специфики — база для большинства провайдеров.
+        // Дословный порт официального preset2_example.cmd из bol-van/zapret-win-bundle
+        // (zapret-winws/preset2_example.cmd): HTTP fake/fakedsplit + TLS youtube-hostlist +
+        // TLS general + QUIC (hostlist и general) + wireguard/stun/discord.
+        // Проверен `winws2 --dry-run`: 6 профилей, hostlist грузится.
         PresetDef {
             id: "zapret2-general",
             engine: "zapret2",
-            name: "zapret2 · General (fake + multisplit)",
+            name: "zapret2 · General (официальный preset2)",
             args: &[
                 "--wf-tcp-out=80,443",
                 "--lua-init=@%ENGINE_ROOT%lua/zapret-lib.lua",
                 "--lua-init=@%ENGINE_ROOT%lua/zapret-antidpi.lua",
                 "--lua-init=fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')",
+                "--blob=quic_google:@%ENGINE_ROOT%files/quic_initial_www_google_com.bin",
+                "--wf-raw-part=@%ENGINE_ROOT%windivert.filter/windivert_part.discord_media.txt",
+                "--wf-raw-part=@%ENGINE_ROOT%windivert.filter/windivert_part.stun.txt",
+                "--wf-raw-part=@%ENGINE_ROOT%windivert.filter/windivert_part.wireguard.txt",
+                "--wf-raw-part=@%ENGINE_ROOT%windivert.filter/windivert_part.quic_initial_ietf.txt",
                 "--filter-tcp=80",
                 "--filter-l7=http",
                 "--out-range=-d10",
@@ -103,45 +109,22 @@ pub fn builtin_presets() -> Vec<PresetDef> {
                 "--new",
                 "--filter-tcp=443",
                 "--filter-l7=tls",
-                "--out-range=-d10",
-                "--payload=tls_client_hello",
-                "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6",
-                "--lua-desync=multidisorder:pos=midsld",
-                "--new",
-                "--filter-udp=443",
-                "--filter-l7=quic",
-                "--payload=quic_initial",
-                "--lua-desync=fake:blob=fake_default_quic:repeats=11",
-            ],
-        },
-        // YouTube-вариант из README: hostlist + sni=www.google.com + dupsid,
-        // QUIC с blob quic_google (файл из files/).
-        PresetDef {
-            id: "zapret2-youtube",
-            engine: "zapret2",
-            name: "zapret2 · YouTube (fake TLS + QUIC)",
-            args: &[
-                "--wf-tcp-out=80,443",
-                "--lua-init=@%ENGINE_ROOT%lua/zapret-lib.lua",
-                "--lua-init=@%ENGINE_ROOT%lua/zapret-antidpi.lua",
-                "--lua-init=fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')",
-                "--blob=quic_google:%ENGINE_ROOT%files/fake/quic_initial_www_google_com.bin",
-                "--filter-tcp=80",
-                "--filter-l7=http",
-                "--out-range=-d10",
-                "--payload=http_req",
-                "--lua-desync=fake:blob=fake_default_http:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5",
-                "--lua-desync=fakedsplit:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5",
-                "--new",
-                "--filter-tcp=443",
-                "--filter-l7=tls",
+                "--hostlist=%ENGINE_ROOT%files/list-youtube.txt",
                 "--out-range=-d10",
                 "--payload=tls_client_hello",
                 "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=11:tls_mod=rnd,dupsid,sni=www.google.com",
                 "--lua-desync=multidisorder:pos=1,midsld",
                 "--new",
+                "--filter-tcp=443",
+                "--filter-l7=tls",
+                "--out-range=-d10",
+                "--payload=tls_client_hello",
+                "--lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6",
+                "--lua-desync=multidisorder:pos=midsld",
+                "--new",
                 "--filter-udp=443",
                 "--filter-l7=quic",
+                "--hostlist=%ENGINE_ROOT%files/list-youtube.txt",
                 "--payload=quic_initial",
                 "--lua-desync=fake:blob=quic_google:repeats=11",
                 "--new",
@@ -149,6 +132,37 @@ pub fn builtin_presets() -> Vec<PresetDef> {
                 "--filter-l7=quic",
                 "--payload=quic_initial",
                 "--lua-desync=fake:blob=fake_default_quic:repeats=11",
+                "--new",
+                "--filter-l7=wireguard,stun,discord",
+                "--payload=wireguard_initiation,wireguard_cookie,stun,discord_ip_discovery",
+                "--lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2",
+            ],
+        },
+        // Узкий YouTube-вариант: только hostlist-блоки TLS+QUIC (быстрее general).
+        PresetDef {
+            id: "zapret2-youtube",
+            engine: "zapret2",
+            name: "zapret2 · YouTube (hostlist TLS + QUIC)",
+            args: &[
+                "--wf-tcp-out=80,443",
+                "--lua-init=@%ENGINE_ROOT%lua/zapret-lib.lua",
+                "--lua-init=@%ENGINE_ROOT%lua/zapret-antidpi.lua",
+                "--lua-init=fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')",
+                "--blob=quic_google:@%ENGINE_ROOT%files/quic_initial_www_google_com.bin",
+                "--wf-raw-part=@%ENGINE_ROOT%windivert.filter/windivert_part.quic_initial_ietf.txt",
+                "--filter-tcp=443",
+                "--filter-l7=tls",
+                "--hostlist=%ENGINE_ROOT%files/list-youtube.txt",
+                "--out-range=-d10",
+                "--payload=tls_client_hello",
+                "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=11:tls_mod=rnd,dupsid,sni=www.google.com",
+                "--lua-desync=multidisorder:pos=1,midsld",
+                "--new",
+                "--filter-udp=443",
+                "--filter-l7=quic",
+                "--hostlist=%ENGINE_ROOT%files/list-youtube.txt",
+                "--payload=quic_initial",
+                "--lua-desync=fake:blob=quic_google:repeats=11",
             ],
         },
         // GoodbyeDPI v0.2.2: режимы только -1..-6 (легаси -1..-4, современные -5,-6).
@@ -276,7 +290,7 @@ mod tests {
         let ps = builtin_presets();
         assert!(ps.iter().any(|p| p.engine == "flowseal"));
         assert!(ps.iter().any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
-        assert!(ps.iter().any(|p| p.engine == "goodbyedpi" && p.args.contains(&"-9")));
+        assert!(ps.iter().any(|p| p.engine == "goodbyedpi" && p.args.contains(&"-5")));
         assert!(ps.iter().any(|p| p.engine == "dpibreak" && p.args.iter().any(|a| a.starts_with("-o"))));
 
         // Движки пресетов зарегистрированы, идентификаторы уникальны.
