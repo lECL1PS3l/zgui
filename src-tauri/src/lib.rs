@@ -81,6 +81,33 @@ fn ops_try() -> Option<std::sync::MutexGuard<'static, ()>> {
     OPS.try_lock().ok()
 }
 
+/// RAII-гард долгой операции: ставит `op_running` и эмитит `zgui:op` при
+/// создании, снимает — при выходе из области видимости (в том числе при
+/// раннем `return`, ошибке или панике). Раньше флаг ставился/снимался руками
+/// в каждой команде, и любой пропущенный путь оставлял GUI в «идёт операция…»
+/// навсегда. Для фоновых операций гард ПЕРЕНОСИТСЯ в поток
+/// (`std::thread::spawn(move || { let _g = guard; ... })`) и снимается при
+/// завершении потока; `Global` берётся из `AppHandle` в момент срабатывания.
+struct OpGuard {
+    app: AppHandle,
+    kind: &'static str,
+}
+
+impl OpGuard {
+    fn new(app: &AppHandle, kind: &'static str) -> Self {
+        app.state::<Global>().set_op_running(true);
+        emit(app, "zgui:op", serde_json::json!({"running": true, "kind": kind}));
+        Self { app: app.clone(), kind }
+    }
+}
+
+impl Drop for OpGuard {
+    fn drop(&mut self) {
+        self.app.state::<Global>().set_op_running(false);
+        emit(&self.app, "zgui:op", serde_json::json!({"running": false, "kind": self.kind}));
+    }
+}
+
 fn now_ts() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -504,13 +531,13 @@ fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Opt
     {
         return Err("уже идёт загрузка или проверка обновлений — дождитесь завершения".into());
     }
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "fetch"}));
+    let op_guard = OpGuard::new(&app, "fetch");
     let dest = dest.unwrap_or_else(|| st(g).data.join("engines").join(&engine).to_string_lossy().into_owned());
     let data_dir = st(g).data.clone();
     let app2 = app.clone();
     let engine2 = engine.clone();
     std::thread::spawn(move || {
+        let _op_guard = op_guard;
         let tag = format!("fetch:{}", engine2);
         emit(&app2, "zgui:prog", serde_json::json!({"id": tag, "phase": "meta", "msg": "получаю информацию о последнем релизе", "pct": 0}));
         match fetch_engine_impl(&app2, &meta, &dest, &data_dir, &engine2) {
@@ -540,8 +567,6 @@ fn fetch_engine(app: AppHandle, ga: State<'_, Global>, engine: String, dest: Opt
             }
         }
         app2.state::<Global>().set_busy(false);
-        app2.state::<Global>().set_op_running(false);
-        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "fetch"}));
     });
     Ok(format!("загрузка {} началась", engine))
 }
@@ -1111,13 +1136,18 @@ fn stop_all_own(app: &AppHandle, g: &Global) -> Result<(), String> {
 #[tauri::command(async)]
 fn stop_running(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
     let g = ga.inner();
+    // Во время теста движок принадлежит тесту: тулбарная «Остановить» не должна
+    // убивать winws теста (иначе тест продолжается «без обхода» и врёт цифрами).
+    {
+        let testing = g.testing.lock().unwrap_or_else(|e| e.into_inner()).running;
+        if testing || tester::runner_alive(&st(g).data) {
+            return Err("идёт тест стратегий — дождитесь окончания".into());
+        }
+    }
     // Взаимная блокировка: stop и start/test не пересекаются.
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "stop"}));
+    let _guard = OpGuard::new(&app, "stop");
     let result = stop_all_own(&app, g);
-    g.set_op_running(false);
-    emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "stop"}));
     result?;
     emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"всё остановлено"}));
     Ok(())
@@ -1220,8 +1250,6 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     );
     emit(app, "zgui:status", serde_json::json!({"running": true, "pid": pid, "profileId": profile.id}));
     emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Запущена стратегия «{}»", profile.name)}));
-    g.set_op_running(false);
-    emit(app, "zgui:op", serde_json::json!({"running": false, "kind": "start"}));
     Ok(runtime)
 }
 
@@ -1238,8 +1266,7 @@ fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, Str
     // Параллельная операция (обновления, DNS, сброс сети, служба): запрещаем
     // запуск, пока она не завершится — иначе старт/стоп могут пересечься.
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(app, "zgui:op", serde_json::json!({"running": true, "kind": "start"}));
+    let _guard = OpGuard::new(app, "start");
     let result = if !svc::service_state().0 {
         do_start(app, g, id)
     } else {
@@ -1273,8 +1300,6 @@ fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, Str
         }
         emit(app, "zgui:status", serde_json::json!({"running": true, "pid": null, "profileId": profile.id}));
         emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": format!("Служба переключена на «{}»", profile.name)}));
-        g.set_op_running(false);
-        emit(app, "zgui:op", serde_json::json!({"running": false, "kind": "start"}));
         Ok(Runtime {
             profile_id: profile.id,
             pid: 0,
@@ -1283,8 +1308,6 @@ fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, Str
             alive: true,
         })
     };
-    g.set_op_running(false);
-    emit(app, "zgui:op", serde_json::json!({"running": false, "kind": "start"}));
     result
 }
 
@@ -1329,6 +1352,7 @@ fn set_test(app: &AppHandle, g: &Global, p: tester::TestProgress) {
 /// стратегии. Если файл отсутствует (раннер только стартовал) — считаем живым;
 /// если есть и старый (минуты без обновлений) — «живой» PID переиспользован
 /// чужим процессом, это не наш раннер.
+#[allow(dead_code)]
 fn test_out_state(data: &std::path::Path) -> (bool, bool) {
     let p = data.join("logs/test-out.json");
     match std::fs::metadata(&p).and_then(|m| m.modified()) {
@@ -1348,6 +1372,61 @@ fn clear_test_markers(data: &std::path::Path) {
     }
 }
 
+/// ЕДИНСТВЕННАЯ точка остановки фонового раннера теста. Порядок: стоп-флаг
+/// (раннер проверяет его в каждом шаге и внутри проб — останавливается за
+/// секунды) → гашение процесса с деревом (там же его winws) → чистка маркеров.
+/// Идемпотентна и вызывается отовсюду: кнопка «Остановить», таймаут ожидания,
+/// выход из GUI, старт нового теста. `allow_uac` — разрешить элевированный
+/// kill (единственный способ убить раннер немедленно, если GUI не админ).
+fn stop_test_runner(data: &std::path::Path, allow_uac: bool) {
+    let (flag, run_pid, win_pid) = test_marker(data);
+    let _ = std::fs::write(&flag, now_ts().to_string());
+    let pid = std::fs::read_to_string(&run_pid)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    if let Some(pid) = pid {
+        if rn::pid_alive(pid) {
+            let _ = rn::hidden_command("taskkill.exe")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+            // Раннер теста запускается с элевацией: непривилегированный taskkill
+            // его не берёт, нужен админский скрипт (один UAC-запрос).
+            if rn::pid_alive(pid) && allow_uac {
+                match rn::stop_pids(&[pid], data) {
+                    Ok(()) => {}
+                    Err(e) => logger::log("warn", "test", &format!("раннер теста {pid}: {e}")),
+                }
+            }
+            if rn::pid_alive(pid) {
+                logger::log(
+                    "warn",
+                    "test",
+                    &format!("раннер теста {pid} ещё жив — остановится по стоп-флагу"),
+                );
+            } else {
+                logger::log("info", "test", &format!("раннер теста остановлен (pid {pid})"));
+            }
+            // Даём процессу исчезнуть, чтобы маркеры не «ожили» следом.
+            for _ in 0..30 {
+                if !rn::pid_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&win_pid);
+    let _ = std::fs::remove_file(&run_pid);
+    // Флаг не оставляем: иначе следующий прогон остановится на первом же шаге.
+    let _ = std::fs::remove_file(&flag);
+}
+
+/// Есть ли признаки (живого или мёртвого) раннера — маркеры/флаг.
+fn test_markers_present(data: &std::path::Path) -> bool {
+    let (flag, run_pid, win_pid) = test_marker(data);
+    flag.exists() || run_pid.exists() || win_pid.exists()
+}
+
 #[tauri::command(async)]
 fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
     let g = ga.inner();
@@ -1355,33 +1434,13 @@ fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
     if cur.running {
         return cur.clone();
     }
-    // Раннер прошлой сессии живёт в фоне (GUI закрывали) — гасим его, не подхватываем.
+    // Фоновый раннер прошлой сессии (GUI закрывали, он elevated и живёт вне GUI):
+    // не подхватываем и НЕ показываем «тест идёт» — гасим единой процедурой
+    // (непривилегированный taskkill его не убивает, а маркеры нельзя стирать,
+    // пока процесс жив: иначе раннер становится невидимым и блокирует движок).
     let data = st(g).data.clone();
-    let (flag, run_pid, _win_pid) = test_marker(&data);
-    let alive = std::fs::read_to_string(&run_pid)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .map(rn::pid_alive)
-        .unwrap_or(false);
-    let (out_exists, out_fresh) = test_out_state(&data);
-    let live_runner = alive && !flag.exists() && (out_fresh || !out_exists);
-    if live_runner {
-        // Фоновый ранер прошлой сессии (GUI закрывали — он elevated и живёт вне
-        // GUI). Не подхватываем и НЕ показываем «тест идёт»: гасим его.
-        let _ = std::fs::write(&flag, now_ts().to_string());
-        if let Ok(txt) = std::fs::read_to_string(&run_pid) {
-            if let Ok(pid) = txt.trim().parse::<u32>() {
-                let _ = rn::hidden_command("taskkill.exe")
-                    .args(["/F", "/T", "/PID", &pid.to_string()])
-                    .output();
-            }
-        }
-        logger::log("info", "test", "фоновый ранер прошлой сессии остановлен");
-        clear_test_markers(&data);
-    } else if alive && !flag.exists() {
-        // PID жив, но прогресс устарел → фантом (PID переиспользован). Чистим,
-        // иначе «тест уже выполняется» блокирует новые прогоны.
-        clear_test_markers(&data);
+    if test_markers_present(&data) {
+        stop_test_runner(&data, false);
     }
     cur.clone()
 }
@@ -1432,8 +1491,7 @@ fn test_strategies(
     // Взаимная блокировка: тест исключает запуск/остановку профилей и другие
     // долгие операции — иначе winws теста был бы убит или запущен рядом.
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "test"}));
+    let op_guard = OpGuard::new(&app, "test");
     let (profiles, data, roots_ok) = {
         let s = st(g);
         let all = s.profiles.clone();
@@ -1467,6 +1525,13 @@ fn test_strategies(
         return Err("нет стратегий для теста".into());
     }
     // VPN мешает тесту — просим выгрузить (фронт показывает окно и вызывает kill_conflicts).
+    // Чистота перед стартом: остатки прошлого прогона (осиротевший elevated-
+    // раннер, его движок) гасим ДО начала — иначе новый тест упрётся в защиту
+    // «winws всё ещё запущен», а два раннера подерутся за движок. Здесь UAC
+    // допустим: пользователь сам только что инициировал тест.
+    if test_markers_present(&data) {
+        stop_test_runner(&data, true);
+    }
     let vpn = svc::detect_vpn();
     if !vpn.is_empty() {
         return Err(format!("VPN_RUNNING:{}", vpn.len()));
@@ -1594,8 +1659,6 @@ fn test_strategies(
                 done: true,
             },
         );
-        g.set_op_running(false);
-        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "test"}));
         return Ok(true);
     }
 
@@ -1662,6 +1725,7 @@ fn test_strategies(
 
     let app2 = app.clone();
     std::thread::spawn(move || {
+        let _op_guard = op_guard;
         let ga2 = app2.state::<Global>();
         let g2 = ga2.inner();
 
@@ -1695,17 +1759,26 @@ fn test_strategies(
         let mut results: Vec<tester::StrategyResult> = reused.clone();
         let mut parsed_count = 0usize;
         let started = std::time::Instant::now();
-        // Таймаут — по НЕАКТИВНОСТИ, а не от старта: разовая неудачная чита
-        // `test-out.json` (файл пишется после каждой стратегии, 2+ МБ) раньше
-        // объявляла завершённый тест, хотя раннер продолжал работать —
-        // остальные стратегии оставались «не тестировалась».
+        // Две фазы ожидания. Фаза 1 — появление PID раннера (UAC + старт
+        // PowerShell + чтение плана): до 60 с, это не ошибка. Фаза 2 — прогресс;
+        // лимит по НЕАКТИВНОСТИ и от размера плана: шаг с 20+ доменами, повтором
+        // и DNS/проб-таймаутами занимает до ~2-3 минут, поэтому фиксированные
+        // 120 с ложно объявляли «раннер не стартовал» (тест шёл, движок жил,
+        // а результаты терялись).
+        let batches = (custom.len() / 8 + 1) as u64;
+        let idle_limit = Duration::from_secs(std::cmp::max(300, batches * 40 + 60));
         let mut last_progress = started;
+        let mut pid_seen_at: Option<std::time::Instant> = None;
+        let mut timed_out = false;
         loop {
             if test_marker(&data).0.exists() {
                 break;
             }
             if let Some(v) = tester::read_test_progress(&out_path) {
                 last_progress = std::time::Instant::now();
+                if pid_seen_at.is_none() {
+                    pid_seen_at = Some(last_progress);
+                }
                 // Фаза базовой пробы геоблок-теста (без Zapret): показываем прогресс,
                 // иначе UI выглядит «замершим» до первого winws.
                 if let Some(b) = v.get("baseline") {
@@ -1765,16 +1838,21 @@ fn test_strategies(
                     break;
                 }
             } else {
-                // Вотчдог запуска: если PID раннера так и не появился — не висим 120 с,
-                // а выходим с понятной ошибкой. PID есть, но нет вывода — ждём, пока
-                // не пройдёт 120 с БЕЗ успешных чтений (см. `last_progress`).
-                let pid_seen = data.join("logs/test-runner.pid").exists();
-                let (base, limit) = if pid_seen {
-                    (last_progress, Duration::from_secs(120))
-                } else {
-                    (started, Duration::from_secs(20))
+                // Фаза 1: PID ещё не появился (UAC/старт PowerShell) — ждём 60 с.
+                // Фаза 2: PID есть, прогресса нет — ждём idle_limit без успешных чтений.
+                if pid_seen_at.is_none() && data.join("logs/test-runner.pid").exists() {
+                    pid_seen_at = Some(std::time::Instant::now());
+                    last_progress = std::time::Instant::now();
+                }
+                let (base, limit) = match pid_seen_at {
+                    Some(t) => {
+                        let base = if last_progress > t { last_progress } else { t };
+                        (base, idle_limit)
+                    }
+                    None => (started, Duration::from_secs(60)),
                 };
                 if base.elapsed() > limit {
+                    timed_out = true;
                     break;
                 }
             }
@@ -1782,6 +1860,16 @@ fn test_strategies(
         }
         let stopped = test_marker(&data).0.exists();
         let _ = std::fs::remove_file(&out_path);
+        // Раннер жив (таймаут/отмена/фантом) — гасим его вместе с движком:
+        // осиротевший раннер живёт elevated и дальше блокирует тесты («winws всё
+        // ещё запущен»), а маркеры без процесса не дают его найти. UAC здесь не
+        // поднимаем: стоп-флаг останавливает раннер за секунды (проверки в
+        // шагах и внутри проб), а гнать запрос прав в конце теста — плохой UX.
+        if tester::runner_alive(&data) {
+            stop_test_runner(&data, false);
+        } else {
+            clear_test_markers(&data);
+        }
 
         // Если раннер не оставил результатов — вероятнее всего UAC отклонён.
         // Переиспользованные (из кэша) оставляем, добавляем только «не стартовала».
@@ -1797,10 +1885,15 @@ fn test_strategies(
                     score: 0,
                     max_score: custom.len() as u32,
                     domains: Vec::new(),
-                    error: Some(if elevated {
-                        "тест не запустился — раннер не стартовал (см. logs/test-runner.ps1 и run-*.err.txt)".into()
-                    } else {
+                    error: Some(if !elevated {
                         "тест не запустился — подтверждение прав администратора отклонено или раннер не стартовал".into()
+                    } else if timed_out {
+                        format!(
+                            "тест прерван: раннер не отвечал {} с — повторите запуск (движок или драйвер могли зависнуть)",
+                            idle_limit.as_secs()
+                        )
+                    } else {
+                        "тест не запустился — раннер не стартовал (см. logs/test-runner.ps1 и run-*.err.txt)".into()
                     }),
                     groups: Vec::new(),
                     critical_ok: false,
@@ -1914,11 +2007,9 @@ fn test_strategies(
                 "zgui:toast",
                 serde_json::json!({"kind":"info","text": msg}),
             );
-            app2.state::<Global>().set_op_running(false);
-            emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "test"}));
+            // Гард операции снимет «идёт операция» сам (любой выход из потока).
             return;
-        }
-        if !geoblock && !extra {
+        }        if !geoblock && !extra {
             // Результаты ДОБАВляем к прежним: прогон одного движка не должен
             // стирать то, что уже намерено по другим (вкладка «Все» иначе
             // показывает только последний запуск).
@@ -1971,8 +2062,6 @@ fn test_strategies(
             "zgui:toast",
             serde_json::json!({"kind":"ok","text": msg}),
         );
-        app2.state::<Global>().set_op_running(false);
-        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "test"}));
     });
     Ok(true)
 }
@@ -2203,30 +2292,17 @@ fn watchdog_status(ga: State<'_, Global>) -> watchdog::WatchdogStatus {
 #[tauri::command(async)]
 fn cancel_test(ga: State<'_, Global>) -> Result<(), String> {
     let data = st(ga.inner()).data.clone();
-    let (flag, run_pid, win_pid) = test_marker(&data);
-    let read_pid = |p: &PathBuf| -> Vec<u32> {
-        std::fs::read_to_string(p)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .into_iter()
-            .collect()
-    };
-    // Сначала маркер — поллер/раннер корректно завершат рабочий цикл сами.
-    std::fs::write(&flag, now_ts().to_string()).map_err(|e| e.to_string())?;
-    let mut pids = read_pid(&run_pid);
-    pids.extend(read_pid(&win_pid));
-    pids.dedup();
-    if !pids.is_empty() {
-        rn::stop_pids(&pids, &data)?;
-    }
+    // Единая процедура: стоп-флаг + гашение раннера/движка + чистка маркеров.
+    // UAC не поднимаем (стоп-флаг останавливает раннер за секунды: проверки в
+    // шагах и внутри проб), но если GUI уже админ — kill сработает сразу.
+    stop_test_runner(&data, false);
     // Фантомный статус: если поллер уже не крутится, cur.running иначе залипнет
-    // навсегда и заблокирует новые прогоны. Гасим состояние и чистим маркеры.
+    // навсегда и заблокирует новые прогоны.
     // (Берём ТОЛЬКО testing-лок — порядок testing→state фиксирован, иначе дедлок.)
     {
         let mut cur = ga.inner().testing.lock().unwrap_or_else(|e| e.into_inner());
         *cur = tester::TestProgress::default();
     }
-    clear_test_markers(&data);
     Ok(())
 }
 
@@ -2243,8 +2319,7 @@ async fn apply_best_strategy(app: AppHandle, id: String) -> Result<(), String> {
             return Err("профиль не найден".into());
         }
         let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-        g.set_op_running(true);
-        emit(&app2, "zgui:op", serde_json::json!({"running": true, "kind": "apply"}));
+        let guard = OpGuard::new(&app2, "apply");
         let data = st(g).data.clone();
         {
             let mut s = st(g);
@@ -2260,8 +2335,7 @@ async fn apply_best_strategy(app: AppHandle, id: String) -> Result<(), String> {
         // не-реентерабельный try_lock внутри того же лока всегда падал
         // «идёт другая операция» на самом себе.
         drop(_op);
-        g.set_op_running(false);
-        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "apply"}));
+        drop(guard);
         let r = start_or_switch(&app2, g, &id);
         r?;
         emit(
@@ -2353,14 +2427,13 @@ fn vpn_check() -> svc::ConflictReport {
 /// и восстанавливает интернет. Wi-Fi-пароли и настройки провайдера не трогаются.
 /// Требует перезагрузку (winsock/int ip reset).
 #[tauri::command(async)]
-fn net_reset(ga: State<'_, Global>) -> Result<netreset::NetResetResult, String> {
+fn net_reset(app: AppHandle, ga: State<'_, Global>) -> Result<netreset::NetResetResult, String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
+    let _guard = OpGuard::new(&app, "netreset");
     let data = st(g).data.clone();
     logger::log("warn", "netreset", "запущено восстановление сети");
     let r = netreset::reset(&data);
-    g.set_op_running(false);
     match r {
         Ok(r) => {
             logger::log("ok", "netreset", "восстановление сети завершено");
@@ -2400,20 +2473,18 @@ fn reboot_now() -> Result<(), String> {
 fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "kill"}));
+    let op_guard = OpGuard::new(&app, "kill");
     let (data, our_pid) = {
         let s = st(g);
         (s.data.clone(), s.runtime.as_ref().map(|r| r.pid))
     };
     let report = svc::detect_conflicts(&data, our_pid);
     if !report.has_conflicts() {
-        g.set_op_running(false);
-        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "kill"}));
         return Ok(false);
     }
     let app2 = app.clone();
     std::thread::spawn(move || {
+        let _op_guard = op_guard;
         let r = svc::kill_conflicts(&report, our_pid, &data);
         // Итог считаем по факту: что было до и что осталось после (одно
         // уведомление в конце со списком выгруженных, а не по каждому процессу).
@@ -2459,8 +2530,6 @@ fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String>
             );
         }
         emit(&app2, "zgui:conflict", serde_json::json!({}));
-        app2.state::<Global>().set_op_running(false);
-        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "kill"}));
     });
     Ok(true)
 }
@@ -2471,8 +2540,7 @@ fn kill_conflicts(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String>
 fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<(), String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "service"}));
+    let _guard = OpGuard::new(&app, "service");
     let (profile, root, args, data) = {
         let s = st(g);
         let p = s.profile(&id).cloned().ok_or("профиль не найден")?;
@@ -2486,8 +2554,6 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
             human::with_context("не удалось установить службу", &e)
         });
     if let Err(e) = r {
-        g.set_op_running(false);
-        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
         return Err(e);
     }
     logger::log("ok", "service", &format!("служба zapret установлена со стратегией «{}»", profile.name));
@@ -2502,8 +2568,6 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
     // Служба — единственный механизм автозапуска: снимаем задачу планировщика,
     // если она была (раньше это был тупик с ошибкой «сначала отключите автозапуск»).
     sync_autostart(g);
-    g.set_op_running(false);
-    emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
     emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text":"служба zapret установлена и запущена"}));
     Ok(())
 }
@@ -2512,16 +2576,13 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
 fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "service"}));
+    let _guard = OpGuard::new(&app, "service");
     let data = st(g).data.clone();
     let r = svc::remove_service(&data).map_err(|e| {
         logger::log("err", "service", &format!("удаление службы не удалось: {e}"));
         human::with_context("не удалось удалить службу", &e)
     });
     if let Err(e) = r {
-        g.set_op_running(false);
-        emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
         return Err(e);
     }
     logger::log("info", "service", "служба zapret удалена");
@@ -2541,8 +2602,6 @@ fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
     if fallback {
         sync_autostart(g);
     }
-    g.set_op_running(false);
-    emit(&app, "zgui:op", serde_json::json!({"running": false, "kind": "service"}));
     emit(&app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
     emit(
         &app,
@@ -2622,14 +2681,14 @@ fn engine_check_update(ga: State<'_, Global>) -> EngineUpdateInfo {
 async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "updates"}));
+    let op_guard = OpGuard::new(&app, "updates");
     let (data, roots, settings) = {
         let s = st(g);
         (s.data.clone(), s.roots.clone(), s.settings.clone())
     };
     let app2 = app.clone();
     std::thread::spawn(move || {
+        let _op_guard = op_guard;
         match up::check_all(&data, &roots, &settings) {
             Ok(entries) => {
                 let changed = entries
@@ -2666,8 +2725,6 @@ async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, St
                 emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context("не удалось проверить обновления", &e)}));
             }
         }
-        app2.state::<Global>().set_op_running(false);
-        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "updates"}));
     });
     Ok(true)
 }
@@ -2708,14 +2765,14 @@ fn reload_bats_from_disk(s: &mut AppState) {
 async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) -> Result<bool, String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
-    emit(&app, "zgui:op", serde_json::json!({"running": true, "kind": "updates"}));
+    let op_guard = OpGuard::new(&app, "updates");
     let (data, roots, settings) = {
         let s = st(g);
         (s.data.clone(), s.roots.clone(), s.settings.clone())
     };
     let app2 = app.clone();
     std::thread::spawn(move || {
+        let _op_guard = op_guard;
         let wants_presets = ids.is_empty() || ids.iter().any(|i| i == up::PRESETS_ENTRY_ID);
         // OTA-набор пресетов качаем ЗАРАНЕЕ, вне блокировки state (сеть до 45 с).
         let (preset_set, preset_err) = if wants_presets {
@@ -2819,8 +2876,6 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
             // сообщал бы только «обновлено: N» и ошибка терялась для пользователя.
             emit(&app2, "zgui:toast", serde_json::json!({"kind":"warn","text": format!("обновлено записей: {ok_count}, ошибки: {}", failed.join("; "))}));
         }
-        app2.state::<Global>().set_op_running(false);
-        emit(&app2, "zgui:op", serde_json::json!({"running": false, "kind": "updates"}));
     });
     Ok(true)
 }
@@ -3236,13 +3291,12 @@ fn dns_providers() -> Vec<dns::DnsProvider> {
 }
 
 #[tauri::command(async)]
-fn apply_dns(ga: State<'_, Global>, provider: String, adapter: Option<String>) -> Result<String, String> {
+fn apply_dns(app: AppHandle, ga: State<'_, Global>, provider: String, adapter: Option<String>) -> Result<String, String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
+    let _guard = OpGuard::new(&app, "dns");
     let data = st(g).data.clone();
     let r = dns::apply(&data, &provider, adapter.as_deref());
-    g.set_op_running(false);
     match r {
         Ok(msg) => {
             logger::log("ok", "dns", &format!("применён DNS {provider}: {msg}"));
@@ -3256,13 +3310,12 @@ fn apply_dns(ga: State<'_, Global>, provider: String, adapter: Option<String>) -
 }
 
 #[tauri::command(async)]
-fn reset_dns(ga: State<'_, Global>, adapter: Option<String>) -> Result<String, String> {
+fn reset_dns(app: AppHandle, ga: State<'_, Global>, adapter: Option<String>) -> Result<String, String> {
     let g = ga.inner();
     let _op = ops_try().ok_or("идёт другая операция — дождитесь завершения")?;
-    g.set_op_running(true);
+    let _guard = OpGuard::new(&app, "dns");
     let data = st(g).data.clone();
     let r = dns::reset(&data, adapter.as_deref());
-    g.set_op_running(false);
     match r {
         Ok(msg) => {
             logger::log("info", "dns", "DNS возвращён на автоматический");
@@ -3380,7 +3433,7 @@ fn spawn_watchers(app: AppHandle) {
                     s2.updater.next_auto = Some(now + retry_secs);
                     s2.save();
                     drop(s2);
-                    std::thread::spawn(move || {
+                        std::thread::spawn(move || {
                         let r = up::check_all(&data, &roots, &settings);
                         let ga3 = app2.state::<Global>();
                         let mut s3 = ga3.state.lock().unwrap();
@@ -3758,21 +3811,11 @@ pub fn run() {
         .run(|app, event| {
             // При выходе гасим фоновый тестовый раннер: он elevated и сам по
             // закрытию GUI не умирает, а при следующем старте подхватывался как
-            // «тест запустился сам». Пишем стоп-флаг (раннер сам завершит цикл);
-            // PID убиваем без эскалации — если не хватит прав, сработает флаг.
+            // «тест запустился сам». Единая процедура: стоп-флаг (раннер завершит
+            // цикл сам) + попытка kill без эскалации (UAC на выходе не поднимаем).
             if matches!(event, tauri::RunEvent::Exit) {
                 let data = app.state::<Global>().state.lock().unwrap_or_else(|e| e.into_inner()).data.clone();
-                let (flag, run_pid, win_pid) = test_marker(&data);
-                let _ = std::fs::write(&flag, now_ts().to_string());
-                for p in [&run_pid, &win_pid] {
-                    if let Ok(txt) = std::fs::read_to_string(p) {
-                        if let Ok(pid) = txt.trim().parse::<u32>() {
-                            let _ = rn::hidden_command("taskkill.exe")
-                                .args(["/F", "/T", "/PID", &pid.to_string()])
-                                .output();
-                        }
-                    }
-                }
+                stop_test_runner(&data, false);
             }
         });
 }

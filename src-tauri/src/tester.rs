@@ -480,6 +480,8 @@ if ($plan.baseline) {{
       $baseOut += [ordered]@{{ host = $c.host; ok = [bool]$r.ok }}
       $bi++
     }}
+    # Cancel/exit: do not wait for the whole list, leave now.
+    if (Test-Path -LiteralPath $plan.flag) {{ exit 0 }}
     $state = [ordered]@{{ baseline = [ordered]@{{ done = $bi; total = $plan.domains.Count }}; results = @() }}
     ($state | ConvertTo-Json -Depth 4) | Out-File -LiteralPath "$out.tmp" -Encoding utf8
     Move-Item -LiteralPath "$out.tmp" -Destination $out -Force
@@ -528,6 +530,13 @@ function Measure-Step($step) {{
           $r = Finish-Probe $c.task
           $ms = [int]([DateTime]::UtcNow - $c.started).TotalMilliseconds
           $doms += [ordered]@{{ key = $c.key; host = $c.host; group = $c.group; groupLabel = $c.groupLabel; ok = [bool]$r.ok; ms = $ms; detail = $r.detail }}
+        }}
+        # Stop flag: the user pressed "stop" (or the GUI is closing) - kill the
+        # engine right away and leave the batch loop; the step loop writes STOPPED
+        # itself, so the GUI never waits minutes for the current step.
+        if (Test-Path -LiteralPath $plan.flag) {{
+          if ($p -and -not $p.HasExited) {{ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }}
+          break
         }}
       }}
       $client.Dispose()
