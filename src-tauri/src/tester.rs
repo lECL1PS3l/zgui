@@ -172,16 +172,27 @@ fn usable_test_host(host: &str) -> bool {
 
 /// Готовит список доменов из geoblock-списка (RAW .lst: по строке на домен).
 /// Разбор одной строки .lst в домен (отбрасывает комментарии, пути и мусор).
+/// Понимает и «человеческий» формат: `https://www.example.com/путь` → `www.example.com`
+/// (иначе строка резалась по первому `/` и превращалась в `https:` — домен терялся).
 fn parse_rule_line(raw: &str, seen: &mut std::collections::HashSet<String>) -> Option<(String, String)> {
     let line = raw.trim();
     if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
         return None;
     }
-    let host = line
-        .split(['/', ' ', '\t'])
+    let without_scheme = line
+        .strip_prefix("https://")
+        .or_else(|| line.strip_prefix("http://"))
+        .or_else(|| line.strip_prefix("//"))
+        .unwrap_or(line);
+    let host = without_scheme
+        .split(['/', ' ', '\t', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split(':') // порт (example.com:443)
         .next()
         .unwrap_or("")
         .trim()
+        .trim_end_matches('.')
         .to_lowercase();
     if !usable_test_host(&host) {
         return None;
@@ -991,6 +1002,30 @@ mod tests {
         assert!(!d.iter().any(|(_, h)| h.starts_with(".")));
         assert!(!d.iter().any(|(_, h)| h.contains('*')));
         assert!(!d.iter().any(|(_, h)| h == "123.45.67.89"), "IP в списке хостов недопустим");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn extra_domains_accept_urls_and_trailing_junk() {
+        // Реальный файл пользователя: полные URL со схемой, пути, хвостовые пробелы.
+        let tmp = std::env::temp_dir().join(format!("zgui-urls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("catalog");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("test-domains-extra.lst"),
+            "http://chess.com/\nhttps://www.deviantart.com/\nhttps://www.instagram.com/\nhttp://notepad-plus-plus.org/\nhttps://weather.com/\nhttp://x.com/ \nhttps://rutracker.org/\nhttps://soundcloud.com/\nhttp://linkedin.com/\nhttps://www.facebook.com/\nexample.com:8443/path\nhttps://trailing.dot./\n",
+        )
+        .unwrap();
+        let d = load_extra_domains(&tmp, 100);
+        let hosts: Vec<&str> = d.iter().map(|(_, h)| h.as_str()).collect();
+        assert_eq!(hosts.len(), 12, "все строки должны распознаться: {hosts:?}");
+        assert!(hosts.contains(&"chess.com"));
+        assert!(hosts.contains(&"www.deviantart.com"));
+        assert!(hosts.contains(&"x.com"), "хвостовой пробел не мешает: {hosts:?}");
+        assert!(hosts.contains(&"example.com"), "порт отрезается: {hosts:?}");
+        assert!(hosts.contains(&"trailing.dot"), "точка в конце отрезается: {hosts:?}");
+        assert!(!hosts.iter().any(|h| h.contains(':') || h.contains('/') || h.ends_with('.')));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
