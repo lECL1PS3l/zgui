@@ -322,6 +322,8 @@ body.fx-paused .topo { animation-play-state: paused; }
 .card-head h3 { font-size: 15px; font-weight: 600; }
 
 .banner { padding: 12px 16px; border-radius: 12px; margin-bottom: 18px; font-size: 13px; }
+/* Баннер «нужны права администратора»: текст + кнопки в строку. */
+#adminBanner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .banner.alert {
   /* Фон как у обычных карточек, но обводка жёлтая (просьба владельца). */
   background: linear-gradient(var(--card-veil), var(--card-veil)), var(--panel);
@@ -726,6 +728,10 @@ select option:hover {
   border: 1px solid var(--line); background: var(--bg2); display: block;
 }
 .tg-tip-figure figcaption { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+/* Крупные заметные галочки в «Настройках прокси» (порт убран, блок под них). */
+.tg-opt { font-size: 14px; gap: 10px; margin: 6px 0; align-items: flex-start; }
+.tg-opt input[type="checkbox"] { width: 18px; height: 18px; margin-top: 1px; flex: 0 0 auto; }
+.banner-body { flex: 1; min-width: 200px; }
 .test-row {
   padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--bg2);

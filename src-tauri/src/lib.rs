@@ -1249,6 +1249,29 @@ fn set_test(app: &AppHandle, g: &Global, p: tester::TestProgress) {
     emit(app, "zgui:test", p);
 }
 
+/// Свежесть прогресса теста: раннер пишет `logs/test-out.json` после каждой
+/// стратегии. Если файл отсутствует (раннер только стартовал) — считаем живым;
+/// если есть и старый (минуты без обновлений) — «живой» PID переиспользован
+/// чужим процессом, это не наш раннер.
+fn test_out_state(data: &std::path::Path) -> (bool, bool) {
+    let p = data.join("logs/test-out.json");
+    match std::fs::metadata(&p).and_then(|m| m.modified()) {
+        Ok(t) => {
+            let fresh = t.elapsed().map(|e| e.as_secs() < 180).unwrap_or(false);
+            (true, fresh)
+        }
+        Err(_) => (false, false),
+    }
+}
+
+/// Убирает файлы-маркеры теста (после отмены или «фантомного» раннера).
+fn clear_test_markers(data: &std::path::Path) {
+    let (flag, run_pid, win_pid) = test_marker(data);
+    for f in [flag, run_pid, win_pid] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
 #[tauri::command(async)]
 fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
     let g = ga.inner();
@@ -1264,7 +1287,9 @@ fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .map(rn::pid_alive)
         .unwrap_or(false);
-    if alive && !flag.exists() {
+    let (out_exists, out_fresh) = test_out_state(&data);
+    let live_runner = alive && !flag.exists() && (out_fresh || !out_exists);
+    if live_runner {
         *cur = tester::TestProgress {
             running: true,
             phase: "resume".into(),
@@ -1279,6 +1304,10 @@ fn test_status(ga: State<'_, Global>) -> tester::TestProgress {
             best_name: None,
             done: false,
         };
+    } else if alive && !flag.exists() {
+        // PID жив, но прогресс устарел → фантом (PID переиспользован). Чистим,
+        // иначе «тест уже выполняется» блокирует новые прогоны.
+        clear_test_markers(&data);
     }
     cur.clone()
 }
@@ -1298,9 +1327,18 @@ fn test_strategies(
     let geoblock = mode.as_deref() == Some("geoblock");
     let g = ga.inner();
     {
-        let cur = g.testing.lock().unwrap_or_else(|e| e.into_inner());
+        let data = st(g).data.clone();
+        let mut cur = g.testing.lock().unwrap_or_else(|e| e.into_inner());
         if cur.running {
-            return Err("тест уже выполняется".into());
+            // Живой ли это раннер на самом деле? Если нет — это фантом
+            // (PID переиспользован чужим процессом): сбрасываем, чтобы не
+            // блокировать новые прогоны «тест уже выполняется».
+            if !tester::runner_alive(&data) {
+                clear_test_markers(&data);
+                *cur = tester::TestProgress::default();
+            } else {
+                return Err("тест уже выполняется".into());
+            }
         }
     }
     // Взаимная блокировка: тест исключает запуск/остановку профилей и другие
@@ -1919,6 +1957,14 @@ fn cancel_test(ga: State<'_, Global>) -> Result<(), String> {
     if !pids.is_empty() {
         rn::stop_pids(&pids, &data)?;
     }
+    // Фантомный статус: если поллер уже не крутится, cur.running иначе залипнет
+    // навсегда и заблокирует новые прогоны. Гасим состояние и чистим маркеры.
+    // (Берём ТОЛЬКО testing-лок — порядок testing→state фиксирован, иначе дедлок.)
+    {
+        let mut cur = ga.inner().testing.lock().unwrap_or_else(|e| e.into_inner());
+        *cur = tester::TestProgress::default();
+    }
+    clear_test_markers(&data);
     Ok(())
 }
 

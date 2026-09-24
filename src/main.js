@@ -301,11 +301,11 @@ function onBootstrap() {
   applyTheme(currentTheme());
   renderRunBar();
   ensureEngineCards();
-  ensureEngineCards();
   renderProfileTabs();
   renderTestTabs();
   renderEngines();
   renderWarnings();
+  renderAdminBanner();
   renderProfiles();
   renderTestCard();
   renderAutotune();
@@ -537,6 +537,17 @@ async function askRestartAdmin() {
   } catch (e) {
     toast("err", String(e));
   }
+}
+
+// ---- баннер «нужны права администратора» (не модалка: не мешает, но всегда доступен) ----
+let adminBannerDismissed = false;
+
+function renderAdminBanner() {
+  const el = $("#adminBanner");
+  if (!el) return;
+  // Показываем, только если запущено без прав и «всегда от админа» не включено.
+  const show = !!(B && !B.elevated && B.settings && !B.settings.always_admin);
+  el.classList.toggle("hidden", !show || adminBannerDismissed);
 }
 
 function renderWarnings() {
@@ -1876,7 +1887,7 @@ async function tgSavePrefs() {
         ...cfg,
         tg_autostart: $("#tgAutostart")?.checked || false,
         tg_offer: $("#tgOffer") ? $("#tgOffer").checked : true,
-        tg_port: Number($("#tgPort")?.value) || 1443,
+        tg_port: $("#tgPort") ? Number($("#tgPort").value) || 1443 : (B && B.settings ? B.settings.tg_port : 1443) || 1443,
       },
     });
   } catch (_) {}
@@ -2259,6 +2270,12 @@ function bindStatic() {
   });
 
   $("#btnElevateNow").addEventListener("click", askRestartAdmin);
+  if ($("#btnAdminRelaunch")) $("#btnAdminRelaunch").addEventListener("click", askRestartAdmin);
+  if ($("#btnAdminDismiss"))
+    $("#btnAdminDismiss").addEventListener("click", () => {
+      adminBannerDismissed = true;
+      renderAdminBanner();
+    });
 
   // Первый запуск: предложение «Всегда запускать от администратора».
   // Таймер обратного отсчёта убран: кнопка доступна сразу (не заставляем ждать).

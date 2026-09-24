@@ -65,6 +65,15 @@
         <section class="page active" id="view-strategies">
           <div id="warnBanner" class="banner alert hidden"></div>
 
+          <div id="adminBanner" class="banner alert hidden">
+            <div class="banner-body">
+              Программа запущена без прав администратора — запуск обхода, тесты и выгрузка конфликтов
+              будут каждый раз запрашивать подтверждение Windows.
+            </div>
+            <button class="btn primary small" id="btnAdminRelaunch">Перезапустить от админа</button>
+            <button class="btn ghost small" id="btnAdminDismiss">Скрыть</button>
+          </div>
+
           <div class="card" id="autostartCard">
             <div class="card-head">
               <h3>Автозапуск</h3>
@@ -227,14 +236,11 @@
 
           <div class="card">
             <div class="card-head"><h3>Настройки прокси</h3></div>
-            <div class="form-grid">
-              <label>Порт<input type="number" id="tgPort" value="1443" min="1" max="65535" /></label>
-            </div>
-            <label class="inline-check">
+            <label class="inline-check tg-opt">
               <input type="checkbox" id="tgOffer" checked />
               предлагать автоматически, когда запущен Telegram (если не найден VPN/туннель/прокси)
             </label>
-            <label class="inline-check">
+            <label class="inline-check tg-opt">
               <input type="checkbox" id="tgAutostart" />
               включать прокси при запуске программы
             </label>
