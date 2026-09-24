@@ -28,22 +28,23 @@ pub fn candidates(engine: &str) -> Vec<Candidate> {
     // 2) Сгенерированные варианты (короткие, документированные аргументы).
     match engine {
         "goodbyedpi" => {
+            // База — modern -5 (в v0.2.2 нет -7/-8/-9). Варьируем TTL и fooling.
             for ttl in [4u32, 5, 6, 7, 8] {
                 out.push(Candidate {
                     id: format!("gd-ttl{ttl}"),
-                    name: format!("GoodbyeDPI · -9 + TTL {ttl}"),
-                    args: vec!["-9".into(), "--set-ttl".into(), ttl.to_string()],
+                    name: format!("GoodbyeDPI · -5 + TTL {ttl}"),
+                    args: vec!["-5".into(), "--set-ttl".into(), ttl.to_string()],
                 });
             }
             out.push(Candidate {
                 id: "gd-chksum".into(),
-                name: "GoodbyeDPI · -9 + wrong-chksum".into(),
-                args: vec!["-9".into(), "--wrong-chksum".into()],
+                name: "GoodbyeDPI · -5 + wrong-chksum".into(),
+                args: vec!["-5".into(), "--wrong-chksum".into()],
             });
             out.push(Candidate {
                 id: "gd-seq".into(),
-                name: "GoodbyeDPI · -9 + wrong-seq".into(),
-                args: vec!["-9".into(), "--wrong-seq".into()],
+                name: "GoodbyeDPI · -5 + wrong-seq".into(),
+                args: vec!["-5".into(), "--wrong-seq".into()],
             });
         }
         "dpibreak" => {

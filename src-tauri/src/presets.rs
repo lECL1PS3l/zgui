@@ -151,43 +151,31 @@ pub fn builtin_presets() -> Vec<PresetDef> {
                 "--lua-desync=fake:blob=fake_default_quic:repeats=11",
             ],
         },
-        // GoodbyeDPI: -5..-9 (современные режимы), -9 — дефолт автора.
+        // GoodbyeDPI v0.2.2: режимы только -1..-6 (легаси -1..-4, современные -5,-6).
+        // Режимов -7/-8/-9 в этой версии НЕТ (exe вернул «unknown option»).
         PresetDef {
-            id: "goodbyedpi-9",
+            id: "goodbyedpi-5",
             engine: "goodbyedpi",
-            name: "GoodbyeDPI · 9 (максимальный)",
-            args: &["-9"],
-        },
-        PresetDef {
-            id: "goodbyedpi-8",
-            engine: "goodbyedpi",
-            name: "GoodbyeDPI · 8",
-            args: &["-8"],
-        },
-        PresetDef {
-            id: "goodbyedpi-7",
-            engine: "goodbyedpi",
-            name: "GoodbyeDPI · 7",
-            args: &["-7"],
+            name: "GoodbyeDPI · 5 (modern, дефолт)",
+            args: &["-5"],
         },
         PresetDef {
             id: "goodbyedpi-6",
             engine: "goodbyedpi",
-            name: "GoodbyeDPI · 6",
+            name: "GoodbyeDPI · 6 (modern)",
             args: &["-6"],
         },
         PresetDef {
-            id: "goodbyedpi-5",
+            id: "goodbyedpi-4",
             engine: "goodbyedpi",
-            name: "GoodbyeDPI · 5",
-            args: &["-5"],
+            name: "GoodbyeDPI · 4 (legacy)",
+            args: &["-4"],
         },
-        // «RU + DNS»: подмена DNS на Яндекс-резолвер в TLS-обёртке (dnsredir).
         PresetDef {
-            id: "goodbyedpi-ru-dns",
+            id: "goodbyedpi-3",
             engine: "goodbyedpi",
-            name: "GoodbyeDPI · RU + DNS",
-            args: &["-9", "--dns-addr", "77.88.8.8", "--dns-port", "1253"],
+            name: "GoodbyeDPI · 3 (legacy)",
+            args: &["-3"],
         },
         PresetDef {
             id: "goodbyedpi-1",
@@ -195,11 +183,12 @@ pub fn builtin_presets() -> Vec<PresetDef> {
             name: "GoodbyeDPI · 1 (legacy)",
             args: &["-1"],
         },
+        // «RU + DNS»: подмена DNS на Яндекс-резолвер (dnsredir). База — modern -5.
         PresetDef {
-            id: "goodbyedpi-3",
+            id: "goodbyedpi-ru-dns",
             engine: "goodbyedpi",
-            name: "GoodbyeDPI · 3 (legacy)",
-            args: &["-3"],
+            name: "GoodbyeDPI · RU + DNS",
+            args: &["-5", "--dns-addr", "77.88.8.8", "--dns-port", "1253"],
         },
         PresetDef {
             id: "dpibreak-default",
