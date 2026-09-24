@@ -762,7 +762,7 @@ let testEngineFilter = null;
 
 /// Общий конструктор сегментных табов по движкам (как в «Стратегиях»).
 /// `current` — активный фильтр ("all" или id движка), `onPick(filter)` — реакция.
-function buildEngineTabs(wrap, current, onPick) {
+function buildEngineTabs(wrap, current, onPick, includeAll = true) {
   if (!wrap || !B || !B.engines) return;
   wrap.innerHTML = "";
   const mk = (filter, label, ready) => {
@@ -779,7 +779,7 @@ function buildEngineTabs(wrap, current, onPick) {
     t.addEventListener("click", () => onPick(filter));
     wrap.appendChild(t);
   };
-  mk("all", "Все");
+  if (includeAll) mk("all", "Все");
   for (const e of B.engines) mk(e.id, e.label, e.ready);
 }
 
@@ -1215,11 +1215,16 @@ function renderAutotune() {
     ((B && B.engines) || []).map((e) => `${e.id}:${e.ready ? 1 : 0}`).join(",") + "|" + (autotuneEngine || "");
   if (sig !== autotuneTabsSig) {
     autotuneTabsSig = sig;
-    buildEngineTabs(wrap, autotuneEngine || "all", (f) => {
-      autotuneEngine = f === "all" ? autotuneEngineDefault() : f;
-      autotuneIds = null;
-      renderAutotune();
-    });
+    buildEngineTabs(
+      wrap,
+      autotuneEngine || "all",
+      (f) => {
+        autotuneEngine = f;
+        autotuneIds = null;
+        renderAutotune();
+      },
+      false,
+    );
   }
   const running = !!(testState && testState.running);
   $("#btnRunAutotune").disabled = running || !autotuneEngine;
@@ -2177,6 +2182,8 @@ function bindStatic() {
   $("#testSelectAll").addEventListener("change", (e) => {
     const profs = visibleTestProfiles();
     testPicked = e.target.checked ? new Set(profs.map((p) => p.id)) : new Set();
+    // Перерисовываем список: иначе галочки у отдельных стратегий остаются
+    // в прежнем состоянии (снимаешь «выбрать все» — флаги «якобы» снимаются).
     renderTestCard();
   });
 
@@ -2369,6 +2376,12 @@ function bindStatic() {
 
   if ($("#btnNetReset")) $("#btnNetReset").addEventListener("click", netReset);
   if ($("#btnShowAdapters")) $("#btnShowAdapters").addEventListener("click", showAdapters);
+  if ($("#tgOffer"))
+    $("#tgOffer").addEventListener("change", () => {
+      // Включили «предлагать» — разрешаем оффер снова в этой сессии.
+      tgOfferShown = false;
+      invoke("tg_offer_reset").catch(() => {});
+    });
 }
 
 async function netReset() {

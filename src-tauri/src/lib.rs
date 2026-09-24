@@ -1477,7 +1477,11 @@ fn test_strategies(
             for p in profiles {
                 let key = args_key(&p, &tcp, &udp);
                 match cache.results.iter().find(|r| {
-                    r.id == p.id && r.started && r.args_key.as_deref() == Some(key.as_str())
+                    r.id == p.id
+                        && r.started
+                        // args_key может отсутствовать у старого кэша (до этой
+                        // версии) — тогда доверяем совпадению id.
+                        && (r.args_key.as_deref() == Some(key.as_str()) || r.args_key.is_none())
                 }) {
                     Some(r) => reused.push(r.clone()),
                     None => to_run.push(p),
@@ -1973,9 +1977,16 @@ fn shell_open(target: &str) -> Result<(), String> {
 /// Нужно для «Отправить отчёт» (GitHub Issues) и «Показать адаптеры» (`ncpa.cpl`).
 #[tauri::command(async)]
 fn open_external(target: String) -> Result<(), String> {
-    let ok = target.starts_with("https://")
-        || target.starts_with("http://")
-        || target.eq_ignore_ascii_case("ncpa.cpl");
+    // «Сетевые подключения»: ShellExecute по голому `ncpa.cpl` не находит файл —
+    // надёжно открывается через `control.exe netconnections`.
+    if target.eq_ignore_ascii_case("ncpa.cpl") {
+        return std::process::Command::new("control.exe")
+            .arg("netconnections")
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+    let ok = target.starts_with("https://") || target.starts_with("http://");
     if !ok {
         return Err("разрешены только ссылки http(s) и ncpa.cpl".into());
     }
@@ -2110,6 +2121,15 @@ fn tg_offer(ga: State<'_, Global>) -> bool {
     }
     g.tg_offer_shown.store(true, Ordering::SeqCst);
     true
+}
+
+/// Сброс «предложение уже показывали»: вызывается при включении галочки
+/// «предлагать автоматически», чтобы оффер сработал снова в этой сессии.
+#[tauri::command(async)]
+fn tg_offer_reset(ga: State<'_, Global>) {
+    let g = ga.inner();
+    g.tg_offer_shown.store(false, Ordering::SeqCst);
+    g.tg_offer_checked.store(0, Ordering::SeqCst);
 }
 
 /// Текущее состояние watchdog (обход YouTube/Discord).
@@ -3598,6 +3618,7 @@ pub fn run() {
             watchdog_status,
             open_task_manager,
             open_external,
+            tg_offer_reset,
             cancel_test,
             apply_best_strategy,
             install_service,
