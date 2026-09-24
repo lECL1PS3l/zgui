@@ -3148,6 +3148,10 @@ fn report_save(ga: State<'_, Global>) -> Result<String, String> {
            всегда от админа    : {always_admin}\r\n\
            Telegram-прокси     : порт {tg_port}, автозапуск: {tg_auto}\r\n\
          ============================================================\r\n\
+         РЕЗУЛЬТАТЫ ТЕСТА СТРАТЕГИЙ\r\n\
+         ============================================================\r\n\
+         {tests}\r\n\
+         ============================================================\r\n\
          ЖУРНАЛ (последние {count} записей)\r\n\
          ============================================================\r\n\
          {log}\r\n",
@@ -3178,12 +3182,48 @@ fn report_save(ga: State<'_, Global>) -> Result<String, String> {
         tg_port = s.settings.tg_port,
         tg_auto = if s.settings.tg_autostart { "да" } else { "нет" },
         count = logger::entries(0).len(),
+        tests = {
+            let cache = tester::TestCache::load(&s.data);
+            tester::results_text(&cache.results, cache.best_id.as_deref())
+        },
         log = logger::dump(),
     );
 
     std::fs::write(&path, body).map_err(|e| human::with_context("не удалось сохранить отчёт", &e.to_string()))?;
     logger::log("ok", "report", &format!("отчёт сохранён: {}", path.display()));
     let _ = std::process::Command::new("explorer.exe").arg(&path).spawn();
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Кнопка «Результаты в журнал»: отдельный текстовый файл с таблицей теста
+/// стратегий (очки, критические домены, не ответившие хосты) + запись в журнал.
+#[tauri::command(async)]
+fn test_report_save(ga: State<'_, Global>) -> Result<String, String> {
+    let s = st(ga.inner());
+    let cache = tester::TestCache::load(&s.data);
+    let dir = logger::dir().unwrap_or_else(|| s.data.join("logs"));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| human::with_context("не удалось создать папку журнала", &e.to_string()))?;
+    let path = dir.join(format!("тест-результаты-{}.txt", logger::now_stamp()));
+    let body = format!(
+        "Zapret GUI — результаты теста стратегий\r\n\
+         Время        : {time}\r\n\
+         Протестировано: {count} стратегий\r\n\
+         Папка данных : {data}\r\n\
+         ============================================================\r\n\
+         {tests}",
+        time = logger::stamp(
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        ),
+        count = cache.results.len(),
+        data = s.data.display(),
+        tests = tester::results_text(&cache.results, cache.best_id.as_deref()),
+    );
+    std::fs::write(&path, body).map_err(|e| human::with_context("не удалось сохранить результаты", &e.to_string()))?;
+    logger::log("ok", "report", &format!("результаты теста сохранены: {}", path.display()));
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -3656,6 +3696,7 @@ pub fn run() {
             log_clear,
             log_dir_open,
             report_save,
+            test_report_save,
             set_root,
             fetch_engine,
             refresh_catalog,

@@ -2239,6 +2239,18 @@ function bindStatic() {
     // в прежнем состоянии (снимаешь «выбрать все» — флаги «якобы» снимаются).
     renderTestCard();
   });
+  $("#btnTestReport").addEventListener("click", async () => {
+    // Результаты теста — отдельным файлом в журнал (для отправки/разбора).
+    btnBusy($("#btnTestReport"), true);
+    try {
+      const p = await invoke("test_report_save");
+      toast("ok", "результаты теста сохранены: " + p);
+    } catch (e) {
+      toast("err", "не удалось сохранить результаты: " + e);
+    } finally {
+      btnBusy($("#btnTestReport"), false);
+    }
+  });
 
   $("#btnSaveProfile").addEventListener("click", async () => {
     const name = $("#npName").value.trim();

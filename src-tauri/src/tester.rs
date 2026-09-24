@@ -656,6 +656,94 @@ pub fn group_of(p: &Profile) -> String {
     format!("{kind} · {}", crate::config::engine_def(&p.engine).map(|d| d.label).unwrap_or(p.engine.as_str()))
 }
 
+/// Текстовая сводка результатов теста для журнала/отчёта: таблица стратегий
+/// (очки, критические домены) + список не ответивших критических доменов.
+/// Общая для кнопки «Результаты в журнал» и полного отчёта.
+pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String {
+    if results.is_empty() {
+        return "Результаты теста отсутствуют — прогоните «Тест стратегий».\r\n".into();
+    }
+    let mut sorted: Vec<&StrategyResult> = results.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    let best = best_id
+        .and_then(|id| results.iter().find(|r| r.id == id))
+        .map(|r| format!("{} ({}/{})", r.name, r.score, r.max_score))
+        .unwrap_or_else(|| "не определена".into());
+    let width = sorted
+        .iter()
+        .map(|r| r.name.chars().count())
+        .max()
+        .unwrap_or(10)
+        .min(48);
+
+    let mut out = String::new();
+    out.push_str(&format!("Лучшая стратегия: {best}\r\n\r\n"));
+    for r in &sorted {
+        let state = if !r.started {
+            let err: String = r.error.clone().unwrap_or_default().replace(['\r', '\n'], " ");
+            let err: String = err.chars().take(120).collect();
+            format!("не запустилась: {err}")
+        } else if r.critical_ok {
+            "критические домены пройдены".to_string()
+        } else {
+            "критические домены НЕ пройдены".to_string()
+        };
+        out.push_str(&format!(
+            "  {:<width$}  {:>3}/{:<3}  {}\r\n",
+            r.name,
+            r.score,
+            r.max_score,
+            state,
+            width = width
+        ));
+    }
+
+    let mut bad: Vec<String> = Vec::new();
+    for r in &sorted {
+        if !r.started {
+            continue;
+        }
+        let failed_groups: Vec<&GroupResult> =
+            r.groups.iter().filter(|g| g.critical && !g.ok).collect();
+        if failed_groups.is_empty() {
+            continue;
+        }
+        let mut hosts: Vec<String> = Vec::new();
+        for g in failed_groups {
+            hosts.extend(
+                r.domains
+                    .iter()
+                    .filter(|d| !d.ok && d.group.as_deref() == Some(g.id.as_str()))
+                    .map(|d| d.host.clone()),
+            );
+        }
+        if hosts.is_empty() {
+            continue;
+        }
+        let total = hosts.len();
+        hosts.truncate(12);
+        let more = if total > 12 { format!(" … ещё {}", total - 12) } else { String::new() };
+        bad.push(format!(
+            "  {} ({}/{}): {}{}",
+            r.name,
+            r.score,
+            r.max_score,
+            hosts.join(", "),
+            more
+        ));
+    }
+    if !bad.is_empty() {
+        out.push_str("\r\nНе ответившие критические домены:\r\n");
+        out.push_str(&bad.join("\r\n"));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// Формирует сводку: отсортированные результаты + лучшая стратегия.
 /// При равных очках выигрывает та, что прошла больше критических групп, затем —
 /// с меньшей средней задержкой; имя лишь последний детерминированный tie-break.
@@ -749,6 +837,85 @@ mod tests {
         assert_eq!(best.as_deref(), Some("fast"), "при равных очках выигрывает быстрая");
         assert_eq!(v[0].id, "fast");
         assert_eq!(v[2].id, "no-critical", "без критических групп — в конце");
+    }
+
+    #[test]
+    fn results_text_lists_scores_and_failed_critical_hosts() {
+        let mk = |id: &str, name: &str, score: u32, crit_ok: bool, started: bool| StrategyResult {
+            id: id.into(),
+            name: name.into(),
+            engine: "flowseal".into(),
+            group: "bat · Flowseal".into(),
+            started,
+            score,
+            max_score: 115,
+            domains: vec![
+                DomainResult {
+                    key: "yt".into(),
+                    host: "youtube.com".into(),
+                    group: Some("youtube".into()),
+                    group_label: Some("YouTube".into()),
+                    ok: crit_ok,
+                    ms: 10,
+                    detail: "http 200".into(),
+                },
+                DomainResult {
+                    key: "dc".into(),
+                    host: "discord.com".into(),
+                    group: Some("discord".into()),
+                    group_label: Some("Discord".into()),
+                    ok: crit_ok,
+                    ms: 10,
+                    detail: "timeout".into(),
+                },
+            ],
+            error: if started { None } else { Some("process exited immediately".into()) },
+            groups: vec![
+                GroupResult {
+                    id: "youtube".into(),
+                    label: "YouTube".into(),
+                    passed: if crit_ok { 1 } else { 0 },
+                    total: 1,
+                    ok: crit_ok,
+                    critical: true,
+                    priority: 1,
+                },
+                GroupResult {
+                    id: "discord".into(),
+                    label: "Discord".into(),
+                    passed: if crit_ok { 1 } else { 0 },
+                    total: 1,
+                    ok: crit_ok,
+                    critical: true,
+                    priority: 1,
+                },
+            ],
+            critical_ok: crit_ok,
+            args_key: None,
+        };
+        let text = results_text(
+            &[
+                mk("a", "general · ALT11", 84, true, true),
+                mk("b", "general · ALT2", 3, false, true),
+                mk("c", "zz-broken", 0, false, false),
+            ],
+            Some("a"),
+        );
+        assert!(text.contains("Лучшая стратегия: general · ALT11 (84/115)"), "{text}");
+        assert!(text.contains("критические домены пройдены"), "{text}");
+        assert!(text.contains("критические домены НЕ пройдены"), "{text}");
+        assert!(text.contains("не запустилась: process exited immediately"), "{text}");
+        assert!(
+            text.contains("general · ALT2 (3/115): youtube.com, discord.com"),
+            "упавшие критические хосты должны быть перечислены: {text}"
+        );
+        // Порядок строк — по очкам (лучший выше), не стартовавшая в конце.
+        let (a, b, c) = (
+            text.find("general · ALT11").unwrap(),
+            text.find("general · ALT2").unwrap(),
+            text.find("zz-broken").unwrap(),
+        );
+        assert!(a < b && b < c, "порядок строк: {text}");
     }
 
     #[test]
