@@ -15,10 +15,12 @@ import icoSettings from "./assets/icons/lucide-settings.svg?raw";
 import icoX from "./assets/icons/lucide-x.svg?raw";
 import icoCheck from "./assets/icons/lucide-check.svg?raw";
 import icoScroll from "./assets/icons/lucide-scroll-text.svg?raw";
+import icoWand from "./assets/icons/lucide-wand-sparkles.svg?raw";
 
 const NAV_ICONS = {
   strategies: icoZap,
   tests: icoFlask,
+  autotune: icoWand,
   updates: icoDownload,
   telegram: icoSend,
   dns: icoShield,
@@ -364,6 +366,19 @@ function showConflict(report, opts = {}) {
   $("#conflictTitle").textContent = opts.title || "Обнаружено конфликтующее ПО";
   $("#conflictHint").textContent = opts.hint || "Рекомендуем выгрузить эти процессы перед использованием.";
   $("#btnKillConflicts").textContent = opts.killLabel || "Выгрузить процессы";
+  // Без прав администратора taskkill получит «отказано в доступе» — предупреждаем
+  // и предлагаем перезапуск от админа (иначе будет поток запросов UAC).
+  const adminHint = $("#conflictAdminHint");
+  if (adminHint) {
+    if (B && !B.elevated) {
+      adminHint.style.display = "";
+      adminHint.textContent =
+        "Программа запущена без прав администратора — завершить процессы не удастся. Перезапустите от администратора (кнопка «Перезапустить от админа» в «Настройках») или завершите их в диспетчере задач.";
+    } else {
+      adminHint.style.display = "none";
+      adminHint.textContent = "";
+    }
+  }
   conflictRetry = opts.onKilled || null;
   modal.classList.remove("hidden");
 }
@@ -421,8 +436,12 @@ async function autoKillAndProceed(retry) {
     const report = await invoke("conflict_check").catch(() => null);
     const still =
       report && ((report.processes || []).length || (report.vpn || []).length || report.foreignService);
-    // Не смогли выгрузить — не запускаем (бэкенд уже показал, что осталось).
-    if (still) return;
+    // Не смогли выгрузить — не запускаем и НЕ зацикливаемся: снимаем авто-согласие,
+    // иначе событие zgui:conflict снова вызвало бы авто-выгрузку (вечный цикл powershell).
+    if (still) {
+      conflictConsent = false;
+      return;
+    }
     if (typeof retry === "function") retry();
   } finally {
     conflictKilling = false;
@@ -1965,6 +1984,10 @@ function bindStatic() {
   });
   $("#btnConflictLater").addEventListener("click", hideConflict);
   $("#conflictClose").addEventListener("click", hideConflict);
+  if ($("#btnConflictTaskmgr"))
+    $("#btnConflictTaskmgr").addEventListener("click", () => {
+      invoke("open_task_manager").catch((e) => toast("err", String(e)));
+    });
 
   if ($("#cmOk")) $("#cmOk").addEventListener("click", () => closeConfirm(true));
 
@@ -2401,9 +2424,10 @@ async function wireEvents() {
     await refreshAll();
   });
   await listen("zgui:prog", (ev) => updateProgress(ev.payload));
-  await listen("zgui:conflict", () => {
-    if (!conflictKilling) checkConflicts(false);
-  });
+  // ВАЖНО: по этому событию НЕ запускаем авто-выгрузку. Раньше здесь вызывался
+  // checkConflicts → при активном согласии kill → снова событие → бесконечный
+  // цикл запросов UAC/powershell. Итог выгрузки показывают тосты бэкенда.
+  await listen("zgui:conflict", () => {});
   await listen("zgui:test", (ev) => {
     testState = ev.payload;
     renderTestProgress();

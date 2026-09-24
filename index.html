@@ -223,31 +223,37 @@
               После включения нажмите «Подключить Telegram» — мессенджер настроится автоматически.
             </p>
             <p class="muted" id="tgBridge"></p>
-            <details id="tgAdvanced">
-              <summary>Дополнительно</summary>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h3>Настройки прокси</h3></div>
+            <div class="form-grid">
               <label>Порт<input type="number" id="tgPort" value="1443" min="1" max="65535" /></label>
-              <label class="inline-check">
-                <input type="checkbox" id="tgAutostart" /> включать при запуске программы
-              </label>
-              <label class="inline-check">
-                <input type="checkbox" id="tgOffer" checked /> предлагать автоматически, когда запущен Telegram
-              </label>
-            </details>
-            <details id="tgTip">
-              <summary>Как отключить прокси в Telegram</summary>
-              <p class="muted card-sub">
-                Прокси в Telegram добавляется автоматически, но выключается в самом Telegram:
-                Настройки → Продвинутые настройки → Тип подключения → «Отключить прокси».
-                Старую запись в списке можно удалить там же (⋮ → Удалить).
-              </p>
-              <figure class="tg-tip-figure">
-                <img src="./src/assets/tg-tips.png" alt="Telegram: отключение и удаление прокси" loading="lazy" />
-                <figcaption>
-                  1 — меню → Настройки; 2 — Продвинутые настройки; 3 — Тип соединения;
-                  4 — «Отключить прокси», а запись MTPROTO удаляется через ⋮ → Удалить.
-                </figcaption>
-              </figure>
-            </details>
+            </div>
+            <label class="inline-check">
+              <input type="checkbox" id="tgOffer" checked />
+              предлагать автоматически, когда запущен Telegram (если не найден VPN/туннель/прокси)
+            </label>
+            <label class="inline-check">
+              <input type="checkbox" id="tgAutostart" />
+              включать прокси при запуске программы
+            </label>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h3>Как отключить прокси в Telegram</h3></div>
+            <p class="card-sub">
+              Прокси в Telegram добавляется автоматически, но выключается в самом Telegram:
+              Настройки → Продвинутые настройки → Тип подключения → «Отключить прокси».
+              Старую запись в списке можно удалить там же (⋮ → Удалить).
+            </p>
+            <figure class="tg-tip-figure">
+              <img src="./src/assets/tg-tips.png" alt="Telegram: отключение и удаление прокси" loading="lazy" />
+              <figcaption>
+                1 — меню → Настройки; 2 — Продвинутые настройки; 3 — Тип соединения;
+                4 — «Отключить прокси», а запись MTPROTO удаляется через ⋮ → Удалить.
+              </figcaption>
+            </figure>
           </div>
         </section>
 
@@ -403,7 +409,9 @@
           <ul id="conflictVpnList" class="conflict-list vpn"></ul>
         </div>
         <p class="muted" id="conflictHint">Рекомендуем выгрузить эти процессы перед использованием.</p>
+        <p class="muted warn" id="conflictAdminHint" style="display:none"></p>
         <div class="modal-actions">
+          <button class="btn ghost" id="btnConflictTaskmgr">Диспетчер задач</button>
           <button class="btn primary" id="btnKillConflicts">Выгрузить процессы</button>
           <button class="btn ghost" id="btnConflictLater">Закрыть</button>
         </div>

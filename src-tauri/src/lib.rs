@@ -1752,6 +1752,16 @@ fn test_cache(ga: State<'_, Global>) -> tester::TestCache {
 
 // ---------------------------------------------------------------- telegram
 
+/// Открывает диспетчер задач Windows — запасной путь, если процесс не удаётся
+/// завершить программно (защищённый/возрождаемый). Пользователь завершит вручную.
+#[tauri::command(async)]
+fn open_task_manager() -> Result<(), String> {
+    rn::hidden_command("taskmgr.exe")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 fn tg_status(ga: State<'_, Global>) -> telegram::TgStatus {
     ga.inner().telegram.status()
@@ -3358,6 +3368,7 @@ pub fn run() {
             tg_offer,
             tg_vpn_guard,
             watchdog_status,
+            open_task_manager,
             cancel_test,
             apply_best_strategy,
             install_service,

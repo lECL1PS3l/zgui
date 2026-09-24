@@ -466,8 +466,14 @@ pub fn check_preset_entry(archive: &UpdArchive) -> UpdEntry {
             };
         }
         Err(e) => {
-            u.status = "err".into();
-            u.error = Some(e);
+            // Набор ещё не опубликован в релизе — это не ошибка, а «нет данных».
+            if e.contains("нет ассета presets.json") {
+                u.label = "presets.json — ещё не опубликован (появится после релиза)".into();
+                u.status = "skip-user".into();
+            } else {
+                u.status = "err".into();
+                u.error = Some(e);
+            }
         }
     }
     u

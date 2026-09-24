@@ -345,11 +345,11 @@ body.fx-paused .topo { animation-play-state: paused; }
 /* Компактные плитки: строка с проверкой и движками на «Обновлениях». */
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 12px;
   margin-bottom: 18px;
 }
-.tile { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.tile { padding: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .tile-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tile-name { font-size: 13px; font-weight: 600; }
 .tile-head .state-chip { margin-left: auto; }
@@ -357,6 +357,8 @@ body.fx-paused .topo { animation-play-state: paused; }
 .tile-note { font-size: 11px; line-height: 1.4; }
 .tile-field { font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
 .tile .root-row { margin-top: auto; }
+.tile .root-path { font-size: 11px; }
+.tile .root-actions { flex-wrap: wrap; gap: 6px; }
 
 .chip {
   padding: 2px 8px; border-radius: 6px;

@@ -162,8 +162,12 @@ pub fn detect_conflicts(data_dir: &Path, our_pid: Option<u32>) -> ConflictReport
 
     let (installed, running) = service_state();
     let strategy = service_strategy(data_dir);
-    report.own_service = strategy.is_some();
-    report.foreign_service = installed && strategy.is_none();
+    // Наша служба: есть наш reg-ключ стратегии ИЛИ её ImagePath указывает в наш
+    // layout data\engines\ (служба, поставленная прошлой копией GUI — тогда
+    // ключа может не быть, и её нельзя считать «чужой»).
+    let own = strategy.is_some() || service_image_is_ours();
+    report.own_service = own;
+    report.foreign_service = installed && !own;
     if report.foreign_service {
         report
             .processes
@@ -345,7 +349,9 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
     for svc in &vpn_services {
         body.push_str(&format!(
             "Stop-Service -Name '{}' -Force -ErrorAction SilentlyContinue\n\
+             Set-Service -Name '{}' -StartupType Disabled -ErrorAction SilentlyContinue\n\
              sc.exe stop '{}' 2>$null | Out-Null\n",
+            ps_single_quote(svc),
             ps_single_quote(svc),
             ps_single_quote(svc)
         ));
@@ -363,6 +369,7 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
                $leaf = [System.IO.Path]::GetFileNameWithoutExtension((($_.PathName -replace '\"','') -split ' ')[0]); \
                if ($leaf -and ($zguiNames -contains $leaf.ToLower())) {{ \
                  Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue; \
+                 Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue; \
                  sc.exe stop $_.Name 2>$null | Out-Null; sc.exe delete $_.Name 2>$null | Out-Null }} }}\n"
         ));
     }
@@ -377,7 +384,8 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
             SERVICE_NAME, SERVICE_NAME
         ));
     }
-    // Убиваем по имени (все копии) массивом, затем по PID (остатки/деревья).
+    // Убиваем по имени (все копии) массивом, с повтором (демон может успеть
+    // возродить процесс), затем по PID. Службы к этому моменту остановлены.
     if !names.is_empty() {
         let arr = names
             .iter()
@@ -386,7 +394,9 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
             .join(",");
         body.push_str(&format!(
             "$zguiKill = @({arr})\n\
-             foreach ($n in $zguiKill) {{ taskkill /F /T /IM $n 2>$null | Out-Null }}\n"
+             for ($i = 0; $i -lt 2; $i++) {{ \
+               foreach ($n in $zguiKill) {{ taskkill /F /T /IM $n 2>$null | Out-Null }}; \
+               Start-Sleep -Milliseconds 700 }}\n"
         ));
     }
     for pid in &pids {
@@ -487,6 +497,26 @@ pub fn remove_service(data_dir: &Path) -> Result<(), String> {
     let r = run_script_privileged(&script);
     let _ = fs::remove_file(&script);
     r.map(|_| ())
+}
+
+/// Служба `zapret` с путём в наш layout (`...\data\engines\...`) — наша, даже
+/// если reg-ключ стратегии отсутствует (осталась от прошлой копии GUI).
+fn service_image_is_ours() -> bool {
+    let out = hidden_command("reg.exe")
+        .args([
+            "query",
+            r"HKLM\System\CurrentControlSet\Services\zapret",
+            "/v",
+            "ImagePath",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let txt = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            txt.contains(r"\data\engines\")
+        }
+        _ => false,
+    }
 }
 
 pub fn service_state() -> (bool, bool) {
