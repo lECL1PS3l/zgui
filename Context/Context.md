@@ -1576,3 +1576,17 @@ DeepSeek (chat.deepseek.com, чат «Словарь для утилиты», id
 - warn «windivert: зависший драйвер не убран — нужны права администратора» — ожидаемо: GUI запущен без админ-прав (с правами снимает).
 
 Все известные баги закрыты пользователем. Актуальные артефакты: `src-tauri\target\release\zgui.exe` — 13 764 608 б, 25.09.2026 17:13:12, SHA-256 `071eb9f15d0e9c0a5e929b5df1f222078e08a3e5f58fb2ca06190f29c277153c`; `release\zgui-1.3.0-clean.zip` — 10 685 892 б. Проверки: `cargo test --lib` 95/95, clippy 0, security-check exit 0. Публикация/пуш не делались.
+
+
+## СМС от пользователя (25.09.2026, ≈17:23): «Релиз! 🎉» (окно repo-guard открыто, подтверждение получено)
+
+### Сделано — опубликован релиз v1.3.0
+- `.gitignore`: починены побитые комментарии (кодировка), добавлены `/Context/review-*.md` и `/opencode.json` (внутренние файлы, не публикуются).
+- `release/presets.json` перегенерирован из вшитой таблицы: version **2026.09.25**, 11 пресетов (без удалённого flowseal-general).
+- CHANGELOG.md: добавлен раздел `[1.3.0] — 2026-09-25` (движки, тесты, OTA, инструменты, телеграм, целостность, безопасность, стабильность).
+- Коммит **6da8885** «release: Z GUI 1.3.0 - multi-engine, OTA presets, review pass» (69 файлов, +9367/−7039); `git push origin main` — OK (b5cfb04..6da8885).
+- `gh release create v1.3.0` (title «Zapret GUI 1.3.0», notes по-русски с суммами): ассеты `zgui-1.3.0-clean.zip` (10 685 892 б), `engine-zapret2.zip` (1 664 356 б), `presets.json` (3 770 б).
+  URL: https://github.com/lECL1PS3l/zgui/releases/tag/v1.3.0 — релиз стал `latest`, значит `fetch_engine` (zapret2) и OTA-пресеты у юзеров теперь берут ассеты из него.
+- **Проверка целостности**: все три ассета скачаны заново с GitHub и сверены по SHA-256 — совпали: `995A782746BFD397B60EDE2BC17D77A28924170A406E8F469BBB4B36EC1FBD50`, `CB93D635338562408B557D9F8341B35F38F713F8CBB22D7F335CD278E82490F6` (совпал и с пиннингом `PINNED_ASSETS`), `E7D1A2368897A8B5385C330929575316199AE6EF981DC698A156BEC86C5EB876`.
+
+Артефакты: `zgui.exe` — 13 764 608 б, 17:13:12, SHA-256 `071eb9f15d0e9c0a5e929b5df1f222078e08a3e5f58fb2ca06190f29c277153c`; проверки: 95/95 тестов, clippy 0, security-check exit 0. Бэкапы сдвинуты до записи блока.
