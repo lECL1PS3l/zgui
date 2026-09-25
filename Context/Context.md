@@ -1590,3 +1590,13 @@ DeepSeek (chat.deepseek.com, чат «Словарь для утилиты», id
 - **Проверка целостности**: все три ассета скачаны заново с GitHub и сверены по SHA-256 — совпали: `995A782746BFD397B60EDE2BC17D77A28924170A406E8F469BBB4B36EC1FBD50`, `CB93D635338562408B557D9F8341B35F38F713F8CBB22D7F335CD278E82490F6` (совпал и с пиннингом `PINNED_ASSETS`), `E7D1A2368897A8B5385C330929575316199AE6EF981DC698A156BEC86C5EB876`.
 
 Артефакты: `zgui.exe` — 13 764 608 б, 17:13:12, SHA-256 `071eb9f15d0e9c0a5e929b5df1f222078e08a3e5f58fb2ca06190f29c277153c`; проверки: 95/95 тестов, clippy 0, security-check exit 0. Бэкапы сдвинуты до записи блока.
+
+
+## СМС от пользователя (25.09.2026, ≈17:36): «удали 2 скрина из readme и поставь туда последний скрин из sharex»
+
+- Взял свежий снимок окна zgui из ShareX: `Screenshots\2026-09\zgui_vnEJF1zlBl.png` (25.09 17:34:59, 457 762 б, 1182×812) → `docs/screens/main.png`.
+- README: две строки `![Стратегии](docs/screens/1.png)` и `![Тест стратегий](docs/screens/2.png)` заменены одной `![Zapret GUI](docs/screens/main.png)`; файлы `docs/screens/1.png`, `2.png` удалены.
+- Заодно (последствия релиза, молчаливое исправление ошибок): в «Быстром старте» имя ассета `ZapretGUI-1.2.0-portable.zip` → `zgui-1.3.0-clean.zip`; создан `release\checksums.txt` (SHA-256: zip, zgui.exe, engine-zapret2.zip, presets.json) и залит в релиз v1.3.0 (`gh release upload`) — README обещает этот файл в разделе «Проверка подлинности».
+- Коммит **e7ac724** «docs(readme): replace screenshots with a fresh main screen; fix release asset name» → `git push origin main` OK (338c102..e7ac724).
+
+Публикация: релиз v1.3.0 содержит теперь 4 ассета (checksums.txt, engine-zapret2.zip, presets.json, zgui-1.3.0-clean.zip).
