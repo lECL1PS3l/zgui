@@ -60,6 +60,7 @@ use crate::faketls::{
     build_faketls_server_hello, drain_faketls_server_hello, parse_faketls_client_hello,
     read_tls_appdata, read_tls_record_bytes, sign_faketls_client_hello, write_tls_appdata,
 };
+use crate::limits;
 use crate::outbound::OutboundConnector;
 use crate::pool::{CfTarget, CfTier, WsPool};
 use crate::runtime::Runtime;
@@ -103,6 +104,14 @@ const TLS_READ_HEADROOM: usize = 256;
 /// that emits a slightly oversized record working, for 256 bytes per
 /// connection.
 const CLIENT_READ_BUF_SIZE: usize = TLS_MAX_RECORD_PAYLOAD + TLS_READ_HEADROOM;
+
+/// How long a bridge direction may see no traffic before the session is
+/// dropped.
+///
+/// Telegram's own pings keep a live connection far inside this budget, so the
+/// timeout only reaps half-dead sessions — a peer powered off without a FIN —
+/// that would otherwise hold a connection slot and two descriptors forever.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 // ─── Failure cooldowns ───────────────────────────────────────────────────────
 
@@ -504,6 +513,7 @@ pub async fn handle_client_with_runtime(
     }
     let mut label = peer;
     let _ = stream.set_nodelay(true);
+    limits::set_tcp_keepalive(&stream);
     let socket = socket2::SockRef::from(&stream);
     let _ = socket.set_send_buffer_size(config.buf_bytes());
     let _ = socket.set_recv_buffer_size(config.buf_bytes());
@@ -1596,9 +1606,9 @@ async fn bridge_ws(reader: ClientReader, writer: ClientWriter, params: WsBridgeP
             let mut buf = vec![0u8; CLIENT_READ_BUF_SIZE];
 
             loop {
-                let n = match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
+                let n = match tokio::time::timeout(IDLE_TIMEOUT, reader.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => n,
+                    _ => break,
                 };
                 let chunk = &mut buf[..n];
 
@@ -1609,8 +1619,15 @@ async fn bridge_ws(reader: ClientReader, writer: ClientWriter, params: WsBridgeP
                 let sent = match splitter.as_mut() {
                     // Split into MTProto packets and send as separate WS frames.
                     Some(splitter) => {
+                        let parts = match splitter.split_and_encrypt(chunk, &mut tg_enc) {
+                            Ok(parts) => parts,
+                            Err(err) => {
+                                warn!("[{}] refusing corrupt MTProto stream: {:?}", label, err);
+                                return;
+                            }
+                        };
                         let mut sent = true;
-                        for part in splitter.split_and_encrypt(chunk, &mut tg_enc) {
+                        for part in parts {
                             if ws_sink.send(Message::Binary(part)).await.is_err() {
                                 sent = false;
                                 break;
@@ -1656,10 +1673,10 @@ async fn bridge_ws(reader: ClientReader, writer: ClientWriter, params: WsBridgeP
 
         loop {
             // Use the source half of the split WS stream.
-            let data = match ws_source.next().await {
-                Some(Ok(Message::Binary(b))) => b,
-                Some(Ok(Message::Text(t))) => t.into_bytes(),
-                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+            let data = match tokio::time::timeout(IDLE_TIMEOUT, ws_source.next()).await {
+                Ok(Some(Ok(Message::Binary(b)))) => b,
+                Ok(Some(Ok(Message::Text(t)))) => t.into_bytes(),
+                Ok(Some(Ok(Message::Ping(_)))) | Ok(Some(Ok(Message::Pong(_)))) => continue,
                 _ => break,
             };
             let mut data = data;
@@ -1842,9 +1859,9 @@ async fn bridge_relay(reader: ClientReader, writer: ClientWriter, params: RelayP
             let mut buf = vec![0u8; CLIENT_READ_BUF_SIZE];
 
             loop {
-                let n = match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
+                let n = match tokio::time::timeout(IDLE_TIMEOUT, reader.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => n,
+                    _ => break,
                 };
                 let chunk = &mut buf[..n];
                 clt_dec.apply_keystream(chunk);
@@ -1881,14 +1898,17 @@ async fn bridge_relay(reader: ClientReader, writer: ClientWriter, params: RelayP
         ];
 
         loop {
-            let read = if faketls {
-                read_tls_appdata(&mut rem_reader, &mut buf).await
-            } else {
-                rem_reader.read(&mut buf).await
-            };
+            let read = tokio::time::timeout(IDLE_TIMEOUT, async {
+                if faketls {
+                    read_tls_appdata(&mut rem_reader, &mut buf).await
+                } else {
+                    rem_reader.read(&mut buf).await
+                }
+            })
+            .await;
             let n = match read {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
+                Ok(Ok(n)) if n > 0 => n,
+                _ => break,
             };
 
             let chunk = &mut buf[..n];
@@ -1984,9 +2004,9 @@ async fn bridge_tcp(
             let mut buf = vec![0u8; CLIENT_READ_BUF_SIZE];
 
             loop {
-                let n = match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
+                let n = match tokio::time::timeout(IDLE_TIMEOUT, reader.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => n,
+                    _ => break,
                 };
                 let chunk = &mut buf[..n];
 
@@ -2006,9 +2026,9 @@ async fn bridge_tcp(
         let mut buf = vec![0u8; RELAY_BUF_SIZE];
 
         loop {
-            let n = match rem_reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
+            let n = match tokio::time::timeout(IDLE_TIMEOUT, rem_reader.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => n,
+                _ => break,
             };
             let chunk = &mut buf[..n];
 

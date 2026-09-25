@@ -10,7 +10,7 @@
 use serde::Serialize;
 use std::path::Path;
 
-use crate::runner::{run_script_privileged, write_ps1};
+use crate::runner::run_script_privileged;
 
 #[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -36,15 +36,12 @@ pub fn create_restore_point(data: &Path) -> Result<String, String> {
         if let Ok(modified) = meta.modified() {
             if let Ok(age) = modified.elapsed() {
                 if age.as_secs() < 24 * 3600 {
-                    return Ok("точка восстановления уже создавалась за последние 24 ч".into());
+                    return Ok(crate::texts::RESTORE_EXISTS.into());
                 }
             }
         }
     }
 
-    let script = crate::runner::TempFile::new(
-        data.join("logs").join(format!("restore_point_{}.ps1", std::process::id())),
-    );
     let body = format!(
         r#"{header}
 $ErrorActionPreference = 'Continue'
@@ -59,16 +56,19 @@ try {{
 "#,
         header = crate::runner::PS_HEADER,
     );
-    write_ps1(script.path(), &body)?;
+    let script = crate::runner::LockedScript::write(
+        data.join("logs").join(format!("restore_point_{}.ps1", std::process::id())),
+        &body,
+    )?;
     let code = run_script_privileged(script.path());
     match code {
         Ok(0) => {
             let _ = std::fs::write(&stamp, crate::profiles::now_str());
-            Ok("точка восстановления создана".into())
+            Ok(crate::texts::RESTORE_CREATED.into())
         }
-        Ok(7) => Err("не удалось создать точку восстановления (возможно, отключена Защита системы)".into()),
-        Ok(c) => Err(format!("создание точки восстановления завершилось с кодом {}", c)),
-        Err(e) => Err(format!("не удалось запустить создание точки (подтверждение прав отклонено?): {}", e)),
+        Ok(7) => Err(crate::texts::RESTORE_DISABLED.into()),
+        Ok(c) => Err(crate::texts::restore_failed_code(c)),
+        Err(e) => Err(crate::texts::restore_launch_failed(&e.to_string())),
     }
 }
 
@@ -96,9 +96,6 @@ pub fn list_virtual_adapters() -> Vec<String> {
 
 /// Выполняет безопасный сброс сети (с UAC). Возвращает отчёт.
 pub fn reset(data: &Path) -> Result<NetResetResult, String> {
-    let script = crate::runner::TempFile::new(
-        data.join("logs").join(format!("net_reset_{}.ps1", std::process::id())),
-    );
     // Шаги пишутся скриптом: раньше список возвращался жёстко зашитым, и UI
     // рапортовал «VPN-службы остановлены», даже если таких служб не было.
     let steps_file = crate::runner::TempFile::new(
@@ -106,28 +103,26 @@ pub fn reset(data: &Path) -> Result<NetResetResult, String> {
     );
 
     let body = reset_script(steps_file.path());
-    write_ps1(script.path(), &body)?;
-    let code = run_script_privileged(script.path());
-    code?;
+    let script = crate::runner::LockedScript::write(
+        data.join("logs").join(format!("net_reset_{}.ps1", std::process::id())),
+        &body,
+    )?;
+    let code = run_script_privileged(script.path()).map_err(|e| crate::texts::restore_launch_failed(&e.to_string()))?;
+    // Ненулевой код скрипта — честная ошибка: раньше он игнорировался и UI
+    // показывал «выполнено» даже при провалившемся сбросе.
+    if code != 0 {
+        return Err(crate::texts::net_reset_failed_code(code));
+    }
 
     let steps: Vec<String> = crate::config::read_text_auto(steps_file.path())
         .map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
         .unwrap_or_default();
+    if steps.is_empty() {
+        crate::logger::log("warn", "netreset", "скрипт сброса завершился без единого шага — проверьте журнал");
+    }
     let virtual_adapters = list_virtual_adapters();
     Ok(NetResetResult {
-        steps: if steps.is_empty() {
-            vec![
-                "служба zapret остановлена и удалена".into(),
-                "VPN-службы остановлены (включая AmneziaVPN)".into(),
-                "процессы VPN и чужие winws завершены".into(),
-                "драйверы WinDivert сброшены".into(),
-                "WinHTTP и системный прокси сброшены".into(),
-                "кэш DNS очищен".into(),
-                "Winsock и TCP/IP сброшены".into(),
-            ]
-        } else {
-            steps
-        },
+        steps,
         reboot_required: true,
         errors: Vec::new(),
         virtual_adapters,
@@ -136,6 +131,12 @@ pub fn reset(data: &Path) -> Result<NetResetResult, String> {
 
 /// Тело скрипта сброса: каждый выполненный шаг дописывается в `steps_file`,
 /// он же и синтаксически проверяется тестом.
+///
+/// Строка шага: и в консоль (`STEP:`), и в файл списка (`$zguiSteps`).
+fn step(name: &str) -> String {
+    format!("Write-Output 'STEP:{name}'\n$zguiSteps += '{name}'\n")
+}
+
 fn reset_script(steps_file: &Path) -> String {
     let mut body = String::new();
     body.push_str(&format!("{}\n", crate::runner::PS_HEADER));
@@ -143,19 +144,17 @@ fn reset_script(steps_file: &Path) -> String {
     body.push_str("$ErrorActionPreference = 'Continue'\n$zguiSteps = @()\n\n");
 
     // 1. Наша/чужая служба zapret.
+    body.push_str(&step(crate::texts::STEP_SERVICE_REMOVED));
     body.push_str(
-        "Write-Output 'STEP:служба zapret остановлена и удалена'\n\
-         $zguiSteps += 'служба zapret остановлена и удалена'\n\
-         Stop-Service -Name 'zapret' -Force -ErrorAction SilentlyContinue\n\
+        "Stop-Service -Name 'zapret' -Force -ErrorAction SilentlyContinue\n\
          sc.exe stop zapret 2>$null | Out-Null\n\
          sc.exe delete zapret 2>$null | Out-Null\n\n",
     );
 
     // 2. VPN-службы (включая AmneziaVPN): сначала стоп, чтобы не возрождали процессы.
+    body.push_str(&step(crate::texts::STEP_VPN_SERVICES));
     body.push_str(
-        "Write-Output 'STEP:VPN-службы остановлены (включая AmneziaVPN)'\n\
-         $zguiSteps += 'VPN-службы остановлены (включая AmneziaVPN)'\n\
-         $vpnServices = @('AmneziaVPN-service','AmneziaVPN','AmneziaWG','amneziawg','WireGuardTunnel','OpenVPNService','OpenVPNServiceInteractive','Happ','Nekoray','ClashVerge','sing-box')\n\
+        "$vpnServices = @('AmneziaVPN-service','AmneziaVPN','AmneziaWG','amneziawg','WireGuardTunnel','OpenVPNService','OpenVPNServiceInteractive','Happ','Nekoray','ClashVerge','sing-box')\n\
          foreach ($s in $vpnServices) {\n\
            $svc = Get-Service -Name $s -ErrorAction SilentlyContinue\n\
            if ($svc) { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue; sc.exe stop $s 2>$null | Out-Null }\n\
@@ -164,30 +163,27 @@ fn reset_script(steps_file: &Path) -> String {
     );
 
     // 3. Процессы VPN и чужие winws (не наши — наш процесс к этому моменту остановлен GUI).
+    body.push_str(&step(crate::texts::STEP_VPN_PROCESSES));
     body.push_str(
-        "Write-Output 'STEP:процессы VPN и чужие winws завершены'\n\
-         $zguiSteps += 'процессы VPN и чужие winws завершены'\n\
-         $names = @('winws','winws2','goodbyedpi','dpibreak','AmneziaVPN-service','AmneziaVPN','amneziawg','wg','wireguard','openvpn','openvpn-gui','sing-box','xray','v2ray','nekoray','clash','mihomo','happ','hiddify','tun2socks')\n\
+        "$names = @('winws','winws2','goodbyedpi','dpibreak','AmneziaVPN-service','AmneziaVPN','amneziawg','wg','wireguard','openvpn','openvpn-gui','sing-box','xray','v2ray','nekoray','clash','mihomo','happ','hiddify','tun2socks')\n\
          foreach ($n in $names) {\n\
            Get-Process -Name $n -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n\
          }\n\n",
     );
 
     // 4. Драйверы перехвата WinDivert (могут остаться висеть после сбоя).
+    body.push_str(&step(crate::texts::STEP_DRIVERS));
     body.push_str(
-        "Write-Output 'STEP:драйверы WinDivert сброшены'\n\
-         $zguiSteps += 'драйверы WinDivert сброшены'\n\
-         foreach ($d in @('WinDivert','WinDivert14','WinDivert1.4')) {\n\
+        "foreach ($d in @('WinDivert','WinDivert14','WinDivert1.4')) {\n\
            sc.exe stop $d 2>$null | Out-Null\n\
            sc.exe delete $d 2>$null | Out-Null\n\
          }\n\n",
     );
 
     // 5. Прокси: WinHTTP + системный (реестр).
+    body.push_str(&step(crate::texts::STEP_PROXY));
     body.push_str(
-        "Write-Output 'STEP:WinHTTP и системный прокси сброшены'\n\
-         $zguiSteps += 'WinHTTP и системный прокси сброшены'\n\
-         netsh winhttp reset proxy | Out-Null\n\
+        "netsh winhttp reset proxy | Out-Null\n\
          $key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'\n\
          Set-ItemProperty -Path $key -Name ProxyEnable -Value 0 -Type DWord -ErrorAction SilentlyContinue\n\
          Remove-ItemProperty -Path $key -Name ProxyServer -ErrorAction SilentlyContinue\n\
@@ -196,17 +192,13 @@ fn reset_script(steps_file: &Path) -> String {
     );
 
     // 6. Кэш DNS.
-    body.push_str(
-        "Write-Output 'STEP:кэш DNS очищен'\n\
-         $zguiSteps += 'кэш DNS очищен'\n\
-         ipconfig /flushdns | Out-Null\n\n",
-    );
+    body.push_str(&step(crate::texts::STEP_DNS));
+    body.push_str("ipconfig /flushdns | Out-Null\n\n");
 
     // 7. Сброс Winsock и TCP/IP (вступает в силу ПОСЛЕ перезагрузки).
+    body.push_str(&step(crate::texts::STEP_NETWORK));
     body.push_str(
-        "Write-Output 'STEP:Winsock и TCP/IP сброшены'\n\
-         $zguiSteps += 'Winsock и TCP/IP сброшены'\n\
-         netsh winsock reset | Out-Null\n\
+        "netsh winsock reset | Out-Null\n\
          netsh int ip reset | Out-Null\n\n",
     );
 
@@ -233,7 +225,8 @@ mod tests {
     fn reset_script_is_valid_powershell_and_reports_steps() {
         let steps = std::env::temp_dir().join(format!("zgui-netreset-{}.txt", std::process::id()));
         let body = reset_script(&steps);
-        assert!(body.contains("$zguiSteps += 'кэш DNS очищен'"), "шаг должен попасть в список: {body}");
+        assert!(body.contains("$zguiSteps += "), "шаг должен попасть в список: {body}");
+        assert!(body.contains(crate::texts::STEP_DNS), "текст шага должен быть в скрипте");
         assert!(body.contains("Set-Content -LiteralPath"), "список шагов должен писаться в файл");
 
         let path = std::env::temp_dir().join(format!("zgui-netreset-{}.ps1", std::process::id()));

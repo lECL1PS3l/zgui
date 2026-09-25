@@ -2,6 +2,7 @@ import "./styles.css";
 import { invoke as rawInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { T } from "./texts.js";
 
 // Иконки Lucide (ISC, https://lucide.dev) — вендорены в src/assets/icons,
 // цвет наследуется через stroke="currentColor", поэтому работают во всех темах.
@@ -15,18 +16,20 @@ import icoSettings from "./assets/icons/lucide-settings.svg?raw";
 import icoX from "./assets/icons/lucide-x.svg?raw";
 import icoCheck from "./assets/icons/lucide-check.svg?raw";
 import icoScroll from "./assets/icons/lucide-scroll-text.svg?raw";
-import icoWand from "./assets/icons/lucide-wand-sparkles.svg?raw";
+import icoWrench from "./assets/icons/lucide-wrench.svg?raw";
+import icoInfo from "./assets/icons/lucide-info.svg?raw";
 
 const NAV_ICONS = {
   strategies: icoZap,
   tests: icoFlask,
-  autotune: icoWand,
   updates: icoDownload,
   telegram: icoSend,
   dns: icoShield,
   appearance: icoPalette,
   settings: icoSettings,
+  tools: icoWrench,
   logs: icoScroll,
+  about: icoInfo,
 };
 
 function renderNavIcons() {
@@ -49,29 +52,38 @@ function chipMark(ok) {
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
+// Подставляет тексты из словаря во все элементы с data-i18n-атрибутами.
+function applyTexts(root = document) {
+  root.querySelectorAll("[data-i18n]").forEach((el) => { const v = T[el.dataset.i18n]; if (v != null) el.textContent = v; });
+  root.querySelectorAll("[data-i18n-html]").forEach((el) => { const v = T[el.dataset.i18nHtml]; if (v != null) el.innerHTML = v; });
+  root.querySelectorAll("[data-i18n-title]").forEach((el) => { const v = T[el.dataset.i18nTitle]; if (v != null) el.title = v; });
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => { const v = T[el.dataset.i18nPlaceholder]; if (v != null) el.placeholder = v; });
+  root.querySelectorAll("[data-i18n-alt]").forEach((el) => { const v = T[el.dataset.i18nAlt]; if (v != null) el.alt = v; });
+}
+
 // ------------------------------------------------------------- ошибки и журнал
 
 // Технические ошибки расшифровываем на человеческий язык. Таблица повторяет
 // логику src-tauri/src/human.rs — интерфейс и бэкенд говорят одинаково.
 const ERROR_RULES = [
   [/os error 5|access is denied|administrator|admin_required/i,
-    "нужны права администратора — включите их в «Настройках»"],
+    T.err_admin],
   [/os error 32|being used by another process/i,
-    "файл занят другой программой — закройте её и повторите"],
-  [/os error 112|not enough space/i, "на диске не хватает места"],
+    T.err_busy],
+  [/os error 112|not enough space/i, T.err_space],
   [/os error 2|os error 3|cannot find/i,
-    "файл или папка не найдены — возможно, движок ещё не установлен"],
+    T.err_not_found],
   [/error sending request|error trying to connect|dns error|timed out|connection refused|connection reset|network is unreachable/i,
-    "нет связи с сервером — проверьте интернет (или выключите VPN) и повторите"],
+    T.err_net],
   [/http 403|\b403 forbidden\b/i,
-    "сервер отклонил запрос (403) — возможно, исчерпан лимит обращений к GitHub, попробуйте позже"],
-  [/http 404|\b404 not found\b/i, "на сервере нет такого файла (404) — обновите программу"],
-  [/http 5\d\d/i, "сервер временно недоступен — попробуйте позже"],
+    T.err_403],
+  [/http 404|\b404 not found\b/i, T.err_404],
+  [/http 5\d\d/i, T.err_5xx],
   [/invalid args|expected u16|invalid type|invalid value/i,
-    "недопустимое значение поля — проверьте введённые данные"],
-  [/process exited immediately/i, "движок сразу завершился — подробности в «Журнале»"],
-  [/launch_error/i, "не удалось запустить процесс — возможно, отклонён запрос прав администратора"],
-  [/panic|panicked/i, "внутренняя ошибка программы — подробности в «Журнале»"],
+    T.err_invalid],
+  [/process exited immediately/i, T.err_exit],
+  [/launch_error/i, T.err_launch],
+  [/panic|panicked/i, T.err_panic],
 ];
 
 const TECH_RE = /os error|error|failed|denied|http |invalid|panic|refused|timed out/i;
@@ -79,11 +91,11 @@ const CYR_RE = /[а-яё]/i;
 
 function humanError(raw) {
   const s = String(raw == null ? "" : raw).trim();
-  if (!s) return "неизвестная ошибка — подробности в «Журнале»";
+  if (!s) return T.err_unknown;
   // Своё понятное сообщение (на русском и без технических маркеров) не портим.
   if (CYR_RE.test(s) && !TECH_RE.test(s)) return s;
   for (const [re, msg] of ERROR_RULES) if (re.test(s)) return msg;
-  return "непредвиденная ошибка: " + (s.length > 220 ? s.slice(0, 220) + "…" : s);
+  return T.err_unexpected(s.length > 220 ? s.slice(0, 220) + "…" : s);
 }
 
 const logState = { items: [], seq: 0, level: "all", query: "", timer: null };
@@ -142,7 +154,7 @@ function renderLog() {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "log-empty";
-    empty.textContent = logState.items.length ? "ничего не найдено" : "пока пусто";
+    empty.textContent = logState.items.length ? T.log_empty_search : T.log_empty;
     box.appendChild(empty);
   } else {
     for (const e of items) {
@@ -166,7 +178,7 @@ function renderLog() {
     if (stick) box.scrollTop = box.scrollHeight;
   }
   const foot = $("#logFoot");
-  if (foot) foot.textContent = `показано ${items.length} из ${logState.items.length}`;
+  if (foot) foot.textContent = T.log_shown(items.length, logState.items.length);
 }
 
 async function logPoll() {
@@ -191,8 +203,6 @@ function stopLogPoll() {
 
 let B = null; // bootstrap snapshot
 let profileFilter = "all";
-// Фильтр профилей: "all" | "auto" (только стратегии, подобранные автоподбором).
-let profSort = "all";
 let lastUpdRender = "";
 let testState = null; // TestProgress
 let testCache = null;
@@ -221,17 +231,21 @@ const fmtSize = (n) =>
   n > 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + " MB" : n > 1024 ? (n / 1024).toFixed(0) + " KB" : n + " B";
 
 const statusLabel = {
-  ok: "актуально",
-  avail: "обновить",
-  new: "новый",
-  modified: "изменён",
-  err: "ошибка",
-  "skip-user": "пропущен",
-  unknown: "—",
+  ok: T.st_ok,
+  avail: T.st_avail,
+  new: T.st_new,
+  modified: T.st_modified,
+  err: T.st_err,
+  "skip-user": T.st_skip,
+  unknown: T.st_unknown,
 };
 
 // ------------------------------------------------------------- тема оформления
 const THEMES = ["grey", "dark", "light"];
+let themeLockUntil = 0;
+// Тема, выбранная пользователем: защищает от отката, пока bootstrap с опозданием
+// присылает снапшот, снятый ДО сохранения темы (гонка set_theme ⇄ опрос).
+let themePicked = null;
 
 function applyTheme(theme) {
   const t = THEMES.includes(theme) ? theme : "grey";
@@ -248,17 +262,27 @@ function initTheme() {
 }
 
 function currentTheme() {
+  // Пока идёт блокировка после выбора — не слушаем запоздавший bootstrap.
+  if (themePicked && Date.now() < themeLockUntil) return themePicked;
   const fromState = B && B.settings && B.settings.theme;
   if (THEMES.includes(fromState)) return fromState;
   try { return localStorage.getItem("zgui.theme") || "grey"; } catch (_) { return "grey"; }
 }
 
 async function pickTheme(theme) {
+  // После смены темы кнопки блокируются на 5 секунд (тема применяется не мгновенно).
+  if (Date.now() < themeLockUntil) return;
   applyTheme(theme);
+  // Снапшот обновляем сразу: иначе следующий опрос bootstrap (раз в 4 с)
+  // применял бы старую тему из ещё не сохранённого state — тема «отпрыгивала».
+  if (B && B.settings) B.settings.theme = theme;
+  themePicked = theme;
+  themeLockUntil = Date.now() + 5000;
+  $$("#themeGrid .theme-card").forEach((c) => lockBtnFill(c, 5));
   try {
     await invoke("set_theme", { theme });
   } catch (e) {
-    toast("err", "тема: " + e);
+    toast("err", T.theme_err(e));
   }
 }
 
@@ -276,6 +300,15 @@ function btnBusy(btn, b) {
   btn.disabled = b;
 }
 
+/// Экранирование текста для вставки в innerHTML: сырые ошибки ОС/PowerShell
+/// могут содержать `<`, `&` — скрипты блокирует CSP, но HTML-инъекция в UI
+/// ни к чему.
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
+}
+
 function shortPath(p) {
   if (!p) return "—";
   return p;
@@ -283,20 +316,26 @@ function shortPath(p) {
 
 // ------------------------------------------------------------- bootstrap
 
-async function refreshAll(notify = false) {
+async function refreshAll() {
   try {
     B = await invoke("bootstrap");
     onBootstrap();
     checkTgOffer();
     tgVpnGuard();
-    if (notify) toast("ok", "статус обновлён");
   } catch (e) {
-    toast("err", "bootstrap: " + e);
+    toast("err", T.boot_err(e));
   }
 }
 
+// Предупреждение «настройки не сохраняются» показываем один раз за сессию.
+let saveFailedWarned = false;
+
 function onBootstrap() {
   applyTheme(currentTheme());
+  if (B.saveFailed && !saveFailedWarned) {
+    saveFailedWarned = true;
+    toast("warn", T.save_failed);
+  }
   renderRunBar();
   ensureEngineCards();
   renderProfileTabs();
@@ -306,12 +345,11 @@ function onBootstrap() {
   renderAdminBanner();
   renderProfiles();
   renderTestCard();
-  renderAutotune();
   renderAutostart();
   renderEngineUpd();
   renderSettings();
   const bt = B && B.updates && B.updates.lastCheck;
-  $("#lastCheck").textContent = bt ? "последняя проверка: " + tsText(Number(bt)) : "не проверялось";
+  $("#lastCheck").textContent = bt ? T.last_check(tsText(Number(bt))) : T.never_checked;
   renderUpdates($("#view-updates") === document.querySelector(".page.active") ? "force" : "lazy");
 }
 
@@ -334,7 +372,7 @@ function fillConflictList(ul, items) {
     if (g.pids.length > 1) {
       const cnt = document.createElement("span");
       cnt.className = "muted";
-      cnt.textContent = ` — ${g.pids.length} процессов`;
+      cnt.textContent = T.conflict_procs(g.pids.length);
       li.appendChild(cnt);
     } else if (g.pids.length === 1) {
       const pid = document.createElement("span");
@@ -361,17 +399,16 @@ function showConflict(report, opts = {}) {
   $("#conflictVpnWrap").classList.toggle("hidden", !vpn.length);
   $("#conflictText").classList.toggle("hidden", !(report.processes || []).length);
   $("#conflictList").classList.toggle("hidden", !(report.processes || []).length);
-  $("#conflictTitle").textContent = opts.title || "Обнаружено конфликтующее ПО";
-  $("#conflictHint").textContent = opts.hint || "Рекомендуем выгрузить эти процессы перед использованием.";
-  $("#btnKillConflicts").textContent = opts.killLabel || "Выгрузить процессы";
+  $("#conflictTitle").textContent = opts.title || T.conflict_title;
+  $("#conflictHint").textContent = opts.hint || T.conflict_hint;
+  $("#btnKillConflicts").textContent = opts.killLabel || T.btn_kill_conflicts;
   // Без прав администратора taskkill получит «отказано в доступе» — предупреждаем
   // и предлагаем перезапуск от админа (иначе будет поток запросов UAC).
   const adminHint = $("#conflictAdminHint");
   if (adminHint) {
     if (B && !B.elevated) {
       adminHint.style.display = "";
-      adminHint.textContent =
-        "Программа запущена без прав администратора — завершить процессы не удастся. Перезапустите от администратора (кнопка «Перезапустить от админа» в «Настройках») или завершите их в диспетчере задач.";
+      adminHint.textContent = T.conflict_admin_hint;
     } else {
       adminHint.style.display = "none";
       adminHint.textContent = "";
@@ -390,17 +427,23 @@ let conflictKilling = false;
 // ---- своё окно подтверждения (системный confirm() в WebView не показывается) ----
 let cmResolve = null;
 
-function showConfirm({ title, html, okLabel = "Продолжить", cancelLabel = "Отмена", danger = false, delaySec = 0 }) {
+function showConfirm({ title, html, okLabel = T.btn_continue, cancelLabel = T.btn_cancel, danger = false, okKind = "", lockSec = 0 }) {
   return new Promise((resolve) => {
+    // Повторный вызов перекрывает прошлый диалог: его await должен получить
+    // отказ, а не висеть вечно.
+    if (cmResolve) cmResolve(false);
     cmResolve = resolve;
     $("#cmTitle").textContent = title;
     $("#cmBody").innerHTML = html;
     const ok = $("#cmOk");
     ok.textContent = okLabel;
-    ok.className = "btn " + (danger ? "danger" : "primary");
+    ok.className = "btn " + (okKind || (danger ? "danger" : "primary"));
+    ok.classList.remove("fill-lock");
+    ok.disabled = false;
     $("#cmCancel").textContent = cancelLabel;
     $("#confirmModal").classList.remove("hidden");
-    if (delaySec > 0) lockBtnWithCountdown(ok, delaySec);
+    // 5 секунд на «прочитать риски»: кнопка заблокирована с заливкой-шкалой.
+    if (lockSec > 0) lockBtnFill(ok, lockSec);
   });
 }
 
@@ -497,37 +540,35 @@ function hideAdminOffer() {
   $("#adminModal").classList.add("hidden");
 }
 
-/// Блокирует кнопку на `secs` секунд и показывает рядом маленький таймер.
-/// Нужно, чтобы фоновый авто-прогон конфигов успел начаться до перезапуска.
-function lockBtnWithCountdown(btn, secs) {
-  if (btn.disabled) return;
-  btn.disabled = true;
-  const timer = document.createElement("span");
-  timer.className = "countdown-timer";
-  const update = () => {
-    timer.textContent = `…${secs}с`;
-    if (secs <= 0) {
-      clearInterval(iv);
-      timer.remove();
-      btn.disabled = false;
-    }
-  };
-  const iv = setInterval(() => {
-    secs--;
-    update();
-  }, 1000);
-  btn.after(timer);
-  update();
+/// Таймеры блокировки: повторный вызов на том же элементе отменяет прежний,
+/// иначе старый таймер сработает позже и разблокирует «не в своё время».
+const lockTimers = new WeakMap();
+
+/// Блокирует элемент на `secs` секунд, показывая заливку-«шкалу» слева-направо
+/// (без цифр таймера — по просьбе владельца).
+function lockBtnFill(el, secs) {
+  if (!el) return;
+  const prev = lockTimers.get(el);
+  if (prev) clearTimeout(prev);
+  el.disabled = true;
+  el.classList.add("fill-lock");
+  el.style.setProperty("--lock-sec", `${secs}s`);
+  const t = setTimeout(() => {
+    lockTimers.delete(el);
+    el.classList.remove("fill-lock");
+    el.style.removeProperty("--lock-sec");
+    el.disabled = false;
+  }, secs * 1000);
+  lockTimers.set(el, t);
 }
 
 /// Перезапуск от администратора — общий диалог для первого запуска, чекбокса
 /// в «Настройках» и кнопки «Перезапустить от админа».
 async function askRestartAdmin() {
   const ok = await showConfirm({
-    title: "Перезапуск от администратора",
-    okLabel: "Перезапустить",
-    html: `<p>Программа будет перезапущена с правами администратора.</p>
-           <p class="sub">Текущее окно закроется, откроется новое. Один раз подтвердите запрос Windows.</p>`,
+    title: T.admin_restart_title,
+    okLabel: T.btn_restart,
+    html: T.admin_restart_html,
   });
   if (!ok) return;
   try {
@@ -561,7 +602,7 @@ function renderWarnings() {
   el.innerHTML = "";
   const t = document.createElement("div");
   t.className = "warn-title";
-  t.textContent = "Важно перед запуском";
+  t.textContent = T.warn_title;
   el.appendChild(t);
   const ul = document.createElement("ul");
   ul.className = "warn-list";
@@ -578,31 +619,32 @@ function renderRunBar() {
   const rt = (B || {}).runtime || null;
   const st = $("#runState");
   const opRunning = !!(B && B.opRunning);
-  const nameOf = (id) => (B.profiles.find((p) => p.id === id) || {}).name || id || "";
+  const profiles = (B && B.profiles) || [];
+  const nameOf = (id) => (profiles.find((p) => p.id === id) || {}).name || id || "";
   const svcStrategy = (B.service && B.service.strategy) || null;
   if (opRunning) {
     // Идёт долгая операция (обновления, DNS, служба, сброс сети, тест):
     // старт/стоп профилей запрещён — взаимная блокировка.
     st.className = "run-state busy";
-    st.textContent = "идёт операция…";
+    st.textContent = T.run_op;
   } else if (owner === "test") {
     // Идёт прогон тестов: winws управляется тестом — останавливать его тулбаром нельзя.
     st.className = "run-state running";
-    st.textContent = "идёт тест стратегий";
+    st.textContent = T.run_test;
   } else if (owner === "app") {
     st.className = "run-state running";
-    st.textContent = rt ? nameOf(rt.profileId) : "запущено";
+    st.textContent = rt ? nameOf(rt.profileId) : T.run_started;
   } else if (owner === "service") {
     st.className = "run-state running";
-    st.textContent = "служба: " + (svcStrategy ? nameOf(svcStrategy) : "запущена");
+    st.textContent = T.run_service(svcStrategy ? nameOf(svcStrategy) : T.service_running);
   } else if (owner === "external") {
     // winws нашего движка поднят вне программы (ручной .bat): показываем и
     // разрешаем остановить, иначе второй winws конфликтует с запущенным.
     st.className = "run-state running";
-    st.textContent = "winws запущен вне программы";
+    st.textContent = T.run_external;
   } else {
     st.className = "run-state idle";
-    st.textContent = "не запущено";
+    st.textContent = T.run_idle;
   }
   $("#btnStop").disabled = opRunning || !["app", "service", "external"].includes(owner);
 }
@@ -617,7 +659,7 @@ function renderWatchdog(s) {
     el.className = "muted";
     return;
   }
-  el.textContent = s.alarm ? "стратегия не отвечает" : "стратегия активна";
+  el.textContent = s.alarm ? T.wd_alarm : T.wd_ok;
   el.className = s.alarm ? "muted err" : "muted ok";
 }
 
@@ -633,7 +675,7 @@ function renderEngines() {
 
     if (info.path) {
       st.className = "state-chip " + (info.ready ? "ok" : "bad");
-      st.textContent = info.ready ? "готов" : "нужен файл " + (info.exe || "");
+      st.textContent = info.ready ? T.eng_ready : T.eng_need_file(info.exe || "");
       rootEl.innerHTML = "";
       const pathEl = document.createElement("span");
       pathEl.className = "root-path";
@@ -642,8 +684,8 @@ function renderEngines() {
 
       const acts = document.createElement("div");
       acts.className = "root-actions";
-      acts.appendChild(btn("Открыть папку", "ghost", () => invoke("open_path", { path: info.path })));
-      acts.appendChild(btn("Сменить…", "ghost", async () => {
+      acts.appendChild(btn(T.btn_open_folder, "ghost", () => invoke("open_path", { path: info.path })));
+      acts.appendChild(btn(T.btn_change, "ghost", async () => {
         const dir = await open({ directory: true });
         if (dir) {
           try {
@@ -654,16 +696,16 @@ function renderEngines() {
           }
         }
       }));
-      acts.appendChild(btn("Обновить движок", "ghost", () => doFetch(eng)));
+      acts.appendChild(btn(T.btn_update_engine, "ghost", () => doFetch(eng)));
       rootEl.appendChild(acts);
     } else {
       st.className = "state-chip warn";
-      st.textContent = "не установлен";
+      st.textContent = T.eng_not_installed;
       rootEl.innerHTML = "";
       const acts = document.createElement("div");
       acts.className = "root-actions";
-       acts.appendChild(btn("Установить движок", "primary", () => doFetch(eng)));
-      acts.appendChild(btn("Выбрать папку…", "ghost", async () => {
+       acts.appendChild(btn(T.btn_install_engine, "primary", () => doFetch(eng)));
+      acts.appendChild(btn(T.btn_pick_folder, "ghost", async () => {
         const dir = await open({ directory: true });
         if (dir) {
           try {
@@ -690,7 +732,7 @@ function renderEngines() {
 function doFetch(eng) {
   btnBusy($("#engine-" + eng + " .btn.primary"), true);
   const label = engineLabel(eng);
-  toast("info", `Скачиваю движок ${label}… это может занять пару минут`);
+  toast("info", T.engine_downloading(label));
   invoke("fetch_engine", { engine: eng, dest: null })
     .catch((e) => toast("err", String(e)))
     .finally(() => setTimeout(() => btnBusy($("#engine-" + eng + " .btn.primary"), false), 3000));
@@ -701,6 +743,22 @@ function doFetch(eng) {
 function engineLabel(id) {
   const e = ((B && B.engines) || []).find((x) => x.id === id);
   return e ? e.label : id;
+}
+
+// Цветовые метки движков (●): одинаковые во всех списках и плитках.
+const ENGINE_COLORS = {
+  flowseal: "#5865f2",
+  zapret2: "#a78bfa",
+  goodbyedpi: "#34d399",
+  dpibreak: "#ffb833",
+};
+
+/// Кружок-метка движка для вставки рядом с названием.
+function engDot(id) {
+  const s = document.createElement("span");
+  s.className = "eng-dot";
+  s.style.background = ENGINE_COLORS[id] || "var(--muted)";
+  return s;
 }
 
 /// Карточки движков на вкладке «Обновления»: статичные для flowseal (HTML),
@@ -721,7 +779,8 @@ function ensureEngineCards() {
     head.className = "tile-head";
     const h = document.createElement("span");
     h.className = "tile-name";
-    h.textContent = e.label;
+    h.appendChild(engDot(e.id));
+    h.appendChild(document.createTextNode(e.label));
     const chip = document.createElement("span");
     chip.className = "chip";
     chip.textContent = e.exe || "";
@@ -734,13 +793,18 @@ function ensureEngineCards() {
     card.appendChild(head);
     const sub = document.createElement("p");
     sub.className = "muted tile-note";
-    sub.textContent = "Скачивается из последнего релиза " + (e.repo || "");
+    sub.textContent = T.engine_from_release(e.repo || "");
     card.appendChild(sub);
     const root = document.createElement("div");
     root.className = "root-row";
     root.id = "engRoot-" + e.id;
     card.appendChild(root);
     wrap.appendChild(card);
+  }
+  // Метки-кружки и у статичных карточек (flowseal в HTML) — по id движка.
+  for (const e of B.engines) {
+    const nameEl = document.querySelector("#engine-" + CSS.escape(e.id) + " .tile-name");
+    if (nameEl && !nameEl.querySelector(".eng-dot")) nameEl.prepend(engDot(e.id));
   }
 }
 
@@ -766,16 +830,17 @@ function buildEngineTabs(wrap, current, onPick, includeAll = true) {
     t.className = "tab" + (current === filter ? " active" : "");
     t.dataset.filter = filter;
     t.textContent = label;
+    if (filter !== "all") t.prepend(engDot(filter));
     if (ready === false) {
       const dot = document.createElement("span");
       dot.className = "tab-dot";
-      dot.title = "движок не установлен — нажмите «Скачать» на вкладке «Обновления»";
+      dot.title = T.tab_not_installed;
       t.appendChild(dot);
     }
     t.addEventListener("click", () => onPick(filter));
     wrap.appendChild(t);
   };
-  if (includeAll) mk("all", "Все");
+  if (includeAll) mk("all", T.filter_all);
   for (const e of B.engines) mk(e.id, e.label, e.ready);
 }
 
@@ -825,7 +890,6 @@ function renderProfiles() {
   // не входила в sig, и чипы «автозапуск»/«служба»/счёт не обновлялись.
   const sig = JSON.stringify([
     profileFilter,
-    profSort,
     B.profiles,
     B.runtime,
     B.busy,
@@ -838,13 +902,9 @@ function renderProfiles() {
   if (sig === sigProfiles) return;
   sigProfiles = sig;
   list.innerHTML = "";
-  const profs = (B.profiles || []).filter(
-    (p) =>
-      (profileFilter === "all" || p.engine === profileFilter) &&
-      (profSort !== "auto" || String(p.source || "").startsWith("auto:")),
-  );
+  const profs = (B.profiles || []).filter((p) => profileFilter === "all" || p.engine === profileFilter);
   if (!profs.length) {
-    list.innerHTML = '<div class="empty">Нет профилей. Синхронизируйте каталог или создайте свой.</div>';
+    list.innerHTML = `<div class="empty">${T.profiles_empty}</div>`;
     return;
   }
   const autoProfile = B.settings && B.settings.autostart_profile;
@@ -871,12 +931,13 @@ function renderProfiles() {
     chips.className = "profile-chips";
     const eng = document.createElement("span");
     eng.className = "chip";
-    eng.textContent = p.engine === "flowseal" ? "winws" : engineLabel(p.engine);
+    eng.appendChild(engDot(p.engine));
+    eng.appendChild(document.createTextNode(p.engine === "flowseal" ? "winws" : engineLabel(p.engine)));
     chips.appendChild(eng);
     if (bestId === p.id) {
       const b = document.createElement("span");
       b.className = "chip best";
-      b.textContent = "лучшая";
+      b.textContent = T.chip_best;
       chips.appendChild(b);
     }
     const cached = testCache && (testCache.results || []).find((r) => r.id === p.id);
@@ -889,25 +950,19 @@ function renderProfiles() {
     if (p.builtin) {
       const b = document.createElement("span");
       b.className = "chip";
-      b.textContent = "шаблон";
-      chips.appendChild(b);
-    }
-    if (p.source && p.source.startsWith("auto:")) {
-      const b = document.createElement("span");
-      b.className = "chip";
-      b.textContent = "автоподбор";
+      b.textContent = T.chip_builtin;
       chips.appendChild(b);
     }
     if (autoProfile === p.id) {
       const b = document.createElement("span");
       b.className = "chip best";
-      b.textContent = "автозапуск";
+      b.textContent = T.chip_autostart;
       chips.appendChild(b);
     }
     if (B.service && B.service.installed && B.service.strategy === p.id) {
       const b = document.createElement("span");
       b.className = "chip best";
-      b.textContent = "служба";
+      b.textContent = T.chip_service;
       chips.appendChild(b);
     }
     tile.appendChild(chips);
@@ -915,7 +970,7 @@ function renderProfiles() {
     // Кнопки.
     const acts = document.createElement("div");
     acts.className = "profile-actions";
-    const runBtn = btn(isRun ? "Остановить" : "Запустить", "primary", async () => {
+    const runBtn = btn(isRun ? T.btn_stop : T.btn_start, "primary", async () => {
       const doStart = async () => {
         btnBusy(runBtn, true);
         try {
@@ -940,7 +995,7 @@ function renderProfiles() {
     acts.appendChild(runBtn);
     const more = btn("⋯", "ghost", () => openProfileModal(p));
     more.classList.add("profile-more");
-    more.title = "Параметры стратегии";
+    more.title = T.profile_args_title;
     acts.appendChild(more);
     tile.appendChild(acts);
 
@@ -955,14 +1010,11 @@ function openProfileModal(p) {
   pmProfile = p;
   $("#pmTitle").textContent = p.name;
   const bits = [];
-  bits.push(p.engine === "flowseal" ? "движок winws" : "движок " + engineLabel(p.engine));
-  if (p.updatedAt) bits.push("обновлён " + tsText(Number(p.updatedAt)));
+  bits.push(T.pm_engine(p.engine === "flowseal" ? "winws" : engineLabel(p.engine)));
+  if (p.updatedAt) bits.push(T.pm_updated(tsText(Number(p.updatedAt))));
   if (p.source) bits.push(p.source);
   $("#pmMeta").textContent = bits.join(" · ");
   $("#pmArgs").textContent = (p.args || []).join("\n");
-  const authorProfile =
-    p.builtin || (p.source && (p.source.startsWith("preset:") || p.source.toLowerCase().endsWith(".bat")));
-  $("#pmDelete").classList.toggle("hidden", !!authorProfile);
   $("#profileModal").classList.remove("hidden");
 }
 
@@ -974,7 +1026,7 @@ function closeProfileModal() {
 // ------------------------------------------------------------- test
 
 function flowsealProfiles() {
-  // Все профили УСТАНОВЛЕННЫХ движков (матрица автоподбора).
+  // Все профили УСТАНОВЛЕННЫХ движков (стратегии для теста).
   // B может быть null в момент перезагрузки (zgui:updates) — не роняем рендер.
   const engines = ((B && B.engines) || []).filter((e) => e.ready).map((e) => e.id);
   return ((B && B.profiles) || []).filter((p) => engines.includes(p.engine));
@@ -1007,20 +1059,18 @@ function renderTestCard() {
   sigTestCard = sig;
   renderTestTabs();
   if (!all.length) {
-    pick.innerHTML = '<div class="empty">Нет доступных движков — скачайте хотя бы один на вкладке «Обновления».</div>';
+    pick.innerHTML = `<div class="empty">${T.test_no_engines}</div>`;
     $("#btnRunTest").disabled = true;
     return;
   }
   // Таб движка фильтрует список кандидатов (как во вкладке «Стратегии»).
   const profs = testEngineFilter ? all.filter((p) => p.engine === testEngineFilter) : all;
   if (!profs.length) {
-    pick.innerHTML = '<div class="empty">У этого движка нет стратегий. Выберите «Все» или другой движок.</div>';
+    pick.innerHTML = `<div class="empty">${T.test_no_strategies}</div>`;
     $("#btnRunTest").disabled = true;
     return;
   }
   $("#btnRunTest").disabled = !!(testState && testState.running);
-  if ($("#btnRunGeoblock")) $("#btnRunGeoblock").disabled = !!(testState && testState.running);
-  if ($("#btnRunExtra")) $("#btnRunExtra").disabled = !!(testState && testState.running);
   if ($("#btnStopTest")) $("#btnStopTest").disabled = !(testState && testState.running);
   const ids = profs.map((p) => p.id);
   $("#testSelectAll").checked = testPicked === null || ids.every((id) => testPicked.has(id));
@@ -1048,7 +1098,7 @@ function renderTestCard() {
     if (p.id === best) {
       const b = document.createElement("span");
       b.className = "chip best";
-      b.textContent = "лучшая";
+      b.textContent = T.chip_best;
       wrap.appendChild(b);
     }
     const cached = testCache && (testCache.results || []).find((r) => r.id === p.id);
@@ -1125,13 +1175,13 @@ function renderTestResults() {
     bestBox.innerHTML = "";
     const t = document.createElement("div");
     t.className = "test-best-title";
-    t.textContent = `Лучшая стратегия: ${bestRes.name}`;
+    t.textContent = T.test_best(bestRes.name);
     bestBox.appendChild(t);
-    const b = btn("Применить: автозапуск + запустить сейчас", "primary small", async () => {
+    const b = btn(T.btn_apply_best, "primary small", async () => {
       btnBusy(b, true);
       try {
         await invoke("apply_best_strategy", { id: bestInView });
-        toast("ok", "готово: автозапуск включён, стратегия запущена");
+        toast("ok", T.test_best_applied);
       } catch (e) {
         toast("err", String(e));
       }
@@ -1146,8 +1196,8 @@ function renderTestResults() {
     const t = document.createElement("div");
     t.className = "test-best-title muted";
     t.textContent =
-      "Нет успешной стратегии среди выбранных — все варианты не прошли контрольные домены."
-      + (testEngineFilter ? " Попробуйте другой движок или «Подбор стратегии»." : "");
+      T.test_no_success
+      + (testEngineFilter ? " " + T.test_no_success_hint + "." : "");
     bestBox.appendChild(t);
   } else {
     bestBox.classList.add("hidden");
@@ -1168,11 +1218,12 @@ function renderTestResults() {
       head.appendChild(nm);
       const grp = document.createElement("span");
       grp.className = "chip";
-      grp.textContent = engineLabel(p.engine) || p.engine;
+      grp.appendChild(engDot(p.engine));
+      grp.appendChild(document.createTextNode(engineLabel(p.engine) || p.engine));
       head.appendChild(grp);
       const sc = document.createElement("span");
       sc.className = "test-row-score";
-      sc.textContent = "не тестировалась";
+      sc.textContent = T.test_untested;
       head.appendChild(sc);
       row.appendChild(head);
       box.appendChild(row);
@@ -1188,11 +1239,12 @@ function renderTestResults() {
     head.appendChild(nm);
     const grp = document.createElement("span");
     grp.className = "chip";
-    grp.textContent = engineLabel(r.engine) || r.engine;
+    grp.appendChild(engDot(r.engine));
+    grp.appendChild(document.createTextNode(engineLabel(r.engine) || r.engine));
     head.appendChild(grp);
     const sc = document.createElement("span");
     sc.className = "test-row-score";
-    sc.textContent = r.started ? (r.criticalOk ? "успешна" : "критические домены не прошли") : "не запустилась";
+    sc.textContent = r.started ? (r.criticalOk ? T.test_ok : T.test_crit_fail) : T.test_not_started;
     head.appendChild(sc);
     row.appendChild(head);
     if (r.error) {
@@ -1214,8 +1266,8 @@ function renderTestResults() {
         // приговором без доказательств.
         const badHosts = (r.domains || []).filter((d) => !d.ok && d.group === g.id).map((d) => d.host);
         chip.title = badHosts.length
-          ? `Не ответили: ${badHosts.join(", ")}`
-          : `Ответили все проверенные домены группы`;
+          ? T.test_bad_hosts(badHosts.join(", "))
+          : T.test_all_hosts_ok;
         chip.appendChild(chipMark(g.ok));
         summary.appendChild(chip);
       }
@@ -1228,7 +1280,7 @@ function renderTestResults() {
       if (openTestDetails.has(r.id)) details.open = true;
       trackDetails(details, openTestDetails);
       const summary = document.createElement("summary");
-      summary.textContent = `Подробности по доменам (${r.score}/${r.maxScore})`;
+      summary.textContent = T.test_details(r.score, r.maxScore);
       details.appendChild(summary);
       const doms = document.createElement("div");
       doms.className = "test-doms";
@@ -1247,213 +1299,56 @@ function renderTestResults() {
   }
 }
 
-// ------------------------------------------------------------- autotune
+/// Предупреждение в диалогах запуска теста: прогон стратегии может
+/// кратко оборвать интернет (движок перехватывает трафик), это нормально.
+const NET_HINT_HTML = T.test_net_hint;
 
-// Выбранный движок и id последних кандидатов подбора.
-let autotuneEngine = null;
-let autotuneIds = null;
-let autotuneTabsSig = "";
-
-function autotuneEngineDefault() {
-  const ready = ((B && B.engines) || []).filter((e) => e.ready);
-  return ready.length ? ready[0].id : null;
-}
-
-function renderAutotune() {
-  const wrap = $("#autoTabs");
-  if (!wrap) return;
-  if (!autotuneEngine) autotuneEngine = autotuneEngineDefault();
-  const sig =
-    ((B && B.engines) || []).map((e) => `${e.id}:${e.ready ? 1 : 0}`).join(",") + "|" + (autotuneEngine || "");
-  if (sig !== autotuneTabsSig) {
-    autotuneTabsSig = sig;
-    buildEngineTabs(
-      wrap,
-      autotuneEngine || "all",
-      (f) => {
-        autotuneEngine = f;
-        autotuneIds = null;
-        renderAutotune();
-      },
-      false,
-    );
-  }
-  const running = !!(testState && testState.running);
-  $("#btnRunAutotune").disabled = running || !autotuneEngine;
-  $("#btnStopAutotune").disabled = !running;
-
-  const bar = $("#autoProgBar");
-  if (testState && testState.total && (testState.running || testState.phase !== "done")) {
-    bar.classList.remove("hidden");
-    $("#autoProgFill").style.width = Math.max(0, Math.min(100, testState.pct || 0)) + "%";
-    $("#autoProgLabel").textContent = `${testState.msg || ""} (${testState.index}/${testState.total})`;
-  } else {
-    bar.classList.add("hidden");
-  }
-
-  const ids = autotuneIds || [];
-  const results = ((testState && testState.results) || []).filter((r) => ids.includes(r.id));
-  const bestBox = $("#autoBest");
-  bestBox.classList.add("hidden");
-  bestBox.innerHTML = "";
-  const list = $("#autoList");
-  list.innerHTML = "";
-  if (!results.length) {
-    list.innerHTML = `<div class="empty">Нажмите «Подобрать»${autotuneEngine ? " для " + engineLabel(autotuneEngine) : ""} — переберём кандидатов.</div>`;
-    return;
-  }
-  const best = testState && testState.bestId && ids.includes(testState.bestId) ? testState.bestId : null;
-  if (best && testState.done) {
-    const bo = results.find((r) => r.id === best);
-    bestBox.classList.remove("hidden");
-    const t = document.createElement("div");
-    t.className = "test-best-title";
-    t.textContent = `Лучшая: ${bo ? bo.name : best}`;
-    bestBox.appendChild(t);
-    const keep = btn("Оставить в профилях", "primary small", async () => {
-      btnBusy(keep, true);
-      try {
-        await invoke("autotune_keep", { engine: autotuneEngine, id: best });
-        toast("ok", "лучшая стратегия оставлена в «Стратегиях» (чип «автоподбор»)");
-        await refreshAll();
-      } catch (e) {
-        toast("err", String(e));
-      }
-      btnBusy(keep, false);
-    });
-    const apply = btn("Применить: автозапуск + запустить", "ghost small", async () => {
-      btnBusy(apply, true);
-      try {
-        await invoke("apply_best_strategy", { id: best });
-        toast("ok", "применено: автозапуск включён, стратегия запущена");
-      } catch (e) {
-        toast("err", String(e));
-      }
-      btnBusy(apply, false);
-      await refreshAll();
-    });
-    bestBox.appendChild(keep);
-    bestBox.appendChild(apply);
-  }
-  for (const r of results.slice().sort((a, b) => b.score - a.score)) {
-    const row = document.createElement("div");
-    row.className = "test-row " + (r.criticalOk ? "ok" : r.started && r.score > 0 ? "part" : "bad");
-    const head = document.createElement("div");
-    head.className = "test-row-head";
-    const nm = document.createElement("span");
-    nm.className = "test-row-name";
-    nm.textContent = r.name;
-    head.appendChild(nm);
-    const sc = document.createElement("span");
-    sc.className = "test-row-score";
-    sc.textContent = r.started ? `${r.score}/${r.maxScore}` : "не запустилась";
-    head.appendChild(sc);
-    row.appendChild(head);
-    if (r.error) {
-      const er = document.createElement("div");
-      er.className = "muted";
-      er.style.fontSize = "11px";
-      er.textContent = r.error;
-      row.appendChild(er);
-    }
-    list.appendChild(row);
-  }
-}
-
-async function runAutotune() {
-  const eng = autotuneEngine || autotuneEngineDefault();
-  if (!eng) {
-    toast("warn", "нет установленных движков — скачайте движок на вкладке «Обновления»");
-    return;
-  }
-  if (B && B.opRunning) {
-    toast("warn", "идёт другая операция — дождитесь завершения");
-    return;
-  }
-  try {
-    const ok = await showConfirm({
-      title: "Подбор стратегии",
-      okLabel: "Запустить",
-      html: `<p>Для движка <b>${engineLabel(eng)}</b> переберём вшитые пресеты и сгенерированные варианты обхода.</p>
-             <p class="sub">Windows запросит права администратора — один раз на весь подбор.</p>`,
-    });
-    if (!ok) return;
-    // Кандидатов сохраняем только после согласия (иначе мусор в профилях).
-    const profs = await invoke("autotune_prepare", { engine: eng });
-    autotuneIds = profs.map((p) => p.id);
-    if (!autotuneIds.length) {
-      toast("warn", "нет кандидатов для подбора");
-      return;
-    }
-    // Мост «тест ⇄ подбор»: свежие результаты прежних прогонов не гоняем повторно.
-    await invoke("test_strategies", { ids: autotuneIds, mode: "main", reuse: true });
-    toast("info", "подбор запущен");
-  } catch (e) {
-    toast("err", String(e));
-  }
-}
-
-async function runTest(already, mode) {
-  const geoblock = mode === "geoblock";
-  const extra = mode === "extra";
+async function runTest(already) {
   const profs = visibleTestProfiles();
   // Учитываем текущий вид (движок/таб): если выбор пуст или содержит id не из
   // текущего вида, берём все видимые стратегии. Иначе тест уходил бы по чужим id.
   let useIds = testPicked === null ? profs.map((p) => p.id) : [...testPicked].filter((id) => profs.some((p) => p.id === id));
   if (!useIds.length) useIds = profs.map((p) => p.id);
   if (!useIds.length) {
-    toast("warn", "не выбрано ни одной стратегии");
+    toast("warn", T.nothing_selected);
     return;
   }
-  const btn = geoblock ? $("#btnRunGeoblock") : extra ? $("#btnRunExtra") : $("#btnRunTest");
+  const btn = $("#btnRunTest");
   // Взаимная блокировка: тест не запускается параллельно с другой операцией.
   if (B && B.opRunning) {
-    toast("warn", "идёт другая операция — дождитесь завершения");
+    toast("warn", T.test_busy_other);
     return;
   }
   if (!already) {
-    const extraPath = ((B && B.data_dir) || "") + "\\catalog\\test-domains-extra.lst";
-    const adminHint = `<p class="sub">Windows запросит права администратора — они нужны, чтобы
-             запускать обход (один раз на весь тест).</p>`;
-    const html = geoblock
-      ? `<p>Будет прогнан <b>весь онлайн-список geoblock</b> (без лимита) по выбранным стратегиям,
-           с базовой пробой без Zapret.</p>
-         <p class="sub"><b>Проверка может занять от 10 до 20 часов.</b> Не рекомендуется гонять
-           сразу все движки и конфиги — выберите один-два движка и ограниченный список стратегий.</p>` + adminHint
-      : extra
-      ? `<p>Будет прогнан <b>ваш список доп. доменов</b> по ${useIds.length} выбранным стратегиям.
-           В стандартном тесте эти домены не проверяются.</p>
-         <p class="sub">Список лежит в файле <code>${extraPath}</code> — правьте его в блокноте
-           (один домен в строке, строки с # игнорируются).</p>
-         <p class="sub"><b>Не рекомендуется гонять сразу все движки и конфиги</b> — это долго.
-           Выберите один-два движка.</p>` + adminHint
-      : `<p>Будет запущено <b>${useIds.length}</b> стратегий по очереди (все выбранные движки).</p>
-         <p class="sub">Проверяются критические домены (YouTube, Discord); Microsoft/Xbox, Google,
-           Cloudflare — вторые по приоритету (для успеха не обязательны). Доп. домены — отдельной
-           кнопкой «Доп. домены».</p>` + adminHint;
     const ok = await showConfirm({
-      title: geoblock ? "Геоблок-тест" : extra ? "Тест доп. доменов" : "Тест стратегий",
-      okLabel: "Запустить",
-      cancelLabel: "Отмена",
-      html,
+      title: T.test_confirm_title,
+      okLabel: T.btn_run,
+      cancelLabel: T.btn_cancel,
+      okKind: "warn",
+      // 5 секунд на «прочитать риски»: кнопка заблокирована с заливкой-шкалой.
+      lockSec: 5,
+      html:
+        T.test_confirm_html(useIds.length) +
+        NET_HINT_HTML +
+        T.test_admin_hint,
     });
     if (!ok) return;
   }
   btnBusy(btn, true);
   try {
-    await invoke("test_strategies", { ids: useIds, mode: geoblock ? "geoblock" : extra ? "extra" : "main" });
-    toast("info", geoblock ? "геоблок-тест запущен" : extra ? "тест доп. доменов запущен" : "тест стратегий запущен");
+    await invoke("test_strategies", { ids: useIds });
+    toast("info", T.test_started);
   } catch (e) {
     const msg = String(e);
     if (msg.includes("VPN_RUNNING")) {
       const report = await invoke("vpn_check").catch(() => ({ vpn: [] }));
       showConflict(report, {
-        title: "VPN мешает тесту",
-        hint: "На время теста стратегий VPN нужно выгрузить. Выгрузить VPN и продолжить тест?",
-        killLabel: "Выгрузить VPN и продолжить",
+        title: T.vpn_test_title,
+        hint: T.vpn_test_hint,
+        killLabel: T.vpn_test_kill,
         onKilled: async () => {
           await new Promise((r) => setTimeout(r, 1500));
-          runTest(true, mode);
+          runTest(true);
         },
       });
     } else {
@@ -1468,28 +1363,6 @@ async function loadTestCache() {
     testCache = await invoke("test_cache");
     renderTestCard();
   } catch (_) {}
-}
-
-// ------------------------------------------------------------- new profile
-
-function showNewProfileCard(on) {
-  $("#newProfileCard").classList.toggle("hidden", !on);
-  if (on) {
-    $("#npName").value = "";
-    $("#npArgs").value = "";
-    const sel = $("#npEngine");
-    if (sel && B.engines) {
-      sel.innerHTML = "";
-      for (const e of B.engines) {
-        const o = document.createElement("option");
-        o.value = e.id;
-        o.textContent = e.label + (e.ready ? "" : " (не установлен)");
-        sel.appendChild(o);
-      }
-      // Открыт с активного фильтра движка — сразу подставляем его.
-      if (profileFilter !== "all") sel.value = profileFilter;
-    }
-  }
 }
 
 // ------------------------------------------------------------- updates
@@ -1507,19 +1380,15 @@ function renderEngineUpd() {
     return;
   }
   if (u.error) {
-    el.textContent = "Не удалось проверить обновление движка.";
+    el.textContent = T.engine_check_fail;
     el.className = "muted card-sub warn";
     return;
   }
   if (u.upToDate) {
-    el.textContent = `Движок актуален${u.installed ? " (" + u.installed + ")" : ""}.`;
+    el.textContent = T.engine_uptodate(u.installed || "");
     el.className = "muted card-sub";
   } else {
-    el.textContent =
-      "Доступно обновление движка" +
-      (u.latest ? ": " + u.latest : "") +
-      (u.installed ? " (у вас " + u.installed + ")" : "") +
-      ". Нажмите «Обновить движок».";
+    el.textContent = T.engine_update_available(u.latest || "", u.installed || "");
     el.className = "muted card-sub warn";
   }
 }
@@ -1561,7 +1430,7 @@ function clearUpdatesBusy() {
 
 // Одной кнопкой проверяем всё: конфиги, движок и Telegram-мост.
 async function doCheck() {
-  setUpdatesBusy("Проверяю обновления (конфиги, движок, Telegram)…", 180000);
+  setUpdatesBusy(T.upd_checking, 180000);
   try {
     await invoke("check_updates");
     engineUpdate = await invoke("engine_check_update").catch(() => null);
@@ -1574,13 +1443,13 @@ async function doCheck() {
 }
 
 async function doApply(ids) {
-  setUpdatesBusy("Применяю обновления…", 300000);
+  setUpdatesBusy(T.upd_applying, 300000);
   try {
     await invoke("apply_updates", { ids });
-    toast("info", "применение запущено…");
+    toast("info", T.upd_apply_started);
   } catch (e) {
     clearUpdatesBusy();
-    toast("err", "применение: " + e);
+    toast("err", T.upd_apply_err(e));
   }
 }
 
@@ -1599,8 +1468,8 @@ function renderUpdates(mode) {
 
   if (!entries.length) {
     const emptyText = (B.updates || {}).lastCheck
-      ? "Каталог пуст. Сначала установите движки, затем «Проверить обновления»."
-      : "Каталог загружается автоматически при старте…";
+      ? T.upd_empty
+      : T.upd_loading;
     upd.innerHTML = `<div class="empty">${emptyText}</div>`;
     return;
   }
@@ -1619,7 +1488,7 @@ function renderUpdates(mode) {
     summary.appendChild(gt);
     const state = document.createElement("span");
     state.className = "group-state " + (errors ? "bad" : available ? "avail" : "ok");
-    state.textContent = errors ? `${errors} ошибок` : available ? `${available} обновить` : "актуально";
+    state.textContent = errors ? T.upd_group_err(errors) : available ? T.upd_group_avail(available) : T.st_ok;
     summary.appendChild(state);
     details.appendChild(summary);
     const content = document.createElement("div");
@@ -1636,7 +1505,6 @@ function renderUpdates(mode) {
 
       const label = document.createElement("span");
       label.className = "upd-label";
-      label.innerHTML = ``;
       const nameTxt = document.createElement("span");
       nameTxt.textContent = e.label;
       label.appendChild(nameTxt);
@@ -1697,14 +1565,18 @@ function updateProgress(ev) {
 // правками (например флажком «Всегда запускать от администратора» — он применяется сразу).
 function collectSettings() {
   return {
-    update_interval_hours: Number($("#cfInterval").value) || 0,
+    // Бэкенд хранит часы как u32: отрицательное или дробное значение ломало
+    // сохранение настроек, поэтому подрезаем прямо здесь.
+    update_interval_hours: Math.max(0, Math.floor(Number($("#cfInterval").value) || 0)),
     game_filter: $("#cfGameFilter").value,
+    game_filter_tcp: ($("#cfGameFilterTcp").value || "").trim() || "1024-65535",
+    game_filter_udp: ($("#cfGameFilterUdp").value || "").trim() || "1024-65535",
     ipset_mode: $("#cfIpset").value,
     autostart_mode: $("#cfAutostart").value ? "profile" : "none",
     autostart_profile: $("#cfAutostart").value || null,
     always_admin: $("#cfAlwaysAdmin").checked,
     tg_autostart: $("#tgAutostart")?.checked || false,
-    tg_offer: $("#tgOffer") ? $("#tgOffer").checked : (B && B.settings ? B.settings.tg_offer !== false : true),
+    tg_offer: $("#tgOffer") ? $("#tgOffer").checked : (B && B.settings ? !!B.settings.tg_offer : false),
     tg_port: $("#tgPort")
       ? Number($("#tgPort").value) || 1443
       : (B && B.settings ? B.settings.tg_port || 1443 : 1443),
@@ -1720,11 +1592,13 @@ function renderSettings() {
   sigSettings = sig;
   $("#cfInterval").value = s.update_interval_hours ?? 72;
   $("#cfGameFilter").value = s.game_filter || "off";
+  if ($("#cfGameFilterTcp")) $("#cfGameFilterTcp").value = s.game_filter_tcp || "1024-65535";
+  if ($("#cfGameFilterUdp")) $("#cfGameFilterUdp").value = s.game_filter_udp || "1024-65535";
   $("#cfIpset").value = s.ipset_mode || "loaded";
   const adm = $("#cfAlwaysAdmin");
   if (adm) adm.checked = !!s.always_admin;
   if ($("#tgAutostart")) $("#tgAutostart").checked = !!s.tg_autostart;
-  if ($("#tgOffer")) $("#tgOffer").checked = s.tg_offer !== false;
+  if ($("#tgOffer")) $("#tgOffer").checked = !!s.tg_offer;
   if ($("#tgPort")) $("#tgPort").value = s.tg_port || 1443;
   renderDnsProviders();
 }
@@ -1755,7 +1629,7 @@ function renderAutostart() {
   if (sig !== sigAutostart) {
     sigAutostart = sig;
     const prev = chosenOld || s.autostart_profile || "";
-    sel.innerHTML = '<option value="">— не запускать —</option>';
+    sel.innerHTML = `<option value="">${T.auto_none}</option>`;
     for (const p of B.profiles || []) {
       const o = document.createElement("option");
       o.value = p.id;
@@ -1773,30 +1647,28 @@ function renderAutostart() {
   if (box) {
     box.checked = svcInstalled;
     box.disabled = !svcInstalled && !chosen;
-    box.title = !svcInstalled && !chosen ? "Сначала выберите профиль" : "";
+    box.title = !svcInstalled && !chosen ? T.auto_pick_first : "";
   }
 
   const chip = $("#bootStateChip");
   if (chip) {
-    chip.textContent = svcInstalled ? "служба" : bootOn ? "включён" : "выключен";
-    chip.className = "chip" + (svcInstalled || bootOn ? " best" : "");
+    chip.textContent = svcInstalled ? T.chip_service : bootOn ? T.auto_chip_on : T.auto_chip_off;
+        chip.className = "chip" + (svcInstalled || bootOn ? " best" : " off");
   }
 
   const note = $("#bootStateNote");
   if (note) {
     const profile = (B.profiles || []).find((p) => p.id === s.autostart_profile);
     if (svcInstalled) {
-      note.textContent =
-        "Обход включается сам службой — программа для запуска не нужна." +
-        (profile ? ` Профиль «${profile.name}».` : "");
+      note.textContent = T.auto_note_service(profile ? profile.name : "");
     } else if (bootOn && profile) {
-      note.textContent = `Автозапуск включён: при входе в Windows обход запустится сам — «${profile.name}».`;
+      note.textContent = T.auto_note_on(profile.name);
     } else if (bootOn && !profile) {
-      note.textContent = "Автозапуск включён, но профиль не выбран — выберите профиль.";
+      note.textContent = T.auto_note_no_profile;
     } else if (profile) {
-      note.textContent = `При входе будет запускаться «${profile.name}». Если не сработало — запустите программу от администратора.`;
+      note.textContent = T.auto_note_chosen(profile.name);
     } else {
-      note.textContent = "Автозапуск выключен.";
+      note.textContent = T.auto_note_off;
     }
   }
 }
@@ -1810,7 +1682,7 @@ function renderDnsProviders() {
     const o = document.createElement("option");
     o.value = p.id;
     const ms = dnsBench && dnsBench[p.id];
-    const ping = ms != null ? ` · ${ms} мс` : "";
+    const ping = ms != null ? T.dns_ms(ms) : "";
     o.textContent = `${p.name} · ${p.primary} / ${p.secondary}${ping}`;
     sel.appendChild(o);
   }
@@ -1824,8 +1696,8 @@ function renderDnsInfo() {
   const desc = $("#dnsDesc");
   if (!p || !info) return;
   const ms = dnsBench && dnsBench[p.id];
-  const ping = ms != null ? ` · пинг ~${ms} мс` : "";
-  info.textContent = `${p.note}${ping}. DoH: ${p.dohTemplate}; UDP fallback: выключен.`;
+  const ping = ms != null ? T.dns_ping(ms) : "";
+  info.textContent = T.dns_info(p.note, ping, p.dohTemplate);
   if (desc) {
     desc.textContent = p.description || "";
     desc.classList.toggle("hidden", !p.description);
@@ -1838,7 +1710,7 @@ async function runDnsBenchmark() {
   if (!btn || !out) return;
   btnBusy(btn, true);
   out.classList.remove("hidden");
-  out.textContent = "Тестирую пинг (медиана из 3 запросов на адрес)…";
+  out.textContent = T.dns_bench_running;
   try {
     const res = await invoke("dns_benchmark", {});
     dnsBench = {};
@@ -1851,14 +1723,14 @@ async function runDnsBenchmark() {
       .sort((a, b) => (a.avgMs ?? 1e9) - (b.avgMs ?? 1e9))
       .map((r) => {
         const name = dnsProviders.find((p) => p.id === r.id)?.name || r.id;
-        const val = r.avgMs != null ? `${r.avgMs} мс` : (r.error || "н/д");
+        const val = r.avgMs != null ? T.dns_ms_val(r.avgMs) : (r.error || T.dns_na);
         return `<div class="dns-bench-row"><span>${name}</span><span>${val}</span></div>`;
       })
       .join("");
-    out.innerHTML = `<div class="dns-bench-note">Пинг DNS (меньше — быстрее):</div>${rows}`;
+    out.innerHTML = `<div class="dns-bench-note">${T.dns_bench_title}</div>${rows}`;
     renderDnsProviders();
   } catch (e) {
-    out.textContent = "Не удалось замерить: " + e;
+    out.textContent = T.dns_bench_fail(e);
   } finally {
     btnBusy(btn, false);
   }
@@ -1870,7 +1742,7 @@ async function loadDnsProviders() {
     renderDnsProviders();
   } catch (e) {
     const info = $("#dnsInfo");
-    if (info) info.textContent = "Не удалось загрузить список DNS: " + e;
+    if (info) info.textContent = T.dns_load_fail(e);
   }
 }
 
@@ -1912,24 +1784,20 @@ async function refreshTg() {
 async function tgCheckBridge() {
   const el = $("#tgBridge");
   if (!el) return;
-  el.textContent = "Проверяю версию моста…";
+  el.textContent = T.tg_bridge_checking;
   el.className = "muted";
   try {
     const info = await invoke("tg_check_update");
     if (info.updateAvailable) {
-      el.textContent =
-        "Доступно обновление моста: " +
-        (info.upstreamVersion || "новее") +
-        " (у вас " +
-        info.localVersion +
-        "). Обновите Z GUI.";
+      el.textContent = T.tg_bridge_update(info.upstreamVersion, info.localVersion);
       el.className = "muted warn";
     } else {
-      el.textContent = "Мост актуален (версия " + info.localVersion + ").";
+      el.textContent = T.tg_bridge_ok(info.localVersion);
       el.className = "muted";
     }
   } catch (e) {
-    el.textContent = "";
+    el.textContent = T.err_short(e);
+    el.className = "muted err";
   }
 }
 
@@ -1940,20 +1808,19 @@ function renderTg() {
   const hint = $("#tgHint");
   if (!badge) return;
   const on = !!tgState.running;
-  badge.textContent = on ? "работает" : "выключен";
+  badge.textContent = on ? T.tg_on : T.tg_off;
   badge.classList.toggle("ok", on);
-  toggle.textContent = on ? "Выключить" : "Включить";
+  toggle.textContent = on ? T.btn_tg_off : T.btn_tg_on;
   toggle.classList.toggle("danger", on);
   connect.disabled = !on;
   if (tgState.error) {
-    hint.textContent = "Ошибка: " + tgState.error;
+    hint.textContent = T.err_short(tgState.error);
     hint.className = "muted err";
   } else if (on) {
-    hint.textContent = `Готово. Порт ${tgState.port}. Нажмите «Подключить Telegram».`;
+    hint.textContent = T.tg_ready(tgState.port);
     hint.className = "muted";
   } else {
-    hint.textContent =
-      "После включения нажмите «Подключить Telegram» — мессенджер настроится автоматически.";
+    hint.textContent = T.tg_hint_default;
     hint.className = "muted";
   }
   if (on && tgState.port && $("#tgPort")) $("#tgPort").value = tgState.port;
@@ -1966,11 +1833,14 @@ async function tgSavePrefs() {
       settings: {
         ...cfg,
         tg_autostart: $("#tgAutostart")?.checked || false,
-        tg_offer: $("#tgOffer") ? $("#tgOffer").checked : true,
+        tg_offer: $("#tgOffer") ? $("#tgOffer").checked : false,
         tg_port: $("#tgPort") ? Number($("#tgPort").value) || 1443 : (B && B.settings ? B.settings.tg_port : 1443) || 1443,
       },
     });
-  } catch (_) {}
+  } catch (e) {
+    toast("err", String(e));
+    refreshAll();
+  }
 }
 
 async function tgToggle() {
@@ -1978,11 +1848,11 @@ async function tgToggle() {
   try {
     if (tgState.running) {
       tgState = await invoke("tg_stop");
-      toast("info", "Telegram-прокси выключен");
+      toast("info", T.tg_stopped);
     } else {
       const port = Number($("#tgPort")?.value) || 1443;
       tgState = await invoke("tg_start", { port });
-      toast("ok", "Telegram-прокси включён");
+      toast("ok", T.tg_started);
     }
   } catch (e) {
     toast("err", String(e));
@@ -2003,20 +1873,27 @@ async function tgVpnGuard() {
 }
 
 /// Неблокирующее предложение Telegram-моста: Telegram запущен, VPN нет.
+/// Приоритет: сначала вопрос о правах администратора (первый запуск/модалка),
+/// только после него — TG-оффер. Галочку «предлагать» по умолчанию держим
+/// выключенной (см. Settings::tg_offer).
 let tgOfferShown = false;
 async function checkTgOffer() {
   if (tgOfferShown) return;
+  const s = (B && B.settings) || {};
+  if (!s.tg_offer) return;
+  if (adminOfferPending) return;
+  // Первый запуск: пока админ-вопрос не разрешён, оффер не показываем и не
+  // расходуем его одноразовый флаг в бэкенде.
+  if (!B.elevated && !s.always_admin && !s.admin_onboarded) return;
   let offer = false;
   try { offer = await invoke("tg_offer"); } catch (_) { return; }
   if (!offer) return;
   tgOfferShown = true;
   const ok = await showConfirm({
-    title: "Telegram-прокси",
-    okLabel: "Построить мост",
-    cancelLabel: "Не сейчас",
-    html: `<p>Запущен Telegram, VPN не обнаружен.</p>
-           <p class="sub">Собрать прокси-мост для Telegram? Мессенджер настроится
-             автоматически, трафик пойдёт через встроенный мост.</p>`,
+    title: T.tg_title,
+    okLabel: T.btn_tg_build,
+    cancelLabel: T.btn_not_now,
+    html: T.tg_offer_html,
   });
   if (!ok) return;
   try {
@@ -2024,7 +1901,7 @@ async function checkTgOffer() {
     tgState = await invoke("tg_start", { port });
     renderTg();
     if (tgState.link) await invoke("open_url", { url: tgState.link });
-    toast("ok", "Telegram-прокси включён");
+    toast("ok", T.tg_started);
   } catch (e) {
     toast("err", String(e));
   }
@@ -2032,17 +1909,17 @@ async function checkTgOffer() {
 
 async function tgConnect() {
   if (!tgState.link) {
-    toast("warn", "Сначала включите прокси");
+    toast("warn", T.tg_need_on);
     return;
   }
   try {
     await invoke("open_url", { url: tgState.link });
-    toast("info", "Открываю Telegram — подтвердите подключение");
+    toast("info", T.tg_opening);
   } catch (e) {
     // Fallback: скопировать ссылку в буфер.
     try {
       await navigator.clipboard.writeText(tgState.link);
-      toast("ok", "Ссылка скопирована в буфер обмена");
+      toast("ok", T.tg_link_copied);
     } catch (_) {
       toast("err", String(e));
     }
@@ -2051,6 +1928,27 @@ async function tgConnect() {
 
 // ------------------------------------------------------------- wiring
 
+// Страница «О программе»: RU-блок, разделитель, EN-блок. Версия — из бэкенда,
+// содержимое кэшируем: за сессию оно не меняется.
+async function renderAbout() {
+  const el = $("#aboutBody");
+  if (!el || el.dataset.ready) return;
+  let ver = "";
+  try {
+    const info = await invoke("app_info");
+    ver = (info && info.version) || "";
+  } catch (_) {}
+  el.innerHTML = T.about_ru_html(ver) + '<hr class="about-sep" />' + T.about_en_html(ver);
+  // Ссылки на авторов открываем системным браузером: навигация внутри WebView запрещена.
+  el.querySelectorAll("a[data-url]").forEach((a) =>
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      invoke("open_external", { target: a.dataset.url }).catch((err) => toast("err", String(err)));
+    }),
+  );
+  el.dataset.ready = "1";
+}
+
 function bindStatic() {
   $$(".nav-item").forEach((n) =>
     n.addEventListener("click", () => {
@@ -2058,21 +1956,29 @@ function bindStatic() {
       n.classList.add("active");
       $$(".page").forEach((p) => p.classList.remove("active"));
       $("#view-" + n.dataset.view).classList.add("active");
+      // Обновляем состояние при любом переходе: если событие zgui:op потерялось
+      // (зависла/пропала метка «идёт операция…»), вкладка это вылечит.
+      refreshAll();
       if (n.dataset.view === "updates") refreshAll();
       if (n.dataset.view === "telegram") refreshTg();
       if (n.dataset.view === "dns") loadDnsProviders();
       if (n.dataset.view === "appearance") applyTheme(currentTheme());
+      if (n.dataset.view === "about") renderAbout();
       if (n.dataset.view === "logs") openLogs();
       else stopLogPoll();
     }),
   );
 
   $("#btnStop").addEventListener("click", async () => {
+    const b = $("#btnStop");
+    btnBusy(b, true);
     try {
       await invoke("stop_running");
       await refreshAll();
     } catch (e) {
       toast("err", String(e));
+    } finally {
+      btnBusy(b, false);
     }
   });
 
@@ -2116,41 +2022,85 @@ function bindStatic() {
       logState.query = e.target.value;
       renderLog();
     });
-    $("#btnLogCopy").addEventListener("click", async () => {
-      const text = logVisible()
-        .map((e) => `[${logTime(e.ts)}] [${e.level}] ${e.scope}: ${e.msg}`)
-        .join("\n");
-      try {
-        await navigator.clipboard.writeText(text || "журнал пуст");
-        toast("ok", "журнал скопирован в буфер обмена");
-      } catch (_) {
-        toast("err", "не удалось скопировать журнал");
-      }
-    });
-    $("#btnLogClear").addEventListener("click", async () => {
-      const ok = await showConfirm({
-        title: "Очистить журнал?",
-        html: "Записи в окне и в файле <b>zgui.log</b> будут удалены.",
-        okLabel: "Очистить",
-        danger: true,
-      });
-      if (!ok) return;
-      try {
-        await invoke("log_clear");
-      } catch (_) {}
-      logState.items = [];
-      logState.seq = 0;
-      renderLog();
-      toast("ok", "журнал очищен");
-    });
     $("#btnLogOpenDir").addEventListener("click", () =>
       invoke("log_dir_open").catch((e) => toast("err", e.message)),
     );
-    $("#btnReportSave").addEventListener("click", async () => {
+    // --- Инструменты (журнал): кэш Discord, hosts, фейки ---
+async function loadFakes() {
+  const selD = $("#cfFakeDiscord");
+  const selG = $("#cfFakeGame");
+  if (!selD || !selG) return;
+  try {
+    const v = await invoke("fakes_view");
+    const fill = (el, active) => {
+      el.innerHTML = "";
+      for (const f of v.files) {
+        const o = document.createElement("option");
+        o.value = f;
+        o.textContent = f;
+        if (active && f === active) o.selected = true;
+        el.appendChild(o);
+      }
+      el.disabled = !v.files.length;
+    };
+    fill(selD, v.activeDiscord);
+    fill(selG, v.activeGame);
+  } catch (_) {}
+}
+loadFakes();
+
+if ($("#btnDiscordCache"))
+  $("#btnDiscordCache").addEventListener("click", async () => {
+    const ok = await showConfirm({
+      title: T.discord_cache_title,
+      html: T.discord_cache_html,
+      okLabel: T.btn_clear,
+    });
+    if (!ok) return;
+    btnBusy($("#btnDiscordCache"), true);
+    try {
+      toast("ok", await invoke("discord_cache_clear"));
+    } catch (e) {
+      toast("err", e.message);
+    } finally {
+      btnBusy($("#btnDiscordCache"), false);
+    }
+  });
+if ($("#btnHostsUpdate"))
+  $("#btnHostsUpdate").addEventListener("click", async () => {
+    btnBusy($("#btnHostsUpdate"), true);
+    try {
+      toast("ok", await invoke("hosts_update"));
+      const p = ((B && B.dataDir) || "") + "\\catalog\\hosts-from-author.txt";
+      invoke("open_path", { path: p }).catch(() => {});
+      invoke("open_path", { path: "C:\\Windows\\System32\\drivers\\etc" }).catch(() => {});
+    } catch (e) {
+      toast("err", e.message);
+    } finally {
+      btnBusy($("#btnHostsUpdate"), false);
+    }
+  });
+if ($("#btnFakeApply"))
+  $("#btnFakeApply").addEventListener("click", async () => {
+    btnBusy($("#btnFakeApply"), true);
+    try {
+      const msgs = [];
+      msgs.push(await invoke("replace_fake", { kind: "discord", name: $("#cfFakeDiscord").value }));
+      msgs.push(await invoke("replace_fake", { kind: "game", name: $("#cfFakeGame").value }));
+      toast("ok", msgs.join("; "));
+      loadFakes();
+    } catch (e) {
+      toast("err", e.message);
+    } finally {
+      btnBusy($("#btnFakeApply"), false);
+    }
+  });
+
+$("#btnReportSave").addEventListener("click", async () => {
       btnBusy($("#btnReportSave"), true);
       try {
         const p = await invoke("report_save");
-        toast("ok", "отчёт сохранён и открыт: " + p);
+        toast("ok", T.report_saved(p));
       } catch (e) {
         toast("err", e.message);
       } finally {
@@ -2164,14 +2114,11 @@ function bindStatic() {
         try {
           path = await invoke("report_save");
         } catch (_) {}
-        const body = encodeURIComponent(
-          "**Что случилось:**\n\n\n**Как воспроизвести:**\n\n\n" +
-            (path ? `Отчёт сохранён рядом с журналом: ${path}\n` : ""),
-        );
-        const url = `https://github.com/lECL1PS3l/zgui/issues/new?title=${encodeURIComponent("Баг: ")}&body=${body}`;
+        const body = encodeURIComponent(T.issue_body(path));
+        const url = `https://github.com/lECL1PS3l/zgui/issues/new?title=${encodeURIComponent(T.issue_title)}&body=${body}`;
         try {
           await invoke("open_external", { target: url });
-          toast("ok", "открыл форму отчёта в браузере — приложите файл отчёта из папки журнала");
+          toast("ok", T.report_issue_opened);
         } catch (e) {
           toast("err", String(e));
         }
@@ -2182,60 +2129,13 @@ function bindStatic() {
 
   if ($("#pmClose")) $("#pmClose").addEventListener("click", closeProfileModal);
   if ($("#pmClose2")) $("#pmClose2").addEventListener("click", closeProfileModal);
-  if ($("#pmDelete"))
-    $("#pmDelete").addEventListener("click", async () => {
-      const p = pmProfile;
-      if (!p) return;
-      const ok = await showConfirm({
-        title: "Удалить стратегию?",
-        danger: true,
-        okLabel: "Удалить",
-        html: `<p>Удалить стратегию «<b>${p.name}</b>»?</p><p class="sub">Это действие нельзя отменить.</p>`,
-      });
-      if (!ok) return;
-      try {
-        await invoke("delete_profile", { id: p.id });
-        await refreshAll();
-        closeProfileModal();
-      } catch (e) {
-        toast("err", String(e));
-      }
-    });
 
-  $("#btnNewProfile").addEventListener("click", () => showNewProfileCard(true));
-  if ($("#profSort"))
-    $("#profSort").addEventListener("change", (e) => {
-      profSort = e.target.value;
-      sigProfiles = "";
-      renderProfiles();
-    });
-  $("#btnCancelProfile").addEventListener("click", () => showNewProfileCard(false));
-
-  $("#btnRunTest").addEventListener("click", () => runTest(false, "main"));
-  $("#btnRunGeoblock").addEventListener("click", () => runTest(false, "geoblock"));
-  if ($("#btnRunExtra")) $("#btnRunExtra").addEventListener("click", () => runTest(false, "extra"));
-  if ($("#btnRunAutotune")) $("#btnRunAutotune").addEventListener("click", runAutotune);
-  if ($("#btnStopAutotune"))
-    $("#btnStopAutotune").addEventListener("click", async () => {
-      btnBusy($("#btnStopAutotune"), true);
-      try {
-        await invoke("cancel_test");
-        toast("info", "останавливаю подбор…");
-        await new Promise((r) => setTimeout(r, 2500));
-        testState = null;
-        renderAutotune();
-        await refreshAll();
-      } catch (e) {
-        toast("err", String(e));
-      } finally {
-        btnBusy($("#btnStopAutotune"), false);
-      }
-    });
+  $("#btnRunTest").addEventListener("click", () => runTest(false));
   $("#btnStopTest").addEventListener("click", async () => {
     btnBusy($("#btnStopTest"), true);
     try {
       await invoke("cancel_test");
-      toast("info", "останавливаю тест…");
+      toast("info", T.test_stopping);
       await new Promise((r) => setTimeout(r, 2500));
       testState = null;
       renderTestCard();
@@ -2259,32 +2159,22 @@ function bindStatic() {
     btnBusy($("#btnTestReport"), true);
     try {
       const p = await invoke("test_report_save");
-      toast("ok", "результаты теста сохранены: " + p);
+      toast("ok", T.test_report_saved(p));
     } catch (e) {
-      toast("err", "не удалось сохранить результаты: " + e);
+      toast("err", T.test_report_fail(e));
     } finally {
       btnBusy($("#btnTestReport"), false);
     }
   });
 
-  $("#btnSaveProfile").addEventListener("click", async () => {
-    const name = $("#npName").value.trim();
-    const raw = $("#npArgs").value;
-    const engine = ($("#npEngine") && $("#npEngine").value) || "flowseal";
-    const args = raw.split("\n").map((x) => x.trim()).filter(Boolean);
-    if (!name || !args.length) {
-      toast("warn", "Укажите название и хотя бы один аргумент");
-      return;
-    }
-    try {
-      await invoke("save_profile", { id: null, name, engine, args });
-      await refreshAll();
-      showNewProfileCard(false);
-      toast("ok", "Профиль сохранён");
-    } catch (e) {
-      toast("err", String(e));
-    }
-  });
+  if ($("#btnTestFolder"))
+    $("#btnTestFolder").addEventListener("click", async () => {
+      try {
+        await invoke("open_path", { path: ((B && B.dataDir) || "") + "\\logs" });
+      } catch (e) {
+        toast("err", String(e));
+      }
+    });
 
   $("#btnCheck").addEventListener("click", doCheck);
   $("#btnApplyAll").addEventListener("click", () => doApply([]));
@@ -2295,7 +2185,7 @@ function bindStatic() {
       .filter((c) => !c.disabled)
       .map((c) => c.dataset.id);
     if (!ids.length) {
-      toast("warn", "Ничего не выбрано");
+      toast("warn", T.nothing_selected);
       return;
     }
     doApply(ids);
@@ -2309,7 +2199,7 @@ function bindStatic() {
       invoke("set_settings", { settings: collectSettings() }).catch((e) => toast("err", String(e)));
     }, delay);
   };
-  for (const id of ["#cfGameFilter", "#cfIpset"]) {
+  for (const id of ["#cfGameFilter", "#cfIpset", "#cfGameFilterTcp", "#cfGameFilterUdp"]) {
     $(id).addEventListener("change", () => saveSoon(0));
   }
   $("#cfInterval").addEventListener("input", () => saveSoon(700));
@@ -2327,7 +2217,7 @@ function bindStatic() {
         // Служба — механизм обхода: смена профиля переключает саму службу.
         if (val) {
           await invoke("install_service", { id: val });
-          toast("ok", "служба переключена на выбранную стратегию");
+          toast("ok", T.svc_switched);
         } else {
           // Сначала сбрасываем автозапуск, иначе remove_service сохранит профиль
           // и переведёт обход на программный автозапуск — «выключено» не сработает.
@@ -2336,12 +2226,12 @@ function bindStatic() {
           s.autostart_profile = null;
           await invoke("set_settings", { settings: s });
           await invoke("remove_service");
-          toast("ok", "автозапуск выключен");
+          toast("ok", T.auto_off);
         }
       } else {
         // Профиль сохранён — задачу планировщика согласует бэкенд (sync_autostart).
         await invoke("set_settings", { settings: collectSettings() });
-        toast("ok", val ? "готово: обход будет включаться сам при входе в Windows" : "автозапуск выключен");
+        toast("ok", val ? T.auto_on_login : T.auto_off);
       }
     } catch (e) {
       toast("err", String(e));
@@ -2358,14 +2248,14 @@ function bindStatic() {
     box.disabled = true;
     try {
       if (want) {
-        if (!id) throw "сначала выберите профиль";
+        if (!id) throw T.pick_profile_first;
         // Программный автозапуск снимется сам (бэкенд согласует механизмы).
-        toast("info", "Ставлю службу — Windows запросит права администратора для её создания");
+        toast("info", T.svc_installing);
         await invoke("install_service", { id });
-        toast("ok", "готово: обход будет включаться службой — программа не нужна");
+        toast("ok", T.svc_installed);
       } else {
         await invoke("remove_service");
-        toast("ok", "служба выключена");
+        toast("ok", T.svc_removed);
       }
     } catch (e) {
       box.checked = !want;
@@ -2381,8 +2271,8 @@ function bindStatic() {
     try {
       await invoke("set_settings", { settings: collectSettings() });
       toast("ok", $("#cfAlwaysAdmin").checked
-        ? "GUI будет запускаться от администратора"
-        : "запуск от администратора выключен");
+        ? T.admin_on
+        : T.admin_off);
       if ($("#cfAlwaysAdmin").checked) askRestartAdmin();
     } catch (e) {
       toast("err", String(e));
@@ -2410,7 +2300,7 @@ function bindStatic() {
         await askRestartAdmin();
       } else {
         checkConflicts(true);
-        toast("ok", "Хорошо — при необходимости права запросим отдельно");
+        toast("ok", T.admin_later_ok);
       }
     } catch (e) {
       toast("err", String(e));
@@ -2438,7 +2328,7 @@ function bindStatic() {
       });
       toast("ok", result);
     } catch (e) {
-      toast("err", "DNS: " + e);
+      toast("err", T.err_short(e));
     }
     btnBusy(b, false);
   });
@@ -2449,7 +2339,7 @@ function bindStatic() {
       const result = await invoke("reset_dns", { adapter: $("#dnsAdapter").value.trim() || null });
       toast("ok", result);
     } catch (e) {
-      toast("err", "DNS: " + e);
+      toast("err", T.err_short(e));
     }
     btnBusy(b, false);
   });
@@ -2466,22 +2356,13 @@ function bindStatic() {
 
 async function netReset() {
   const ok = await showConfirm({
-    title: "Восстановить интернет",
+    title: T.netreset_confirm_title,
     danger: true,
-    okLabel: "Начать восстановление",
-    cancelLabel: "Отмена",
-    html: `
-      <p>Программа выполнит <b>по шагам</b>:</p>
-      <ul>
-        <li><b>1.</b> Создаст точку восстановления Windows (может занять 1–2 минуты).</li>
-        <li><b>2.</b> Остановит службу zapret и VPN-службы (включая AmneziaVPN) и завершит их процессы.</li>
-        <li><b>3.</b> Уберёт зависшие драйверы WinDivert.</li>
-        <li><b>4.</b> Сбросит прокси (WinHTTP и системный), кэш DNS, Winsock и стек TCP/IP.</li>
-        <li><b>5.</b> Предложит перезагрузку — <b>только отдельной кнопкой</b>, без автоматики.</li>
-      </ul>
-      <p class="sub">Пароли Wi-Fi, профили подключения и настройки провайдера <b>НЕ трогаются</b>.</p>
-      <p class="sub">Изменения Winsock/TCP-IP вступят в силу только после перезагрузки.</p>
-    `,
+    okLabel: T.btn_net_start,
+    cancelLabel: T.btn_cancel,
+    // Блокировка как в тестах: 5 секунд на прочтение шагов.
+    lockSec: 5,
+    html: T.netreset_html,
   });
   if (!ok) return;
   const b = $("#btnNetReset");
@@ -2491,30 +2372,29 @@ async function netReset() {
   out.className = "muted";
 
   // Шаг 1: точка восстановления. Пока она не создана — сброс не запускаем.
-  out.textContent = "Шаг 1/2: создаю точку восстановления…";
+  out.textContent = T.net_step1;
   let restoreOk = false;
   try {
     const msg = await invoke("net_create_restore_point");
     restoreOk = true;
-    out.textContent = "Точка восстановления: " + msg + "\nШаг 2/2: выполняю сброс сети…";
+    out.textContent = T.net_step1_done(msg);
   } catch (e) {
     out.className = "muted warn";
-    out.textContent = "Точка восстановления не создана: " + e;
+    out.textContent = T.net_restore_fail(e);
     const proceed = await showConfirm({
-      title: "Продолжить без точки восстановления?",
+      title: T.net_continue_title,
       danger: true,
-      okLabel: "Продолжить без точки",
-      cancelLabel: "Отмена",
-      html: `<p>Не удалось создать точку восстановления:</p><p class="sub">${e}</p>
-             <p>Можно продолжить сброс сети без возможности отката системы.</p>`,
+      okLabel: T.net_continue_ok,
+      cancelLabel: T.btn_cancel,
+      html: T.net_continue_html(escHtml(e)),
     });
     if (!proceed) {
-      out.textContent += "\nОперация отменена.";
+      out.textContent += T.net_canceled;
       btnBusy(b, false);
       return;
     }
     out.className = "muted";
-    out.textContent = "Выполняю сброс сети без точки восстановления…";
+    out.textContent = T.net_running_no_restore;
   }
 
   // Шаг 2: сам сброс сети.
@@ -2523,29 +2403,26 @@ async function netReset() {
     const steps = (r.steps || []).map((s) => "• " + s).join("\n");
     out.className = "muted ok";
     out.textContent =
-      (restoreOk ? "Точка восстановления создана.\n" : "") +
+      (restoreOk ? T.net_restore_created : "") +
       steps +
-      (r.rebootRequired ? "\n\nГотово. Изменения вступят в силу после перезагрузки." : "");
-    toast("ok", "Сеть сброшена — нужна перезагрузка");
+      (r.rebootRequired ? T.net_reboot_note : "");
+    toast("ok", T.net_done);
     if (r.rebootRequired) {
       // Перезагрузка — ТОЛЬКО по явному клику в окне. Никакой автоматики.
       const reboot = await showConfirm({
-        title: "Нужна перезагрузка",
+        title: T.reboot_title,
         danger: true,
-        okLabel: "Перезагрузить сейчас",
-        cancelLabel: "Позже, вручную",
-        html: `
-          <p>Сброс Winsock и TCP/IP вступает в силу <b>только после перезагрузки</b>.</p>
-          <p>Можно перезагрузить сейчас или позже вручную — интернет заработает после неё.</p>
-        `,
+        okLabel: T.reboot_ok,
+        cancelLabel: T.reboot_later,
+        html: T.reboot_html,
       });
       if (reboot) {
-        toast("info", "Перезагрузка через 15 секунд…");
+        toast("info", T.reboot_soon);
         await invoke("reboot_now").catch(() => {});
       }
     }
   } catch (e) {
-    out.textContent = "Ошибка: " + e;
+    out.textContent = T.err_short(e);
     out.className = "muted err";
     toast("err", String(e));
   } finally {
@@ -2556,28 +2433,33 @@ async function netReset() {
 async function showAdapters() {
   const out = $("#netResetOut");
   out.classList.remove("hidden");
-  out.textContent = "Ищу виртуальные адаптеры…";
+  out.textContent = T.adapters_searching;
   try {
     const list = await invoke("virtual_adapters");
     if (!list.length) {
-      out.textContent = "Виртуальных сетевых адаптеров не найдено.";
+      out.textContent = T.adapters_none;
     } else {
-      out.innerHTML =
-        "Найдены виртуальные адаптеры (удалять только вручную в Диспетчере устройств, если из-за них проблемы):<br>" +
-        list.map((a) => "• " + a).join("<br>");
+      out.textContent = "";
+      const lead = document.createElement("div");
+      lead.textContent = T.adapters_found_lead;
+      const ul = document.createElement("ul");
+      ul.className = "warn-list";
+      for (const a of list) {
+        const li = document.createElement("li");
+        li.textContent = a;
+        ul.appendChild(li);
+      }
+      out.append(lead, ul);
     }
     out.className = "muted";
     // Открываем «Сетевые подключения», где адаптеры видны по именам.
     try {
       await invoke("open_external", { target: "ncpa.cpl" });
     } catch (_) {
-      toast(
-        "warn",
-        "не удалось открыть «Сетевые подключения» автоматически — откройте вручную: Панель управления → Сеть и Интернет → Сетевые подключения",
-      );
+      toast("warn", T.adapters_open_fail);
     }
   } catch (e) {
-    out.textContent = "Ошибка: " + e;
+    out.textContent = T.err_short(e);
     out.className = "muted err";
   }
 }
@@ -2605,12 +2487,10 @@ async function wireEvents() {
     testState = ev.payload;
     renderTestProgress();
     renderTestResults();
-    renderAutotune();
     // Пока идёт тест — тулбар показывает «идёт тест», «Остановить» заблокирована.
     renderRunBar();
     if (testState && testState.done) {
       btnBusy($("#btnRunTest"), false);
-      btnBusy($("#btnRunGeoblock"), false);
       // Перечитываем tests.json: иначе счёт/«лучшая» на плитках остаются от
       // прошлого прогона до перезапуска программы.
       loadTestCache();
@@ -2627,6 +2507,7 @@ async function wireEvents() {
 }
 
 initTheme();
+applyTexts();
 renderNavIcons();
 bindStatic();
 
@@ -2634,34 +2515,61 @@ bindStatic();
 document.addEventListener("visibilitychange", () => {
   document.body.classList.toggle("fx-paused", document.hidden);
 });
+// Окно не в фокусе — фон не анимируем: бесконечный дрейф зря нагружал
+// GPU-процесс WebView (в диспетчере задач видно десятки процентов).
+// При возврате фокуса анимация продолжается с того же места.
+window.addEventListener("blur", () => document.body.classList.add("fx-paused"));
+window.addEventListener("focus", () => document.body.classList.toggle("fx-paused", document.hidden));
+
+// ПКМ: штатное меню WebView2 (назад/обновить/печать/сохранить как) в программе не нужно.
+// Оставляем его только там, где оно полезно: поля ввода и выделенный текст.
+document.addEventListener("contextmenu", (e) => {
+  const t = e.target;
+  const field = t instanceof Element && t.closest("input, textarea, [contenteditable]");
+  if (field || String(window.getSelection())) return;
+  e.preventDefault();
+});
 
 (async function init() {
-  await wireEvents();
   try {
-    await invoke("ack_boot");
-  } catch (_) {}
-  await refreshAll();
-  loadDnsProviders();
-  loadTestCache();
-  try {
-    const ts = await invoke("test_status");
+    await wireEvents();
+    // Сначала test_status: если после жёсткого закрытия остался фоновый раннер
+    // теста (elevated), эта команда гасит его. Иначе ack_boot (автозапуск профиля
+    // при входе) стартовал бы поверх живого движка теста и падал «winws уже запущен».
+    let ts = null;
+    try {
+      ts = await invoke("test_status");
+    } catch (_) {}
+    try {
+      await invoke("ack_boot");
+    } catch (_) {}
+    await refreshAll();
+    loadDnsProviders();
+    loadTestCache();
     if (ts && ts.running) {
       testState = ts;
       renderTestCard();
       renderTestProgress();
     }
-  } catch (_) {}
-  // Первый запуск: сначала предложение про права администратора (иначе 5+ запросов).
-  // Если показали модалку — проверку конфликтов отложим до её закрытия.
-  const adminShown = await maybeOfferAdmin();
-  if (!adminShown) checkConflicts(true);
-  invoke("app_info")
-    .then((i) => {
-      // В подвале сайдбара — только версия (просьба владельца).
-      $("#appMeta").innerHTML = `<span class="ver">v${i.version}</span>`;
-    })
-    .catch(() => {});
-  setInterval(refreshAll, 4000);
+    // Первый запуск: сначала предложение про права администратора (иначе 5+ запросов).
+    // Если показали модалку — проверку конфликтов отложим до её закрытия.
+    const adminShown = await maybeOfferAdmin();
+    if (!adminShown) checkConflicts(true);
+    invoke("app_info")
+      .then((i) => {
+        // В подвале сайдбара — только версия (просьба владельца).
+        $("#appMeta").innerHTML = `<span class="ver">v${i.version}</span>`;
+      })
+      .catch(() => {});
+    // Скрытое окно не опрашиваем: состояние всё равно перерисуется при возврате
+    // (события zgui:status и переходы по вкладкам).
+    setInterval(() => {
+      if (!document.hidden) refreshAll();
+    }, 4000);
+  } catch (e) {
+    console.error("init failed", e);
+    toast("err", String(e));
+  }
 })();
 
 (async function prefetchIgnore() {

@@ -43,6 +43,8 @@ struct Inner {
     file: Option<PathBuf>,
     file_len: u64,
     sink: Option<Sink>,
+    /// О неудачной ротации сообщаем один раз, чтобы не спамить stderr.
+    rotate_warned: bool,
 }
 
 static LOG: OnceLock<Mutex<Inner>> = OnceLock::new();
@@ -55,6 +57,7 @@ fn inner() -> &'static Mutex<Inner> {
             file: None,
             file_len: 0,
             sink: None,
+            rotate_warned: false,
         })
     })
 }
@@ -89,12 +92,6 @@ pub fn init(data: &Path, sink: Sink) {
     g.file = Some(file);
     g.file_len = len;
     g.sink = Some(sink);
-}
-
-/// Отключает доставку в UI (нужно при перезапуске окна в тестах/отладке).
-#[allow(dead_code)]
-pub fn set_sink(sink: Option<Sink>) {
-    lock().sink = sink;
 }
 
 /// Главная точка входа: пишет в буфер, в файл и шлёт событие в интерфейс.
@@ -145,8 +142,21 @@ fn write_file(g: &mut Inner, e: &Entry) {
     if g.file_len + line.len() as u64 > MAX_FILE {
         let old = path.with_file_name("zgui.1.log");
         let _ = std::fs::remove_file(&old);
-        let _ = std::fs::rename(&path, &old);
-        g.file_len = 0;
+        match std::fs::rename(&path, &old) {
+            Ok(()) => {
+                g.file_len = 0;
+                g.rotate_warned = false;
+            }
+            Err(e) => {
+                // Файл занят (антивирус/второй процесс): НЕ обнуляем счётчик —
+                // иначе следующая ротация случится только после ещё одного
+                // мегабайта, и лог незаметно разрастётся вдвое.
+                if !g.rotate_warned {
+                    g.rotate_warned = true;
+                    eprintln!("zgui: ротация журнала не удалась: {e}");
+                }
+            }
+        }
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         if f.write_all(line.as_bytes()).is_ok() {
@@ -209,6 +219,8 @@ pub fn dump() -> String {
         .join("\n")
 }
 
+/// Очистка буфера/файла — нужна только тестам (кнопка «Очистить» убрана из UI).
+#[cfg(test)]
 pub fn clear() {
     let mut g = lock();
     g.buf.clear();
@@ -235,6 +247,11 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Буфер логгера общий на процесс: тесты логгера не должны идти параллельно
+    /// друг с другом (clear одного стирал записи другого — «то есть, то нет»).
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn date_formatting_is_utc_correct() {
@@ -252,26 +269,35 @@ mod tests {
 
     #[test]
     fn buffer_keeps_newest_and_reports_delta() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear();
         for i in 0..10 {
-            log("info", "test", &format!("строка {i}"));
+            log("info", "logtest-buf", &format!("строка {i}"));
         }
         let all = entries(0);
-        assert_eq!(all.len(), 10);
+        // Чужие записи (другие тесты логируют параллельно) не считаем.
+        let mine: Vec<_> = all.iter().filter(|e| e.scope == "logtest-buf").collect();
+        assert_eq!(mine.len(), 10);
         let last_seq = all.last().unwrap().seq;
-        log("info", "test", "ещё одна");
+        log("info", "logtest-buf", "ещё одна");
         let delta = entries(last_seq);
-        assert_eq!(delta.len(), 1);
-        assert_eq!(delta[0].msg, "ещё одна");
+        let mine_delta: Vec<_> = delta.iter().filter(|e| e.scope == "logtest-buf").collect();
+        assert_eq!(mine_delta.len(), 1);
+        assert_eq!(mine_delta[0].msg, "ещё одна");
         clear();
     }
 
     #[test]
     fn long_messages_are_truncated() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear();
         let huge = "x".repeat(MAX_MSG + 500);
-        log("warn", "test", &huge);
-        let e = &entries(0)[0];
+        log("warn", "logtest-trunc", &huge);
+        let all = entries(0);
+        let e = all
+            .iter()
+            .find(|e| e.scope == "logtest-trunc")
+            .expect("наша запись должна быть в буфере");
         assert!(e.msg.contains("обрезано"));
         assert!(e.msg.chars().count() < MAX_MSG + 100);
         clear();

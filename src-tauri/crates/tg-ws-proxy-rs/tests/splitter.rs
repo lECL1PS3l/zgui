@@ -128,7 +128,12 @@ fn splitter_flush_returns_an_incomplete_encrypted_packet() {
 fn splitter_ignores_empty_reads() {
     let (mut splitter, mut enc, _) = harness(ProtoTag::Abridged);
 
-    assert!(splitter.split_and_encrypt(&mut [], &mut enc).is_empty());
+    assert!(
+        splitter
+            .split_and_encrypt(&mut [], &mut enc)
+            .unwrap()
+            .is_empty()
+    );
     assert!(splitter.flush().is_empty());
 }
 
@@ -157,7 +162,9 @@ fn harness(proto: ProtoTag) -> (MsgSplitter, AesCtr256, AesCtr256) {
 
 fn feed(splitter: &mut MsgSplitter, enc: &mut AesCtr256, plain: &[u8]) -> Vec<Vec<u8>> {
     let mut input = plain.to_vec();
-    splitter.split_and_encrypt(&mut input, enc)
+    splitter
+        .split_and_encrypt(&mut input, enc)
+        .expect("splitter refused a well-formed packet")
 }
 
 fn encrypt(enc: &mut AesCtr256, plain: &[u8]) -> Vec<u8> {

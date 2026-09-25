@@ -17,6 +17,21 @@ use crate::crypto::{AesCtr256, ProtoTag};
 
 const MAX_HEADER_LEN: usize = 4;
 
+/// Upper bound on a single MTProto transport packet.
+///
+/// Real Telegram clients chunk uploads well below 1 MiB; 16 MiB leaves room
+/// for outliers while keeping the assembly buffer — and whatever a lying
+/// header would otherwise reserve — bounded. A header announcing more is
+/// treated as a corrupt stream and refused.
+pub const MAX_PACKET_LEN: usize = 16 * 1024 * 1024;
+
+/// Why the splitter refused to keep parsing the stream.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SplitError {
+    /// A packet header announced a payload above [`MAX_PACKET_LEN`].
+    PacketTooLarge(usize),
+}
+
 pub struct MsgSplitter {
     proto: ProtoTag,
     packet: Vec<u8>,
@@ -40,14 +55,18 @@ impl MsgSplitter {
 
     /// Split plaintext MTProto bytes into packets and encrypt them in stream
     /// order for the Telegram WebSocket connection.
-    pub fn split_and_encrypt(&mut self, plaintext: &mut [u8], enc: &mut AesCtr256) -> Vec<Vec<u8>> {
+    pub fn split_and_encrypt(
+        &mut self,
+        plaintext: &mut [u8],
+        enc: &mut AesCtr256,
+    ) -> Result<Vec<Vec<u8>>, SplitError> {
         if plaintext.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         if self.disabled {
             enc.apply_keystream(plaintext);
-            return vec![plaintext.to_vec()];
+            return Ok(vec![plaintext.to_vec()]);
         }
 
         let mut parts = Vec::new();
@@ -67,7 +86,7 @@ impl MsgSplitter {
                     continue;
                 }
 
-                let Some(packet_len) = self.parsed_packet_len() else {
+                let Some(packet_len) = self.parsed_packet_len()? else {
                     continue;
                 };
                 if packet_len == 0 {
@@ -75,7 +94,7 @@ impl MsgSplitter {
                     parts.push(std::mem::take(&mut self.packet));
                     self.disabled = true;
                     self.header_len = 0;
-                    return parts;
+                    return Ok(parts);
                 }
                 self.packet_len = Some(packet_len);
             }
@@ -94,7 +113,7 @@ impl MsgSplitter {
             }
         }
 
-        parts
+        Ok(parts)
     }
 
     /// Flush any encrypted bytes buffered for an incomplete final packet.
@@ -119,36 +138,29 @@ impl MsgSplitter {
         }
     }
 
-    fn parsed_packet_len(&self) -> Option<usize> {
+    fn parsed_packet_len(&self) -> Result<Option<usize>, SplitError> {
         match self.proto {
             ProtoTag::Abridged => {
                 let extended = matches!(self.header[0], 0x7f | 0xff);
                 let header_len = if extended { 4 } else { 1 };
                 if self.header_len < header_len {
-                    return None;
+                    return Ok(None);
                 }
                 let words = if extended {
                     u32::from_le_bytes([self.header[1], self.header[2], self.header[3], 0]) as usize
                 } else {
                     (self.header[0] & 0x7f) as usize
                 };
-                let payload_len = words.checked_mul(4)?;
-                if payload_len == 0 {
-                    Some(0)
-                } else {
-                    Some(payload_len.checked_add(header_len).unwrap_or(0))
-                }
+                // At most 24 bits of word count, so the u64 multiply cannot
+                // overflow on any platform.
+                packet_len(words as u64 * 4, header_len)
             }
             ProtoTag::Intermediate | ProtoTag::PaddedIntermediate => {
                 if self.header_len < 4 {
-                    return None;
+                    return Ok(None);
                 }
-                let payload_len = (u32::from_le_bytes(self.header) & 0x7fff_ffff) as usize;
-                if payload_len == 0 {
-                    Some(0)
-                } else {
-                    Some(payload_len.checked_add(4).unwrap_or(0))
-                }
+                let payload_len = (u32::from_le_bytes(self.header) & 0x7fff_ffff) as u64;
+                packet_len(payload_len, 4)
             }
         }
     }
@@ -157,6 +169,21 @@ impl MsgSplitter {
         enc.apply_keystream(plaintext);
         self.packet.extend_from_slice(plaintext);
     }
+}
+
+/// Resolve a parsed payload length into the total packet length.
+///
+/// Zero keeps its original meaning — the stream is not MTProto packet
+/// framing, so the splitter disables itself and passes bytes through.
+/// Anything past [`MAX_PACKET_LEN`] is refused instead.
+fn packet_len(payload_len: u64, header_len: usize) -> Result<Option<usize>, SplitError> {
+    if payload_len == 0 {
+        return Ok(Some(0));
+    }
+    if payload_len > MAX_PACKET_LEN as u64 {
+        return Err(SplitError::PacketTooLarge(payload_len as usize));
+    }
+    Ok(Some(payload_len as usize + header_len))
 }
 
 #[cfg(test)]

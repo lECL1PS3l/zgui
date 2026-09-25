@@ -859,8 +859,12 @@ impl Config {
         let bind_host = self.bind_host();
 
         // Auto-detect when the bind address is not directly reachable by
-        // remote clients (wildcard or loopback).
-        let bind_is_local = matches!(bind_host.as_str(), "0.0.0.0" | "::" | "127.0.0.1" | "::1");
+        // remote clients (wildcard or loopback) — but only when no explicit
+        // `--host` was given: a caller that pins `127.0.0.1` (local-only
+        // bridge) must get `127.0.0.1` in the link, not this machine's LAN IP,
+        // because the listener would not accept connections on that address.
+        let bind_is_local = self.host.is_none()
+            && matches!(bind_host.as_str(), "0.0.0.0" | "::" | "127.0.0.1" | "::1");
         if bind_is_local && let Some(lan_ip) = detect_lan_ip() {
             return lan_ip;
         }
@@ -876,10 +880,17 @@ impl Config {
 
 /// Decode a hex secret and strip its optional `dd`/`ee` mode prefix, leaving
 /// the raw key used for MTProto key derivation.
+///
+/// A secret that is not valid hex yields an empty key (Telegram handshakes
+/// will simply fail for it) instead of panicking the bridge mid-connection.
 fn decode_secret_key(secret: &str) -> Vec<u8> {
-    let raw = hex::decode(secret).expect("secret must be valid hex");
-
-    crypto::secret_key(&raw).to_vec()
+    match hex::decode(secret) {
+        Ok(raw) => crypto::secret_key(&raw).to_vec(),
+        Err(err) => {
+            tracing::warn!(%err, "secret is not valid hex; ignoring it");
+            Vec::new()
+        }
+    }
 }
 
 // ─── LAN IP auto-detection ────────────────────────────────────────────────────

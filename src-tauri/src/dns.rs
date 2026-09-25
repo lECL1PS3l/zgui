@@ -1,4 +1,4 @@
-use crate::runner::{run_script_privileged, write_ps1};
+use crate::runner::run_script_privileged;
 use serde::Serialize;
 use std::net::ToSocketAddrs;
 use std::path::Path;
@@ -124,10 +124,24 @@ pub struct DnsPing {
     pub error: Option<String>,
 }
 
+/// Случайный ID транзакции (фиксированный позволял постороннему пакету сойти
+/// за ответ).
+fn random_dns_id() -> u16 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0),
+    );
+    (h.finish() & 0xFFFF) as u16
+}
+
 /// Строит минимальный DNS-запрос (A-запись) для домена.
-fn build_dns_query(domain: &str) -> Vec<u8> {
+fn build_dns_query(domain: &str, id: u16) -> Vec<u8> {
     let mut q = Vec::new();
-    q.extend_from_slice(&[0x12, 0x34]); // ID
+    q.extend_from_slice(&id.to_be_bytes()); // ID
     q.extend_from_slice(&[0x01, 0x00]); // flags: standard query, RD
     q.extend_from_slice(&[0x00, 0x01]); // QDCOUNT
     q.extend_from_slice(&[0x00, 0x00]); // ANCOUNT
@@ -144,17 +158,33 @@ fn build_dns_query(domain: &str) -> Vec<u8> {
 }
 
 /// Один UDP DNS-запрос: возвращает время отклика в мс (или None).
+///
+/// Ответ принимается только от сервера, которому отправлен запрос (UDP
+/// `connect` фильтрует по адресу), с совпадающим ID транзакции, взведённым
+/// QR-битом ответа и тем же вопросом-эхом — посторонний/поддельный пакет
+/// иначе мог бы улучшить замер.
 fn query_once(server: &str, domain: &str, timeout: std::time::Duration) -> Option<u64> {
     use std::net::UdpSocket;
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.set_read_timeout(Some(timeout)).ok()?;
     let addr = (server, 53u16).to_socket_addrs().ok()?.next()?;
-    let packet = build_dns_query(domain);
+    sock.connect(addr).ok()?;
+    let id = random_dns_id();
+    let packet = build_dns_query(domain, id);
     let start = std::time::Instant::now();
-    sock.send_to(&packet, addr).ok()?;
+    sock.send(&packet).ok()?;
     let mut buf = [0u8; 512];
-    let (n, _) = sock.recv_from(&mut buf).ok()?;
-    if n < 12 {
+    let n = sock.recv(&mut buf).ok()?;
+    if n < packet.len() {
+        return None;
+    }
+    if u16::from_be_bytes([buf[0], buf[1]]) != id {
+        return None;
+    }
+    if buf[2] & 0x80 == 0 {
+        return None;
+    }
+    if buf[12..packet.len()] != packet[12..] {
         return None;
     }
     Some(start.elapsed().as_millis() as u64)
@@ -202,7 +232,7 @@ pub fn benchmark(ids: Option<Vec<String>>) -> Vec<DnsPing> {
                 secondary_ms,
                 avg_ms,
                 error: if primary_ms.is_none() && secondary_ms.is_none() {
-                    Some("нет ответа (UDP 53 закрыт/фильтруется)".into())
+                    Some(crate::texts::DNS_NO_ANSWER.into())
                 } else {
                     None
                 },
@@ -212,10 +242,7 @@ pub fn benchmark(ids: Option<Vec<String>>) -> Vec<DnsPing> {
 }
 
 pub fn apply(data: &Path, id: &str, adapter: Option<&str>) -> Result<String, String> {
-    let p = provider(id).ok_or("неизвестный DNS-провайдер")?;
-    let script = crate::runner::TempFile::new(
-        data.join("logs").join(format!("dns_apply_{}.ps1", std::process::id())),
-    );
+    let p = provider(id).ok_or(crate::texts::DNS_UNKNOWN_PROVIDER)?;
     let adapter_expr = match adapter.filter(|s| !s.trim().is_empty()) {
         Some(name) => crate::runner::ps_quote(name),
         None => "(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Select-Object -First 1 -ExpandProperty InterfaceAlias)".into(),
@@ -250,18 +277,18 @@ Write-Output ("DNS: {name}; adapter: " + $alias)
         doh = p.doh_template,
         name = p.name,
     );
-    write_ps1(script.path(), &body)?;
+    let script = crate::runner::LockedScript::write(
+        data.join("logs").join(format!("dns_apply_{}.ps1", std::process::id())),
+        &body,
+    )?;
     let code = run_script_privileged(script.path())?;
     if code != 0 {
-        return Err(format!("применение DNS не удалось, код {}", code));
+        return Err(crate::texts::dns_apply_failed_code(code));
     }
-    Ok(format!("{}: {} / {} + DoH (без UDP fallback)", p.name, p.primary, p.secondary))
+    Ok(crate::texts::dns_applied(p.name, p.primary, p.secondary))
 }
 
 pub fn reset(data: &Path, adapter: Option<&str>) -> Result<String, String> {
-    let script = crate::runner::TempFile::new(
-        data.join("logs").join(format!("dns_reset_{}.ps1", std::process::id())),
-    );
     let adapter_expr = match adapter.filter(|s| !s.trim().is_empty()) {
         Some(name) => crate::runner::ps_quote(name),
         None => "(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Select-Object -First 1 -ExpandProperty InterfaceAlias)".into(),
@@ -277,12 +304,15 @@ Write-Output ("DNS reset: " + $alias)
         header = crate::runner::PS_HEADER,
         adapter = adapter_expr,
     );
-    write_ps1(script.path(), &body)?;
+    let script = crate::runner::LockedScript::write(
+        data.join("logs").join(format!("dns_reset_{}.ps1", std::process::id())),
+        &body,
+    )?;
     let code = run_script_privileged(script.path())?;
     if code != 0 {
-        return Err(format!("сброс DNS не удался, код {}", code));
+        return Err(crate::texts::dns_reset_failed_code(code));
     }
-    Ok("DNS возвращён к автоматическим настройкам".into())
+    Ok(crate::texts::DNS_RESET_OK.into())
 }
 
 #[cfg(test)]
@@ -313,9 +343,10 @@ mod tests {
 
     #[test]
     fn builds_valid_dns_query() {
-        let q = build_dns_query("example.com");
+        let q = build_dns_query("example.com", 0xABCD);
         // 12 байт заголовка + 1+7 + 1+3 + 1(TLD-конец) + 4 (QTYPE/QCLASS)
         assert_eq!(q.len(), 12 + 8 + 4 + 1 + 4);
+        assert_eq!(&q[0..2], &[0xAB, 0xCD]); // ID транзакции — из параметра
         assert_eq!(&q[12..13], &[7u8]); // длина "example"
         assert_eq!(&q[13..20], b"example");
     }

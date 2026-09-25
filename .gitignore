@@ -7,18 +7,13 @@
 /src-tauri/gen/
 **/target/
 
-# Сборки, пакеты и релизы
+# Артефакты сборки и релизов
 /release/
-/github pre release/
 
-# Внутренние журналы (не публикуются)
-/progress.md
-/docs/design.md
-/docs/feedback.md
-/docs/TODO.md
-/docs/feature-spec-forks.md
+# Артефакты Playwright
+/.playwright-mcp/
 
-# Данные приложения
+# Данные рядом с программой
 /data/
 **/data/
 
@@ -26,7 +21,11 @@
 Thumbs.db
 desktop.ini
 
-# Прочее
+# Служебные файлы
 *.log
 .DS_Store
 https%3a%2f%2f*
+
+# Внутренние заметки (не публикуются)
+/Context/review-*.md
+/opencode.json

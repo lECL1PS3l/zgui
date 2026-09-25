@@ -1,7 +1,21 @@
 use crate::config::{Profile, ENGINE_FLOWSEAL};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Безопасный компонент имени лог-файла по id профиля: id приходит из внешнего
+/// источника (имя .bat или OTA-пресет), а подставляется в `stdout-{id}.txt` —
+/// `..`/разделители пускать нельзя, иначе файл ушёл бы за пределы `data/logs`.
+pub fn log_file_component(id: &str) -> String {
+    let cleaned: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    if cleaned.is_empty() || cleaned.contains("..") {
+        "profile".into()
+    } else {
+        cleaned
+    }
+}
 
 pub fn now_str() -> String {
     let secs = SystemTime::now()
@@ -11,21 +25,30 @@ pub fn now_str() -> String {
     secs.to_string()
 }
 
-pub fn make_id(prefix: &str) -> String {
-    // Одной секунды мало: два профиля, созданных подряд, получали одинаковый id,
-    // и второй «перетирал» первый при поиске по id. Добавляем миллисекунды и счётчик.
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    format!("{}-{}-{}", prefix, ms, n)
+/// Похоже ли на UTF-16 без BOM: в типичном тексте (команды/пути .bat) каждый
+/// второй байт — нулевой. Возвращает порядок байтов (LE) / big-endian (BE).
+fn looks_like_utf16(bytes: &[u8]) -> Option<bool> {
+    let even = bytes.len() - (bytes.len() % 2);
+    if even < 8 {
+        return None;
+    }
+    let pairs = even / 2;
+    let zero_second = (0..pairs).filter(|i| bytes[i * 2 + 1] == 0).count();
+    let zero_first = (0..pairs).filter(|i| bytes[i * 2] == 0).count();
+    // Порог 9/10: обычный UTF-8/ASCII даёт почти ноль совпадений.
+    if zero_second * 10 >= pairs * 9 {
+        Some(false)
+    } else if zero_first * 10 >= pairs * 9 {
+        Some(true)
+    } else {
+        None
+    }
 }
 
-/// Читает текст .bat независимо от кодировки: UTF-8, UTF-8 с BOM, UTF-16 LE с BOM.
-/// Авторские стратегии из репозитория бывают сохранены в UTF-16 — из-за этого
-/// токенизатор раньше получал пустой набор аргументов и стратегия молча пропадала.
+/// Читает текст .bat независимо от кодировки: UTF-8 (±BOM), UTF-16 LE/BE с BOM
+/// и UTF-16 без BOM (эвристика). Авторские стратегии из репозитория бывают
+/// сохранены в UTF-16 — из-за этого токенизатор раньше получал пустой набор
+/// аргументов и стратегия молча пропадала.
 pub fn decode_strategy_bytes(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return String::from_utf8_lossy(&bytes[3..]).into_owned();
@@ -34,6 +57,20 @@ pub fn decode_strategy_bytes(bytes: &[u8]) -> String {
         let u16s: Vec<u16> = bytes[2..]
             .as_chunks::<2>().0.iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&u16s);
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let u16s: Vec<u16> = bytes[2..]
+            .as_chunks::<2>().0.iter()
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&u16s);
+    }
+    if let Some(big_endian) = looks_like_utf16(bytes) {
+        let u16s: Vec<u16> = bytes
+            .as_chunks::<2>().0.iter()
+            .map(|c| if big_endian { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) })
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
@@ -105,11 +142,20 @@ fn tokenize_cmd(src: &str) -> Vec<String> {
             }
             '^' => {
                 if let Some(&n) = chars.peek() {
-                    if "!\"^%&<>()".contains(n) {
+                    if in_q {
+                        // Внутри кавычек cmd не экранирует кареткой: обычный символ.
+                        cur.push('^');
+                    } else {
+                        // Вне кавычек `^` делает ЛЮБОЙ следующий символ
+                        // литеральным (в т.ч. пробел: `^ ` — часть аргумента,
+                        // а не разделитель).
                         cur.push(n);
                         chars.next();
-                        started = true;
                     }
+                    started = true;
+                } else {
+                    cur.push('^');
+                    started = true;
                 }
             }
             '\\' => {
@@ -152,13 +198,45 @@ pub fn apply_game_filter(args: &[String], tcp: &str, udp: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn game_filter_ports(mode: &str) -> (String, String) {
-    match mode {
-        "all" => ("1024-65535".into(), "1024-65535".into()),
-        "tcp" => ("1024-65535".into(), "12".into()),
-        "udp" => ("12".into(), "1024-65535".into()),
-        _ => ("12".into(), "12".into()),
+/// Проверка и нормализация диапазонов портов в формате автора
+/// (`service.bat: :gf_validate_item`): список `порт` или `start-end` через
+/// запятую, каждый 1..65535, начало ≤ конца. None — формат неверен.
+pub fn validate_port_range(raw: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for item in raw.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let (a, b) = item
+            .split_once('-')
+            .map(|(a, b)| (a.trim(), b.trim()))
+            .unwrap_or((item, item));
+        let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) else { return None };
+        if a == 0 || b == 0 || a > 65535 || b > 65535 || a > b {
+            return None;
+        }
+        parts.push(if a == b { a.to_string() } else { format!("{a}-{b}") });
     }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    }
+}
+
+/// Диапазоны портов игрового фильтра: режимы как у автора (all/tcp/udp/off),
+/// невалидный пользовательский диапазон не ломает запуск — берём дефолт.
+pub fn game_filter_ports(mode: &str, tcp: &str, udp: &str) -> (String, String) {
+    let tcp = validate_port_range(tcp).unwrap_or_else(|| "1024-65535".into());
+    let udp = validate_port_range(udp).unwrap_or_else(|| "1024-65535".into());
+    let (t, u) = match mode {
+        "all" => (tcp.as_str(), udp.as_str()),
+        "tcp" => (tcp.as_str(), "12"),
+        "udp" => ("12", udp.as_str()),
+        _ => ("12", "12"),
+    };
+    (t.into(), u.into())
 }
 
 /// Импортирует .bat из каталога raw-стратегий в профили (id = имя файла без .bat = engine flowseal).
@@ -221,9 +299,59 @@ mod tests {
     }
 
     #[test]
+    fn decodes_utf16_variants_including_big_endian() {
+        let text = "\"%~dp0bin\\winws.exe\" --arg";
+        let le_bom: Vec<u8> = [0xFF, 0xFE]
+            .iter()
+            .copied()
+            .chain(text.encode_utf16().flat_map(|u| u.to_le_bytes()))
+            .collect();
+        let be_bom: Vec<u8> = [0xFE, 0xFF]
+            .iter()
+            .copied()
+            .chain(text.encode_utf16().flat_map(|u| u.to_be_bytes()))
+            .collect();
+        let le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        for (label, bytes) in [("le+bom", le_bom), ("be+bom", be_bom), ("le", le), ("be", be)] {
+            assert_eq!(decode_strategy_bytes(&bytes), text, "кодировка {label}");
+        }
+        assert_eq!(decode_strategy_bytes(text.as_bytes()), text);
+    }
+
+    #[test]
+    fn caret_escapes_any_char_outside_quotes() {
+        // `^ ` — литеральный пробел (не разделитель); в кавычках `^` обычный.
+        assert_eq!(tokenize_cmd("a^ b \"c^d\""), vec!["a b".to_string(), "c^d".to_string()]);
+    }
+
+    #[test]
+    fn log_component_neutralizes_path_traversal() {
+        assert_eq!(log_file_component("general (ALT)"), "general__ALT_");
+        assert_eq!(log_file_component("preset:zapret2-youtube"), "preset_zapret2-youtube");
+        assert_eq!(log_file_component(r"..\..\evil"), "profile");
+        assert_eq!(log_file_component(""), "profile");
+    }
+
+    #[test]
     fn game_filter_ports_off() {
-        assert_eq!(game_filter_ports("off"), ("12".into(), "12".into()));
-        assert_eq!(game_filter_ports("all"), ("1024-65535".into(), "1024-65535".into()));
+        assert_eq!(game_filter_ports("off", "", ""), ("12".into(), "12".into()));
+        assert_eq!(game_filter_ports("all", "", ""), ("1024-65535".into(), "1024-65535".into()));
+        assert_eq!(game_filter_ports("tcp", "1000-2000", ""), ("1000-2000".into(), "12".into()));
+        assert_eq!(game_filter_ports("udp", "мусор", "500-600"), ("12".into(), "500-600".into()));
+    }
+
+    #[test]
+    fn port_range_validation_matches_author_rules() {
+        // Пример самого автора (исключение RTMP).
+        assert_eq!(validate_port_range("1024-1934,1936-65535").as_deref(), Some("1024-1934,1936-65535"));
+        assert_eq!(validate_port_range("443").as_deref(), Some("443"));
+        assert_eq!(validate_port_range(" 12 , 14-20 ").as_deref(), Some("12,14-20"));
+        assert_eq!(validate_port_range("0"), None);
+        assert_eq!(validate_port_range("65536"), None);
+        assert_eq!(validate_port_range("100-50"), None);
+        assert_eq!(validate_port_range("abc"), None);
+        assert_eq!(validate_port_range(""), None);
     }
 
     #[test]

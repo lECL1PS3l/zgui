@@ -138,7 +138,7 @@ pub fn spawn(app: AppHandle, state: Arc<WatchdogState>) {
                     crate::logger::log("ok", "watchdog", "стратегия снова отвечает");
                     let _ = app.emit(
                         "zgui:toast",
-                        serde_json::json!({"kind":"ok","text":"стратегия снова отвечает"}),
+                        serde_json::json!({"kind":"ok","text": crate::texts::WATCHDOG_OK}),
                     );
                 }
             } else {
@@ -156,7 +156,7 @@ pub fn spawn(app: AppHandle, state: Arc<WatchdogState>) {
                         "zgui:toast",
                         serde_json::json!({
                             "kind":"warn",
-                            "text": format!("стратегия не отвечает: не отвечают {}", failed.join(", "))
+                            "text": crate::texts::watchdog_failed(&failed.join(", "))
                         }),
                     );
                 }

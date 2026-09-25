@@ -156,6 +156,8 @@
   ядро zapret — [bol-van](https://github.com/bol-van).
 - Драйвер WinDivert — [Basil](https://github.com/basil00/divert) (LGPLv3).
 - Иконки интерфейса — [Lucide Icons](https://github.com/lucide-icons/lucide) (ISC).
+- Фоновый узор «Topography» — [Hero Patterns](https://heropatterns.com/), автор
+  **Steve Schoger** (CC BY 4.0; спасибо за бесплатные паттерны).
 - Telegram-мост — [AmantesNihilo](https://github.com/AmantesNihilo/zapret-universal-interface) (MIT).
 - Логотип приложения — собственная графика.
 
@@ -163,7 +165,8 @@
 ZapretControl ([Virenbar](https://github.com/Virenbar)), Line ([Read1dno](
 https://github.com/Read1dno/Line)), FreeConnect ([cold-hell](https://github.com/cold-hell)).
 
-Полный перечень сторонних компонентов и точные лицензии — `THIRD_PARTY_NOTICES.md`.
+Полный перечень сторонних компонентов, точные лицензии и атрибуция —
+`THIRD_PARTY_NOTICES.md` (на английском, чтобы авторам было читаемо).
 
 ## Лицензия
 

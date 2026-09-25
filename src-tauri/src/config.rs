@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 pub const ENGINE_FLOWSEAL: &str = "flowseal";
 pub const ENGINE_ZAPRET2: &str = "zapret2";
@@ -120,6 +121,12 @@ impl Roots {
 pub struct Settings {
     pub update_interval_hours: u32,
     pub game_filter: String,
+    /// Кастомные диапазоны Game Filter (формат автора: `порт` или `start-end`
+    /// через запятую; пример исключения RTMP: 1024-1934,1936-65535).
+    #[serde(default = "default_port_range")]
+    pub game_filter_tcp: String,
+    #[serde(default = "default_port_range")]
+    pub game_filter_udp: String,
     pub ipset_mode: String,
     pub autostart_mode: String,
     pub autostart_profile: Option<String>,
@@ -130,8 +137,8 @@ pub struct Settings {
     #[serde(default = "default_tg_port")]
     pub tg_port: u16,
     /// Предлагать автоматически подключить Telegram-прокси, когда запущен Telegram
-    /// и нет VPN/туннеля (галочка в пункте «Telegram»).
-    #[serde(default = "default_true")]
+    /// и нет VPN/туннеля. По умолчанию выключено (включается галочкой в «Telegram»).
+    #[serde(default)]
     pub tg_offer: bool,
     /// Постоянный секрет MTProto-бриджа (32 hex). Один и тот же между запусками:
     /// Telegram переиспользует одну запись прокси вместо накопления мёртвых.
@@ -155,12 +162,12 @@ fn default_tg_port() -> u16 {
     1443
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_theme() -> String {
     "grey".into()
+}
+
+fn default_port_range() -> String {
+    "1024-65535".into()
 }
 
 impl Default for Settings {
@@ -168,13 +175,15 @@ impl Default for Settings {
         Self {
             update_interval_hours: 72,
             game_filter: "off".into(),
+            game_filter_tcp: default_port_range(),
+            game_filter_udp: default_port_range(),
             ipset_mode: "loaded".into(),
             autostart_mode: "none".into(),
             autostart_profile: None,
             always_admin: false,
             tg_autostart: false,
             tg_port: default_tg_port(),
-            tg_offer: true,
+            tg_offer: false,
             tg_secret: None,
             interval_migrated: false,
             theme: default_theme(),
@@ -238,6 +247,14 @@ pub struct UpdaterCache {
     /// фоновой проверки, чтобы неудачная попытка повторялась не каждые 2 с.
     #[serde(default)]
     pub next_auto: Option<u64>,
+}
+
+/// Последняя запись `state.json` не удалась (файл занят/нет прав): UI покажет
+/// предупреждение, а не будет молча работать со старым состоянием.
+static SAVE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn save_failed() -> bool {
+    SAVE_FAILED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -321,14 +338,34 @@ impl AppState {
         st
     }
 
-    pub fn save(&self) {
+    /// Сохраняет состояние (tmp + rename). Возвращает `false` при ошибке и
+    /// поднимает флаг `save_failed` — UI показывает проблему, вместо того чтобы
+    /// молча работать со старым `state.json`.
+    pub fn save(&self) -> bool {
         let path = self.data.join("state.json");
         let tmp = self.data.join("state.json.tmp");
-        if let Ok(s) = serde_json::to_string_pretty(self) {
-            if fs::write(&tmp, s).is_ok() {
-                let _ = fs::rename(&tmp, &path);
+        let json = match serde_json::to_string_pretty(self) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::logger::log("err", "state", &format!("сериализация настроек: {e}"));
+                SAVE_FAILED.store(true, Ordering::SeqCst);
+                return false;
+            }
+        };
+        // Антивирус/OneDrive иногда держат файл доли секунды — одна повторная
+        // попытка закрывает такие случаи.
+        for attempt in 0..2 {
+            if fs::write(&tmp, &json).is_ok() && fs::rename(&tmp, &path).is_ok() {
+                SAVE_FAILED.store(false, Ordering::SeqCst);
+                return true;
+            }
+            if attempt == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(150));
             }
         }
+        crate::logger::log("err", "state", "state.json не сохранён (файл занят или нет прав)");
+        SAVE_FAILED.store(true, Ordering::SeqCst);
+        false
     }
 
     pub fn ensure_dirs(&self) {
@@ -396,6 +433,27 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 pub fn file_sha256(path: &Path) -> Option<String> {
     fs::read(path).ok().map(|b| sha256_hex(&b))
+}
+
+/// Закреплённые SHA-256 наших собственных релизных ассетов (наши сборки движков).
+/// Эталон лежит в коде и не зависит от канала загрузки: при замене ассета в
+/// релизе хеш обновляется здесь и выпускается GUI (осознанный компромисс —
+/// защита от подмены на CDN/зеркалах, которой не даёт хеш «из тех же байтов»).
+pub const PINNED_ASSETS: &[(&str, &str)] = &[(
+    "engine-zapret2.zip",
+    "cb93d635338562408b557d9f8341b35f38f713f8cbb22d7f335cd278e82490f6",
+)];
+
+pub fn pinned_asset_sha256(name: &str) -> Option<&'static str> {
+    PINNED_ASSETS.iter().find(|(n, _)| *n == name).map(|(_, h)| *h)
+}
+
+/// Сверяет SHA-256 данных с эталоном формата GitHub API («sha256:<hex>»).
+/// `None` — эталона нет: вызывающий сам решает, блокировать или предупредить.
+pub fn digest_matches(data: &[u8], digest: Option<&str>) -> Option<bool> {
+    let d = digest?;
+    let want = d.strip_prefix("sha256:").unwrap_or(d);
+    Some(sha256_hex(data).eq_ignore_ascii_case(want))
 }
 
 /// Декодирует текст, автоматически определяя кодировку. Логи и вывод PowerShell/winws
@@ -601,10 +659,12 @@ mod tests {
         // сбрасывались. Проверяем полный round-trip.
         let mut roots = Roots::default();
         roots.set(ENGINE_FLOWSEAL, Some("C:\\z".into()));
-        let mut settings = Settings::default();
-        settings.admin_onboarded = true;
-        settings.always_admin = true;
-        settings.update_interval_hours = 5;
+        let settings = Settings {
+            admin_onboarded: true,
+            always_admin: true,
+            update_interval_hours: 5,
+            ..Settings::default()
+        };
         let state = AppState {
             data: PathBuf::new(), // #[serde(skip)]
             roots,
@@ -625,5 +685,12 @@ mod tests {
         assert!(back.settings.admin_onboarded, "admin_onboarded должен сохраниться");
         assert!(back.settings.always_admin);
         assert_eq!(back.settings.update_interval_hours, 5);
+    }
+
+    #[test]
+    fn tg_offer_defaults_to_off() {
+        // Просьба владельца 25.09: предложение TG-моста не выскакивает само,
+        // пока пользователь не включит галочку (и не раньше админ-вопроса).
+        assert!(!Settings::default().tg_offer);
     }
 }

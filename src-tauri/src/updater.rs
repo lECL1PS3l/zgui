@@ -94,44 +94,6 @@ pub fn collect_entries(data: &Path, roots: &Roots) -> Result<Vec<CatEntry>, Stri
         );
     }
 
-    // geoblock: списки заблокированных в РФ доменов (itdoginfo/allow-domains)
-    let geo = data.join("catalog/geoblock");
-    let geolists: [(&str, &str); 9] = [
-        ("allow-domains-russia-inside.lst", "Russia/inside-raw.lst"),
-        ("allow-domains-geoblock.lst", "Categories/geoblock.lst"),
-        ("allow-domains-block.lst", "Categories/block.lst"),
-        ("allow-domains-news.lst", "Categories/news.lst"),
-        ("allow-domains-youtube.lst", "Services/youtube.lst"),
-        ("allow-domains-discord.lst", "Services/discord.lst"),
-        ("allow-domains-telegram.lst", "Services/telegram.lst"),
-        ("allow-domains-twitter.lst", "Services/twitter.lst"),
-        ("allow-domains-meta.lst", "Services/meta.lst"),
-    ];
-    for (label, path) in geolists {
-        push(
-            "geoblock domains",
-            label,
-            raw("itdoginfo/allow-domains", "main", path),
-            geo.join(label),
-            true,
-        );
-    }
-
-    // geoblock IP: заблокированные Роскомнадзором подсети (runetfreedom/russia-blocked-geoip)
-    let ips: [(&str, &str); 2] = [
-        ("russia-blocked-text.lst", "text/ru-blocked.txt"),
-        ("russia-blocked-community-text.lst", "text/ru-blocked-community.txt"),
-    ];
-    for (label, path) in ips {
-        push(
-            "geoblock ip",
-            label,
-            raw("runetfreedom/russia-blocked-geoip", "release", path),
-            geo.join(label),
-            true,
-        );
-    }
-
     Ok(out)
 }
 
@@ -186,6 +148,10 @@ pub fn check_engine_latest() -> Result<String, String> {
     Ok(tag)
 }
 
+/// Верхний предел одного скачиваемого файла: списки и пресеты — сотни КБ,
+/// 64 МиБ с запасом; защита от «бесконечного» ответа (память/диск).
+pub const MAX_FETCH: u64 = 64 * 1024 * 1024;
+
 fn fetch_bytes(cli: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
     let resp = cli
         .get(url)
@@ -195,9 +161,86 @@ fn fetch_bytes(cli: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, St
     if !resp.status().is_success() {
         return Err(format!("{}: HTTP {}", url, resp.status()));
     }
-    resp.bytes()
-        .map(|b| b.to_vec())
-        .map_err(|e| e.to_string())
+    if resp.content_length().unwrap_or(0) > MAX_FETCH {
+        return Err(format!("{}: файл слишком большой", url));
+    }
+    let b = resp.bytes().map_err(|e| e.to_string())?;
+    if b.len() as u64 > MAX_FETCH {
+        return Err(format!("{}: файл слишком большой", url));
+    }
+    Ok(b.to_vec())
+}
+
+/// Что вернул условный запрос: тело (возможно, с ETag) или «не изменилось» (304).
+enum Fetched {
+    Body(Vec<u8>, Option<String>),
+    NotModified,
+}
+
+/// Скачивает файл, если он изменился: с сохранённым ETag шлём `If-None-Match`,
+/// и на 304 тело не передаётся вовсе (десятки конфигов не качаются зря).
+fn fetch_bytes_cond(
+    cli: &reqwest::blocking::Client,
+    url: &str,
+    etag: Option<&str>,
+) -> Result<Fetched, String> {
+    let mut req = cli.get(url).header("Cache-Control", "no-cache");
+    if let Some(tag) = etag {
+        req = req.header("If-None-Match", tag);
+    }
+    let resp = req.send().map_err(|e| format!("{}: {}", url, e))?;
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(Fetched::NotModified);
+    }
+    if !resp.status().is_success() {
+        return Err(format!("{}: HTTP {}", url, resp.status()));
+    }
+    if resp.content_length().unwrap_or(0) > MAX_FETCH {
+        return Err(format!("{}: файл слишком большой", url));
+    }
+    let tag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let b = resp.bytes().map_err(|e| e.to_string())?;
+    if b.len() as u64 > MAX_FETCH {
+        return Err(format!("{}: файл слишком большой", url));
+    }
+    Ok(Fetched::Body(b.to_vec(), tag))
+}
+
+/// К каким файлам каталога применима санити-проверка: только простые списки
+/// домен/IP. Скрипты автора (.bat/.cmd) НЕ проверяем — в них метасимволы
+/// (`@echo off`, `>nul`, кавычки) норма, а их содержимое разбирает парсер
+/// стратегий, а не эта проверка.
+fn sanitizable_catalog_file(label: &str) -> bool {
+    let l = label.to_lowercase();
+    l.ends_with(".txt") || l.ends_with(".lst") || l.ends_with(".list") || l == "hosts"
+}
+
+/// Санити-проверка скачанного списка перед записью: текст домен/IP. Отсекаем
+/// мусор и грубую подмену — управляющие символы, кавычки, шелл-метасимволы,
+/// URL-схемы; ограничиваем размер. Реальные авторские списки проверку
+/// проходят (проверено на живых файлах всех движков).
+fn sanitize_catalog_file(label: &str, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(format!("{label}: файл слишком большой"));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("{label}: файл не в UTF-8"))?;
+    for (i, line) in text.lines().enumerate() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') || l.starts_with(';') {
+            continue;
+        }
+        let bad = l.chars().any(|c| {
+            c.is_control() || matches!(c, '"' | '\'' | '`' | '$' | '<' | '>' | '|' | '&' | ';')
+        });
+        if bad || l.contains("://") {
+            return Err(format!("{label}: строка {} выглядит подозрительно", i + 1));
+        }
+    }
+    Ok(())
 }
 
 fn entry_base(e: &CatEntry) -> UpdEntry {
@@ -250,19 +293,43 @@ fn classify_entry(e: &CatEntry, archive: &UpdArchive, bytes: &[u8]) -> UpdEntry 
     u
 }
 
-fn check_entry(cli: &reqwest::blocking::Client, e: &CatEntry, settings: &Settings, archive: &UpdArchive) -> UpdEntry {
+fn check_entry(
+    cli: &reqwest::blocking::Client,
+    e: &CatEntry,
+    settings: &Settings,
+    archive: &UpdArchive,
+    etags: &EtagCache,
+) -> (UpdEntry, Option<String>) {
     if ipset_skipped(e, settings) {
         let mut u = entry_base(e);
         u.status = "skip-user".into();
-        return u;
+        return (u, None);
     }
-    match fetch_bytes(cli, &e.url) {
-        Ok(b) => classify_entry(e, archive, &b),
+    match fetch_bytes_cond(cli, &e.url, etags.get(&e.id).as_deref()) {
+        Ok(Fetched::NotModified) => {
+            // Не изменилось с прошлой проверки: тела нет, статус — по факту
+            // на диске (файл применён → ok; юзер правил → modified).
+            let mut u = entry_base(e);
+            let local = crate::config::file_sha256(&e.dest);
+            let applied = archive.applied(&e.id);
+            u.exists = e.dest.exists();
+            u.local_hash = local.clone();
+            u.applied_hash = applied.clone();
+            u.status = if !u.exists {
+                "new".into()
+            } else if applied.is_none() || applied == local {
+                "ok".into()
+            } else {
+                "modified".into()
+            };
+            (u, None)
+        }
+        Ok(Fetched::Body(b, tag)) => (classify_entry(e, archive, &b), tag),
         Err(err) => {
             let mut u = entry_base(e);
             u.status = "err".into();
             u.error = Some(err);
-            u
+            (u, None)
         }
     }
 }
@@ -272,24 +339,47 @@ fn check_entry(cli: &reqwest::blocking::Client, e: &CatEntry, settings: &Setting
 pub fn check_all(data: &Path, roots: &Roots, settings: &Settings) -> Result<Vec<UpdEntry>, String> {
     let cli = Arc::new(client()?);
     let archive = Arc::new(UpdArchive::load(data));
+    let etags = Arc::new(EtagCache::load(data));
     let entries = collect_entries(data, roots)?;
     let settings = Arc::new(settings.clone());
-    let mut out: Vec<(usize, UpdEntry)> = std::thread::scope(|scope| {
+    let mut out: Vec<(usize, UpdEntry, Option<String>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = entries
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
-                let (cli, settings, archive) = (cli.clone(), settings.clone(), archive.clone());
-                scope.spawn(move || (i, check_entry(&cli, &e, &settings, &archive)))
+                let (cli, settings, archive, etags) =
+                    (cli.clone(), settings.clone(), archive.clone(), etags.clone());
+                // Шаблон для случая паники потока: индекс и конфиг уже потеряны
+                // бы не были — раньше подставлялась пустая запись с индексом 0.
+                let fallback = entry_base(&e);
+                let h = scope.spawn(move || check_entry(&cli, &e, &settings, &archive, &etags));
+                (i, fallback, h)
             })
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or((0, UpdEntry::default())))
+            .map(|(i, fallback, h)| match h.join() {
+                Ok((u, tag)) => (i, u, tag),
+                Err(_) => {
+                    let mut u = fallback;
+                    u.status = "err".into();
+                    u.error = Some(crate::texts::CHECK_INTERRUPTED.into());
+                    (i, u, None)
+                }
+            })
             .collect()
     });
-    out.sort_by_key(|(i, _)| *i);
-    let mut result: Vec<UpdEntry> = out.into_iter().map(|(_, u)| u).collect();
+    out.sort_by_key(|(i, _, _)| *i);
+    // ETag'и — в кэш: следующая проверка не качает неизменившиеся файлы.
+    let mut cache = EtagCache::load(data);
+    let mut result: Vec<UpdEntry> = Vec::with_capacity(out.len());
+    for (_, u, tag) in out {
+        if let Some(t) = tag {
+            cache.set(&u.id, &t);
+        }
+        result.push(u);
+    }
+    cache.save(data);
     // OTA-набор пресетов — не файловая запись (живёт в state.json), добавляем
     // сводной строкой в конец каталога.
     result.push(check_preset_entry(&archive));
@@ -336,6 +426,18 @@ pub fn apply_updates(data: &Path, roots: &Roots, settings: &Settings, ids: Vec<S
         if !selected || matches!(u0.status.as_str(), "err" | "skip-user") {
             out.push(u0);
             continue;
+        }
+        // Санити перед записью: список должен быть текстом домен/IP, без
+        // метасимволов и URL (защита от грубой подмены в чужом репо).
+        // Скрипты (.bat) не проверяем — там метасимволы штатные.
+        if sanitizable_catalog_file(&e.label) {
+            if let Err(err) = sanitize_catalog_file(&e.label, &bytes) {
+                let mut u = u0;
+                u.status = "err".into();
+                u.error = Some(err);
+                out.push(u);
+                continue;
+            }
         }
         let remote = u0.remote_hash.clone().unwrap_or_default();
         if e.dest.exists() {
@@ -418,7 +520,19 @@ pub fn parse_preset_set(bytes: &[u8]) -> Result<RemotePresetSet, String> {
                 .collect::<Option<Vec<String>>>()
         });
         let Some(args) = args else { continue };
-        if id.is_empty() || args.is_empty() {
+        if args.is_empty() {
+            continue;
+        }
+        // id уходит в `preset:{id}` и в имя файла логов — внешний набор не
+        // должен приносить `..`/разделители (см. presets::valid_preset_id).
+        if !crate::presets::valid_preset_id(&id) {
+            if !id.is_empty() {
+                crate::logger::log(
+                    "warn",
+                    "updater",
+                    &format!("пресет с недопустимым id пропущен: {id:?}"),
+                );
+            }
             continue;
         }
         if crate::config::engine_def(&engine).is_none() {
@@ -447,15 +561,32 @@ pub fn fetch_preset_set() -> Result<Option<RemotePresetSet>, String> {
         return Err(format!("GitHub API: HTTP {}", resp.status()));
     }
     let rel: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-    let url = rel["assets"]
+    // Вместе с URL берём digest из GitHub API — независимый эталон SHA-256.
+    let asset = rel["assets"]
         .as_array()
         .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some("presets.json")))
-        .and_then(|x| x["browser_download_url"].as_str())
-        .map(str::to_string);
-    let Some(url) = url else {
+        .map(|x| {
+            (
+                x["browser_download_url"].as_str().unwrap_or("").to_string(),
+                x["digest"].as_str().map(str::to_string),
+            )
+        });
+    let Some((url, digest)) = asset else {
         return Ok(None);
     };
-    Ok(Some(parse_preset_set(&fetch_bytes(&cli, &url)?)?))
+    if url.is_empty() {
+        return Ok(None);
+    }
+    let bytes = fetch_bytes(&cli, &url)?;
+    match crate::config::digest_matches(&bytes, digest.as_deref()) {
+        Some(false) => {
+            crate::logger::log("err", "updater", "presets.json: SHA-256 не совпал с эталоном — обновление отменено");
+            return Err(crate::texts::integrity_failed("presets.json"));
+        }
+        Some(true) => {}
+        None => crate::logger::log("warn", "updater", "presets.json: эталонный хеш недоступен — целостность не подтверждена"),
+    }
+    Ok(Some(parse_preset_set(&bytes)?))
 }
 
 /// Сводная запись набора пресетов для каталога обновлений.
@@ -511,13 +642,11 @@ pub fn apply_preset_set(profiles: &mut Vec<crate::config::Profile>, set: &Remote
         let p = crate::presets::preset_profile(&rp.id, &rp.engine, &rp.name, rp.args.clone());
         match profiles.iter_mut().find(|x| x.id == p.id) {
             Some(ex) => {
-                if ex.builtin {
-                    if ex.args != p.args || ex.name != p.name || ex.engine != p.engine {
-                        ex.args = p.args;
-                        ex.name = p.name;
-                        ex.engine = p.engine;
-                        updated += 1;
-                    }
+                if ex.builtin && (ex.args != p.args || ex.name != p.name || ex.engine != p.engine) {
+                    ex.args = p.args;
+                    ex.name = p.name;
+                    ex.engine = p.engine;
+                    updated += 1;
                 }
                 // кастомный профиль с тем же id — не трогаем.
             }
@@ -569,7 +698,13 @@ pub fn sync_ipset(root: &Path, data: &Path, settings: &Settings) {
     if let Some(parent) = dest.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = crate::config::atomic_write(&dest, &bytes);
+    if let Err(err) = crate::config::atomic_write(&dest, &bytes) {
+        crate::logger::log(
+            "err",
+            "updater",
+            &format!("ipset-all.txt: запись не удалась ({}) — {}", dest.display(), err),
+        );
+    }
 }
 
 /// Реестр применённых хэшей (что конкретно мы записали).
@@ -592,18 +727,42 @@ impl UpdArchive {
     pub fn applied(&self, id: &str) -> Option<String> {
         self.map.get(id).cloned()
     }
-    /// Убирает записи групп с указанным префиксом.
-    #[allow(dead_code)]
-    pub fn purge_prefix(&mut self, prefix: &str) -> usize {
-        let before = self.map.len();
-        self.map.retain(|k, _| !k.starts_with(prefix));
-        before - self.map.len()
-    }
     pub fn record(&mut self, id: &str, hash: &str, _ts: String) {
         self.map.insert(id.to_string(), hash.to_string());
     }
     pub fn save(&self, data: &Path) {
         let _ = fs::write(Self::file(data), serde_json::to_string(&self.map).unwrap_or_default());
+    }
+}
+
+/// ETag'и удалённых конфигов (`catalog/etags.json`): проверка «не изменился»
+/// без повторной загрузки тела (H5).
+#[derive(Clone, Default)]
+pub struct EtagCache {
+    map: std::collections::HashMap<String, String>,
+}
+
+impl EtagCache {
+    fn file(data: &Path) -> PathBuf {
+        data.join("catalog/etags.json")
+    }
+    pub fn load(data: &Path) -> Self {
+        let m = fs::read_to_string(Self::file(data))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { map: m }
+    }
+    pub fn get(&self, id: &str) -> Option<String> {
+        self.map.get(id).cloned()
+    }
+    pub fn set(&mut self, id: &str, etag: &str) {
+        self.map.insert(id.to_string(), etag.to_string());
+    }
+    pub fn save(&self, data: &Path) {
+        if let Ok(json) = serde_json::to_vec(&self.map) {
+            let _ = crate::config::atomic_write(&Self::file(data), &json);
+        }
     }
 }
 
@@ -621,7 +780,7 @@ fn backup(src: &Path, ts: &str, data: &Path, catalog_only: bool) {
 
 // ------------------------------------------------- telegram bridge update
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TgBridgeInfo {
     /// Версия встроенного крейта (compile-time).
@@ -664,7 +823,7 @@ pub fn check_tg_bridge() -> TgBridgeInfo {
     };
 
     let Ok(cli) = client() else {
-        info.note = Some("не удалось создать HTTP-клиент".into());
+        info.note = Some(crate::texts::TG_CHECK_CLIENT.into());
         return info;
     };
 
@@ -679,7 +838,7 @@ pub fn check_tg_bridge() -> TgBridgeInfo {
             }
         }
         Err(e) => {
-            info.note = Some(format!("не удалось узнать версию ZUI: {}", e));
+            info.note = Some(crate::texts::tg_check_failed(&e));
         }
     }
 
@@ -730,6 +889,22 @@ mod tg_tests {
     fn parses_version_from_cargo_toml() {
         let t = "[package]\nname = \"x\"\nversion = \"2.3.4-zui.2\"\nedition = \"2024\"\n";
         assert_eq!(parse_toml_version(t).as_deref(), Some("2.3.4-zui.2"));
+    }
+
+    #[test]
+    fn sanitize_applies_to_lists_but_not_bat_scripts() {
+        // Регресс: санити гонялась и по авторским .bat стратегий — все 22 файла
+        // помечались «строка выглядит подозрительно» (@echo off, >nul, кавычки).
+        assert!(sanitizable_catalog_file("list-general.txt"));
+        assert!(sanitizable_catalog_file("ipset-service.txt"));
+        assert!(sanitizable_catalog_file("hosts"));
+        assert!(!sanitizable_catalog_file("general (ALT).bat"));
+        assert!(!sanitizable_catalog_file("service.bat"));
+        assert!(!sanitizable_catalog_file("general.cmd"));
+
+        // Для списка метасимволы — по-прежнему ошибка, для .bat проверка не зовётся.
+        assert!(sanitize_catalog_file("list.txt", b"<html>").is_err());
+        assert!(sanitize_catalog_file("list.txt", b"example.com\n1.2.3.0/24\n# ok\n").is_ok());
     }
 
     #[test]

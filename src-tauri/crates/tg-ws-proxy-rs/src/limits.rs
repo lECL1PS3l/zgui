@@ -5,6 +5,33 @@
 //! — and the pre-warmed pool holds more.  Accepting past that budget fails
 //! with `EMFILE` deep inside the accept loop, so the cap is computed up front
 //! from the process's soft `ulimit -n` instead.
+//!
+//! Also arms the keepalive probe settings shared by every bridge socket, so a
+//! peer that vanished without a FIN is reaped by the kernel instead of
+//! pinning its descriptor pair forever.
+
+use std::time::Duration;
+
+use tokio::net::TcpStream;
+
+/// Quiet time before the kernel starts keepalive probes on a bridge socket.
+const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+/// Interval between probes until the peer answers.
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Arm `SO_KEEPALIVE` on a bridge socket.
+///
+/// A peer that vanished without a FIN (powered-off phone, dropped router)
+/// leaves the bridge read loop blocked until the idle timeout; the kernel
+/// probes turn that into a closed socket much sooner on the platforms that
+/// honour them.
+pub fn set_tcp_keepalive(stream: &TcpStream) {
+    let socket = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(TCP_KEEPALIVE_IDLE)
+        .with_interval(TCP_KEEPALIVE_INTERVAL);
+    let _ = socket.set_tcp_keepalive(&keepalive);
+}
 
 /// Conservative fallback for platforms where the soft limit cannot be read.
 const DEFAULT_NOFILE_LIMIT: usize = 1024;

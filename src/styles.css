@@ -18,6 +18,11 @@
   --accent-glow: rgba(88, 101, 242, 0.45);
   --green: #4ade80;
   --amber: #fbbf24;
+  /* «Состояние» (выключено/ожидание/инфо) — мягкий изумруд (палитра C). */
+  --state: #ffb833;
+  --state-border: rgba(255, 184, 51, 0.45);
+  --state-bg: rgba(255, 184, 51, 0.10);
+  --state-text: #ffd694;
   --red: #f87171;
   --blue: #60a5fa;
   --sidebar-bg: rgba(30, 31, 34, 0.72);
@@ -27,7 +32,7 @@
   --code-text: #c6d0e4;
   --option-bg: #2b2d31;
   --overlay: rgba(10, 11, 13, 0.62);
-  --modal-solid: rgba(43, 45, 49, 0.97);
+  --modal-solid: rgba(43, 45, 49, 0.35);
   --toast-bg: rgba(43, 45, 49, 0.94);
   --brand-grad: linear-gradient(135deg, #313338, #1e1f22);
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
@@ -49,8 +54,8 @@
   --bg2: rgba(10, 12, 18, 0.42);
   --panel: rgba(16, 18, 26, 0.42);
   --panel2: rgba(26, 30, 42, 0.62);
-  --line: rgba(255, 255, 255, 0.08);
-  --line2: rgba(255, 255, 255, 0.16);
+  --line: rgba(255, 255, 255, 0.09);
+  --line2: rgba(255, 255, 255, 0.18);
   --text: #f2f5fa;
   --muted: #9ca3af;
   --accent: #3b82f6;
@@ -58,6 +63,10 @@
   --accent-glow: rgba(59, 130, 246, 0.45);
   --green: #4ade80;
   --amber: #f59e0b;
+  --state: #ffb833;
+  --state-border: rgba(255, 184, 51, 0.45);
+  --state-bg: rgba(255, 184, 51, 0.10);
+  --state-text: #ffd694;
   --red: #f87171;
   --blue: #60a5fa;
   --sidebar-bg: rgba(10, 10, 16, 0.34);
@@ -67,7 +76,7 @@
   --code-text: #c6d0e4;
   --option-bg: #0b0d13;
   --overlay: rgba(3, 4, 8, 0.62);
-  --modal-solid: rgba(22, 22, 30, 0.97);
+  --modal-solid: rgba(22, 22, 30, 0.35);
   --toast-bg: rgba(22, 22, 30, 0.92);
   --brand-grad: linear-gradient(135deg, #16233f, #0d1526);
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
@@ -89,22 +98,26 @@
   --line: rgba(31, 35, 40, 0.09);
   --line2: rgba(31, 35, 40, 0.18);
   --text: #1f2328;
-  --muted: #656d76;
+  --muted: #57606a;
   --accent: #0969da;
   --accent-dim: #0550ae;
   --accent-glow: rgba(9, 105, 218, 0.3);
   --green: #1a7f37;
   --amber: #9a6700;
+  --state: #ffb833;
+  --state-border: rgba(255, 184, 51, 0.5);
+  --state-bg: rgba(255, 184, 51, 0.12);
+  --state-text: #8a5a00;
   --red: #cf222e;
   --blue: #0969da;
   --sidebar-bg: rgba(246, 248, 250, 0.9);
   --topbar-bg: rgba(255, 255, 255, 0.88);
   --btn-bg: rgba(31, 35, 40, 0.03);
-  --code-bg: rgba(240, 242, 245, 0.95);
+  --code-bg: #f6f8fa;
   --code-text: #1f2328;
   --option-bg: #ffffff;
   --overlay: rgba(31, 35, 40, 0.35);
-  --modal-solid: rgba(255, 255, 255, 0.98);
+  --modal-solid: #ffffff;
   --toast-bg: rgba(255, 255, 255, 0.98);
   --brand-grad: linear-gradient(135deg, #eaeef2, #d0d7de);
   --shadow: 0 8px 32px rgba(31, 35, 40, 0.14);
@@ -139,12 +152,14 @@ body {
   position: absolute;
   inset: 0;
   background-repeat: repeat;
-  /* Дрейф — через background-position (как в референсе Deep Space Ops):
-     тайл повторяется, поэтому движение бесшовно и зацикливается без «маятника».
-     Скорость у каждого слоя своя (240/160/100 с) — получается параллакс.
-     Дельты кратны размеру тайла, иначе на стыке цикла был бы рывок. */
+  will-change: transform;
+  /* Дрейф — через transform (композитная анимация: WebView не перерисовывает
+     фон каждый кадр, как было у background-position). Тайл повторяется,
+     движение бесшовно и цикл замыкается без «маятника»; у каждого слоя своя
+     скорость (параллакс), дельты кратны размеру тайла (1–2 тайла за цикл). */
 }
-/* Дальний слой: мелкие тусклые звёзды, движется медленнее всех */
+/* Дальний слой: мелкие тусклые звёзды, движется медленнее всех.
+   Запас (inset) сверху/справа равен сдвигу (-560,+280), чтобы края не оголялись. */
 .stars-far {
   background-image:
     radial-gradient(1px 1px at 20px 30px, rgba(255,255,255,.55), transparent),
@@ -154,7 +169,8 @@ body {
     radial-gradient(1px 1px at 170px 200px, rgba(200,220,255,.45), transparent),
     radial-gradient(1px 1px at 250px 150px, rgba(255,255,255,.3), transparent);
   background-size: 280px 280px;
-  animation: star-drift-far 480s linear infinite;
+  inset: -280px -560px 0 0;
+  animation: star-drift-far 96s linear infinite;
 }
 /* Средний слой */
 .stars-mid {
@@ -165,7 +181,8 @@ body {
     radial-gradient(1.5px 1.5px at 110px 250px, rgba(190,215,255,.65), transparent),
     radial-gradient(1.5px 1.5px at 260px 300px, rgba(255,255,255,.6), transparent);
   background-size: 380px 380px;
-  animation: star-drift-mid 320s linear infinite;
+  inset: -380px -760px 0 0;
+  animation: star-drift-mid 64s linear infinite;
 }
 /* Ближний слой: крупные звёзды со свечением — быстрее всех + мерцание */
 .stars-near {
@@ -175,12 +192,13 @@ body {
     radial-gradient(2.5px 2.5px at 480px 90px, rgba(255,255,255,.85), transparent 70%),
     radial-gradient(2px 2px at 220px 420px, rgba(147,197,253,.8), transparent 70%);
   background-size: 520px 520px;
-  animation: star-twinkle 10s ease-in-out infinite alternate, star-drift-near 200s linear infinite;
+  inset: -520px -1040px 0 0;
+  animation: star-twinkle 10s ease-in-out infinite alternate, star-drift-near 40s linear infinite;
 }
 /* Топографические линии: бесшовный тайл 600x600 (белые контуры, фон прозрачный). */
 .topo {
   position: absolute;
-  inset: -12%;
+  inset: -620px -1220px -140px -140px;
   opacity: var(--topo-opacity);
   background-image: url("./assets/topo.svg");
   background-size: 600px 600px;
@@ -190,39 +208,42 @@ body {
   filter: blur(1.6px);
   mix-blend-mode: screen;
   pointer-events: none;
-  animation: topo-drift 600s linear infinite;
+  will-change: transform;
+  animation: topo-drift 200s linear infinite;
 }
 
 /* ------- оживление фона -------
-   Дрейф по диагонали через background-position (по референсу Deep Space Ops):
-   дальний слой 240 с, средний 160 с, ближний 100 с — параллакс. Мерцание —
-   отдельная анимация ближнего слоя. Дельты кратны тайлам (280/380/520/600),
-   чтобы цикл замыкался без рывка. Выключается в светлой теме,
-   при `prefers-reduced-motion` и когда окно свёрнуто. */
+   Дрейф по диагонали композитным transform (см. выше): параллакс-скорости
+   те же, что были у background-версии. Мерцание — отдельная анимация ближнего
+   слоя (тоже композитная, opacity). Дельты кратны тайлам (560/760/1040/1200 —
+   1–2 тайла), чтобы цикл замыкался без рывка. Выключается в светлой теме,
+   при `prefers-reduced-motion`, когда окно свёрнуто или не в фокусе. */
 @keyframes star-drift-far {
-  from { background-position: 0 0; }
-  to   { background-position: -2800px 1400px; }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-560px, 280px, 0); }
 }
 @keyframes star-drift-mid {
-  from { background-position: 0 0; }
-  to   { background-position: -3800px 1900px; }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-760px, 380px, 0); }
 }
 @keyframes star-drift-near {
-  from { background-position: 0 0; }
-  to   { background-position: -5200px 2600px; }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-1040px, 520px, 0); }
 }
 @keyframes star-twinkle {
   from { opacity: .45; }
   to   { opacity: 1; }
 }
 @keyframes topo-drift {
-  from { background-position: 0 0; }
-  to   { background-position: -3600px 1800px; }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-1200px, 600px, 0); }
 }
 
 html[data-theme="light"] .stars,
 html[data-theme="light"] .stars-near,
 html[data-theme="light"] .topo { animation: none; }
+/* Светлая тема — без паттерна (решение юзера 25.09): топо-слой скрыт. */
+html[data-theme="light"] .topo { display: none; }
 
 body.fx-paused .stars,
 body.fx-paused .stars-near,
@@ -277,6 +298,9 @@ body.fx-paused .topo { animation-play-state: paused; }
 .sidebar-foot { margin-top: auto; padding: 10px 8px; font-size: 11px; color: var(--muted); }
 .sidebar-foot .ver { color: var(--accent); }
 
+/* Слоган проекта — нейтральная строка внизу сайдбара. */
+.side-slogan { font-size: 10px; line-height: 1.35; opacity: 0.55; margin-top: 4px; }
+
 /* ------- main ------- */
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
@@ -297,7 +321,9 @@ body.fx-paused .topo { animation-play-state: paused; }
 .run-state.running { color: var(--green); border-color: rgba(74,222,128,.35); background: rgba(74,222,128,.08); }
 .run-state.idle { color: var(--muted); }
 .run-state.stop { color: var(--red); border-color: rgba(248,113,113,.35); }
-.run-state.busy { color: var(--amber); border-color: rgba(245,158,11,.35); background: rgba(245,158,11,.08); }
+/* Тот же янтарь, что у обводки баннера «Важно перед запуском» (.banner.alert);
+   текст — сплошной цвет темы (альфа 1.0), иначе на подложке выглядел блёкло. */
+.run-state.busy { color: var(--amber); border-color: rgba(251, 191, 36, .5); background: var(--state-bg); }
 
 .topbar-actions { display: flex; gap: 8px; }
 
@@ -322,16 +348,6 @@ body.fx-paused .topo { animation-play-state: paused; }
 .card-head h3 { font-size: 15px; font-weight: 600; }
 
 .banner { padding: 12px 16px; border-radius: 12px; margin-bottom: 18px; font-size: 13px; }
-/* Компактный фильтр-селект в шапке карточки (профили). */
-.mini-select {
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--bg2);
-  color: var(--text);
-  margin-left: 8px;
-}
 /* Баннер «нужны права администратора»: текст + кнопки в строку. */
 #adminBanner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .banner.alert {
@@ -345,11 +361,77 @@ body.fx-paused .topo { animation-play-state: paused; }
   line-height: 1.5;
   padding: 12px 16px;
   border-radius: 12px;
-  background: rgba(251, 191, 36, .1);
-  border: 1px solid rgba(251, 191, 36, .3);
+  background: var(--state-bg);
+  border: 1px solid var(--state-border);
+  color: var(--text);
+}
+/* Баннер-«состояние» (например, «Автозапуск выключен») — мягкий изумруд. */
+.banner.state {
+  background: linear-gradient(var(--card-veil), var(--card-veil)), var(--panel);
+  border: 1px solid var(--state-border);
   color: var(--text);
 }
 .hidden { display: none !important; }
+
+/* ------- правки релиза 25.09: состояния, блокировки кнопок, инструменты ------- */
+
+/* Блок «Права администратора» — рамка зелёным, как у чипа «актуально». */
+.admin-card { border-color: var(--green); }
+
+/* «Запускать службой (без программы)» — размер как у галочки Telegram-оффера. */
+.inline-check.boot-svc { font-size: 14px; gap: 10px; white-space: nowrap; }
+.boot-svc input { width: 18px; height: 18px; flex: 0 0 auto; }
+/* Селект автозапуска и галочка службы — в одну строку, на всю ширину карточки
+   (в половине form-grid подпись переносилась, а селект сжимался). */
+.boot-row { grid-column: 1 / -1; display: flex; align-items: flex-end; gap: 12px; }
+.boot-row > label:first-child { flex: 1; min-width: 0; }
+/* Галочка — по центру строки селекта, а не всего блока «подпись + селект». */
+.boot-svc { align-self: flex-end; margin-bottom: 8px; }
+@media (max-width: 720px) { .boot-row { flex-wrap: wrap; } }
+
+/* Цветовая метка движка рядом с названием (●). */
+.eng-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex: 0 0 auto;
+}
+
+/* Подсказка в «Инструментах» не наезжает на кнопку «Заменить фейки». */
+.tools-hint { margin-top: 14px; }
+
+/* Разделитель RU/EN в «О программе». */
+.about-sep { border: none; border-top: 1px solid var(--line2); margin: 14px 0; }
+/* Ссылки на авторов в «О программе». */
+#aboutBody a { color: var(--accent); text-decoration: none; cursor: pointer; }
+#aboutBody a:hover { text-decoration: underline; }
+
+/* Чип автозапуска: включён — зелёный, выключен — серый, как у обычного чипа. */
+#bootStateChip.off { border-color: var(--line2); color: var(--muted); background: var(--panel2); }
+#bootStateChip.best { border-color: var(--green); color: var(--green); background: rgba(74,222,128,.15); }
+
+/* Янтарная кнопка (предупреждающее согласие, например «Запустить тест»). */
+.btn.warn { color: var(--amber); border-color: rgba(251, 191, 36, 0.5); }
+.btn.warn:hover { border-color: var(--amber); box-shadow: 0 0 18px rgba(251, 191, 36, 0.18); }
+.btn.warn:disabled { opacity: 0.75; }
+
+/* Заливка-«шкала» на заблокированной кнопке: слева-направо, в цвете темы. */
+.btn, .theme-card { position: relative; overflow: hidden; }
+.fill-lock::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0.18;
+  clip-path: inset(0 100% 0 0);
+  animation: zguiFill var(--lock-sec, 5s) linear forwards;
+  pointer-events: none;
+}
+.theme-card.fill-lock::after { opacity: 0.28; }
+@keyframes zguiFill { to { clip-path: inset(0 0 0 0); } }
 
 /* ------- engines / tiles ------- */
 .engines { display: grid; grid-template-columns: 1fr; gap: 18px; }
@@ -511,6 +593,8 @@ body.fx-paused .topo { animation-play-state: paused; }
   white-space: pre-wrap;
   word-break: break-all;
 }
+/* Светлая тема: аргументы — обычным текстом, а не приглушённым (контраст). */
+html[data-theme="light"] .profile-args { color: var(--text); }
 #pmArgs { max-height: 40vh; }
 .empty { text-align: center; color: var(--muted); padding: 30px 0; }
 
@@ -643,7 +727,7 @@ select option:hover {
 }
 .status.ok { background: rgba(74,222,128,.12); color: var(--green); }
 .status.avail, .status.new { background: rgba(96,165,250,.12); color: var(--blue); }
-.status.modified { background: rgba(251,191,36,.12); color: var(--amber); }
+.status.modified { background: var(--state-bg); color: var(--state-text); }
 .status.err { background: rgba(248,113,113,.12); color: var(--red); }
 .status.skip-user { background: rgba(139,149,172,.12); color: var(--muted); }
 .status.unknown { background: rgba(139,149,172,.12); color: var(--muted); }
@@ -669,15 +753,14 @@ select option:hover {
 .warn-list li { font-size: 12px; color: var(--text); }
 
 .settings-admin { margin: 4px 0 12px; }
-.countdown-timer { margin-left: 8px; font-size: 12px; color: var(--muted); }
 .dns-info { min-height: 20px; margin: 2px 0 12px; font-size: 12px; }.dns-desc {
   font-size: 12px;
   line-height: 1.5;
   margin: -6px 0 12px;
   padding: 12px 16px;
   border-radius: 12px;
-  background: rgba(251, 191, 36, .1);
-  border: 1px solid rgba(251, 191, 36, .3);
+  background: var(--state-bg);
+  border: 1px solid var(--state-border);
   color: var(--text);
 }
 .dns-bench { font-size: 12px; margin-top: 12px; }
@@ -730,7 +813,6 @@ select option:hover {
 /* Табы движков на вкладке тестов (как в «Стратегиях»). */
 .test-tabs { margin: 10px 0 2px; flex-wrap: wrap; }
 /* «Геоблок-тест» — диагностика за краем, отделена от основных действий. */
-.test-geoblock { margin-left: auto; }
 /* Подсказка со скриншотами: как выключить прокси в Telegram. */
 .tg-tip-figure { margin: 10px 0 0; max-width: 100%; }
 .tg-tip-figure img {
@@ -798,18 +880,22 @@ select option:hover {
   overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0,0,0,.5);
 }
-/* Кнопки всегда доступны: приклеены к низу прокручиваемого окна. */
+/* Кнопки в потоке: без sticky-фона, иначе при полупрозрачном окне под
+   кнопками проступает вторая полупрозрачная полоса («подложка»). */
 .modal-box .modal-actions {
-  position: sticky;
-  bottom: -20px;
+  position: static;
   margin-top: 16px;
-  padding: 12px 0 4px;
-  background: var(--modal-solid);
+  padding: 0;
+  background: none;
 }
-.confirm-body { font-size: 13px; line-height: 1.55; }
-.confirm-body ul { margin: 8px 0 8px 18px; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+/* Светлая тема: окна непрозрачные (просьба владельца) — blur не нужен. */
+html[data-theme="light"] .modal-box { backdrop-filter: none; -webkit-backdrop-filter: none; }
+.confirm-body { font-size: 13px; line-height: 1.65; }
+.confirm-body p { margin: 0 0 12px; }
+.confirm-body p:last-child { margin-bottom: 0; }
+.confirm-body ul { margin: 10px 0 12px 18px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .confirm-body li { color: var(--text); }
-.confirm-body .sub { color: var(--muted); font-size: 12px; }
+.confirm-body .sub { color: var(--muted); font-size: 12px; line-height: 1.7; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .modal-head h3 { margin: 0; font-size: 16px; }
 .modal-x {

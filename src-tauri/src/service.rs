@@ -1,5 +1,5 @@
 use crate::config::{Profile, SERVICE_NAME};
-use crate::runner::{hidden_command, run_powershell, run_script_privileged};
+use crate::runner::{hidden_command, run_script_privileged};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -89,6 +89,7 @@ const VPN_SERVICES: &[&str] = &[
     "AmneziaVPN",
     "AmneziaVPN-service",
     "Happ",
+    "HappService",
 ];
 
 /// Разбирает строку `tasklist /FO CSV /NH`: `"имя","PID","...` в (имя, PID).
@@ -137,7 +138,7 @@ pub fn detect_vpn() -> Vec<ConflictProcess> {
         .map(|(name, pid)| ConflictProcess {
             pid,
             name,
-            note: "VPN/прокси — конфликтует с zapret".into(),
+            note: crate::texts::VPN_PROCESS_NOTE.into(),
         })
         .collect();
 
@@ -149,7 +150,7 @@ pub fn detect_vpn() -> Vec<ConflictProcess> {
                 out.push(ConflictProcess {
                     pid: 0,
                     name: format!("service:{}", svc),
-                    note: "VPN-служба запущена".into(),
+                    note: crate::texts::VPN_SERVICE_NOTE.into(),
                 });
             }
         }
@@ -179,9 +180,9 @@ pub fn detect_conflicts(data_dir: &Path, our_pid: Option<u32>) -> ConflictReport
                 pid: 0,
                 name: format!("service:{}", SERVICE_NAME),
                 note: if running {
-                    "служба zapret (не от нашего GUI) запущена".into()
+                    crate::texts::FOREIGN_SERVICE_RUNNING.into()
                 } else {
-                    "служба zapret (не от нашего GUI) установлена".into()
+                    crate::texts::FOREIGN_SERVICE_INSTALLED.into()
                 },
             });
     }
@@ -215,7 +216,7 @@ pub fn detect_conflicts(data_dir: &Path, our_pid: Option<u32>) -> ConflictReport
             report.processes.push(ConflictProcess {
                 pid,
                 name: name.clone(),
-                note: "чужой процесс zapret (не запущен нашим GUI)".into(),
+                note: crate::texts::FOREIGN_ENGINE_PROCESS.into(),
             });
         }
     }
@@ -223,7 +224,7 @@ pub fn detect_conflicts(data_dir: &Path, our_pid: Option<u32>) -> ConflictReport
     report.vpn = detect_vpn();
 
     if !report.processes.is_empty() || !report.vpn.is_empty() {
-        report.message = "Обнаружено конфликтующее ПО".into();
+        report.message = crate::texts::CONFLICTS_FOUND.into();
     }
     report
 }
@@ -292,18 +293,108 @@ pub fn any_winws_running() -> bool {
     .is_empty()
 }
 
+/// Идентификатор нашего движка, если путь лежит в раскладке программы
+/// (`...\data\engines\<движок>\...`). Ловит любую копию GUI, не только текущую.
+fn layout_engine_id(path: &str) -> Option<&'static str> {
+    let p = path.to_lowercase().replace('/', "\\");
+    let (_, tail) = p.split_once("\\data\\engines\\")?;
+    let id = tail.split('\\').next()?;
+    crate::config::engine_ids().into_iter().find(|e| e.eq_ignore_ascii_case(id))
+}
+
+/// Наш ли драйвер: файл `WinDivert*.sys` из раскладки программы — включая
+/// копии GUI в других папках. Чужие WinDivert (System32, другие программы)
+/// не трогаем.
+pub fn is_own_windivert_path(path: &str) -> bool {
+    let p = path.to_lowercase().replace('/', "\\");
+    let file = p.rsplit('\\').next().unwrap_or("");
+    file.starts_with("windivert") && file.ends_with(".sys") && layout_engine_id(&p).is_some()
+}
+
+/// Службы-драйверы WinDivert: (имя, состояние, путь образа).
+fn windivert_driver_services() -> Vec<(String, String, String)> {
+    let script = r#"Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'WinDivert*' -or ($_.PathName -and $_.PathName -match '(?i)windivert\d*\.sys$') } | ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.State, $_.PathName }"#;
+    let out = hidden_command("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output();
+    let Ok(o) = out else { return Vec::new() };
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(3, '|');
+            let name = it.next()?.trim();
+            let state = it.next()?.trim();
+            let path = it.next()?.trim();
+            (!name.is_empty() && !path.is_empty())
+                .then(|| (name.to_string(), state.to_string(), path.to_string()))
+        })
+        .collect()
+}
+
+/// Запущен ли хоть один движок из раскладки программы (любая копия GUI).
+fn our_engines_running() -> bool {
+    process_image_paths(&ENGINE_EXES)
+        .values()
+        .any(|p| layout_engine_id(&p.to_string_lossy()).is_some())
+}
+
+/// Гасит наши зависшие драйверы WinDivert (из комплектов движков), если ни
+/// один движок сейчас не запущен (иначе фильтр занят законно). Возвращает
+/// имена убранных служб; детали — в журнале.
+pub fn cleanup_own_stray_drivers() -> Vec<String> {
+    if our_engines_running() {
+        return Vec::new();
+    }
+    let mut cleaned = Vec::new();
+    for (name, state, path) in windivert_driver_services() {
+        if !state.eq_ignore_ascii_case("running") || !is_own_windivert_path(&path) {
+            continue;
+        }
+        let _ = hidden_command("sc.exe").args(["stop", &name]).output();
+        let _ = hidden_command("sc.exe").args(["delete", &name]).output();
+        // Успех — по факту состояния, а не по коду возврата: `sc delete` может
+        // вернуть «marked for deletion», хотя служба уже снимается.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let running = hidden_command("sc.exe")
+            .args(["query", &name])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_uppercase().contains("RUNNING"))
+            .unwrap_or(false);
+        if running {
+            crate::logger::log(
+                "warn",
+                "windivert",
+                &format!("зависший драйвер {name} не убран — нужны права администратора"),
+            );
+        } else {
+            crate::logger::log("warn", "windivert", &format!("убран зависший драйвер: {name} ({path})"));
+            cleaned.push(name);
+        }
+    }
+    cleaned
+}
+
 /// Запускает установленную службу zapret (нужна после теста, который её глушил).
+///
+/// Успех — по факту (`sc query` показывает RUNNING), а не по коду `net start`:
+/// «уже запущена» и «не запустилась» иначе выглядят одинаково.
 pub fn start_service(data_dir: &Path) -> Result<(), String> {
-    let script = crate::runner::TempFile::new(
-        data_dir.join("logs").join(format!("svc_start_{}.ps1", std::process::id())),
-    );
     let body = format!(
-        "{}\nnet start {} 2>$null | Out-Null\nexit 0",
+        "{}\nnet start {} 2>$null | Out-Null\n\
+         if ((& sc.exe query {} | Out-String) -match 'RUNNING') {{ exit 0 }} else {{ exit 1 }}",
         crate::runner::PS_HEADER,
+        SERVICE_NAME,
         SERVICE_NAME
     );
-    crate::runner::write_ps1(script.path(), &body)?;
-    run_script_privileged(script.path()).map(|_| ())
+    let script = crate::runner::LockedScript::write(
+        data_dir.join("logs").join(format!("svc_start_{}.ps1", std::process::id())),
+        &body,
+    )?;
+    let code = run_script_privileged(script.path())?;
+    if code != 0 {
+        return Err(crate::texts::service_start_failed_code(code));
+    }
+    Ok(())
 }
 
 /// Строит PowerShell-скрипт выгрузки конфликтов и список имён, по которым выдана
@@ -343,19 +434,25 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
     }
 
     let mut body = format!("{}\n", crate::runner::PS_HEADER);
+    body.push_str("$zguiFailed = 0\n");
     // Сначала ОСТАНАВЛИВАЕМ службы и ждём — иначе служба перезапустит свой процесс
     // (например, AmneziaVPN-service возрождает AmneziaVPN-service.exe после taskkill).
+    // НЕ отключаем и НЕ удаляем: у VPN-клиентов (Happ, Amnezia и др.) служба —
+    // их привилегированный компонент для TUN/DNS; GUI поднимает её сам при
+    // следующем подключении, а удалённую восстановить без переустановки не может.
     for svc in &vpn_services {
         body.push_str(&format!(
             "Stop-Service -Name '{}' -Force -ErrorAction SilentlyContinue\n\
-             Set-Service -Name '{}' -StartupType Disabled -ErrorAction SilentlyContinue\n\
              sc.exe stop '{}' 2>$null | Out-Null\n",
-            ps_single_quote(svc),
             ps_single_quote(svc),
             ps_single_quote(svc)
         ));
     }
     // Службы, чей путь ведёт к найденным VPN-процессам: массив + `-contains`.
+    // Только ОСТАНАВЛИВАЕМ (без `Set Disabled`/`sc delete`); их exe запоминаем
+    // в `$zguiSvcExes`, чтобы ниже не добивать процессы служб taskkill-ом —
+    // штатный stop даёт службе прибрать TUN-адаптер и маршруты, а жёсткое
+    // убийство оставляет их висеть и (у Happ) ломает запуск VPN до переустановки.
     if !names.is_empty() {
         let arr = names
             .iter()
@@ -364,14 +461,15 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
             .join(",");
         body.push_str(&format!(
             "$zguiNames = @({arr})\n\
+             $zguiSvcExes = @()\n\
              Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | ForEach-Object {{ \
                $m = [regex]::Match([string]$_.PathName, '^\\s*\"([^\"]+)\"'); \
                $exe = if ($m.Success) {{ $m.Groups[1].Value }} elseif ($_.PathName) {{ ($_.PathName -split '\\s+')[0] }} else {{ '' }}; \
                $leaf = [System.IO.Path]::GetFileNameWithoutExtension($exe); \
                if ($leaf -and ($zguiNames -contains $leaf.ToLower())) {{ \
+                 $zguiSvcExes += $leaf.ToLower(); \
                  Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue; \
-                 Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue; \
-                 sc.exe stop $_.Name 2>$null | Out-Null; sc.exe delete $_.Name 2>$null | Out-Null }} }}\n"
+                 sc.exe stop $_.Name 2>$null | Out-Null }} }}\n"
         ));
     }
     if !vpn_services.is_empty() || !names.is_empty() {
@@ -386,7 +484,8 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
         ));
     }
     // Убиваем по имени (все копии) массивом, с повтором (демон может успеть
-    // возродить процесс), затем по PID. Службы к этому моменту остановлены.
+    // возродить процесс), затем по PID. Службы к этому моменту остановлены,
+    // их процессы не добиваем (см. $zguiSvcExes выше).
     if !names.is_empty() {
         let arr = names
             .iter()
@@ -396,14 +495,28 @@ pub(crate) fn build_kill_script(report: &ConflictReport, our_pid: Option<u32>) -
         body.push_str(&format!(
             "$zguiKill = @({arr})\n\
              for ($i = 0; $i -lt 2; $i++) {{ \
-               foreach ($n in $zguiKill) {{ taskkill /F /T /IM $n 2>$null | Out-Null }}; \
-               Start-Sleep -Milliseconds 700 }}\n"
+               foreach ($n in $zguiKill) {{ \
+                 $leaf = [System.IO.Path]::GetFileNameWithoutExtension($n).ToLower(); \
+                 if ($zguiSvcExes -contains $leaf) {{ continue }}; \
+                 taskkill /F /T /IM $n 2>$null | Out-Null }}; \
+               Start-Sleep -Milliseconds 700 }}\n\
+             # Фоллбэк: taskkill может получить отказ у завершающегося процесса —\
+             # добиваем через Stop-Process по имени.\n\
+             foreach ($n in $zguiKill) {{ \
+               $leaf = [System.IO.Path]::GetFileNameWithoutExtension($n).ToLower(); \
+               if ($zguiSvcExes -contains $leaf) {{ continue }}; \
+               $pn = [System.IO.Path]::GetFileNameWithoutExtension($n); \
+               Get-Process -Name $pn -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }}\n"
         ));
     }
     for pid in &pids {
-        body.push_str(&format!("taskkill /F /T /PID {} 2>$null | Out-Null\n", pid));
+        body.push_str(&format!(
+            "taskkill /F /T /PID {pid} 2>$null | Out-Null\n\
+             if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 400 }}\n\
+             if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ $zguiFailed++ }}\n"
+        ));
     }
-    body.push_str("exit 0\n");
+    body.push_str("if ($zguiFailed -gt 0) { exit 1 } else { exit 0 }\n");
     Some((body, names))
 }
 
@@ -414,12 +527,21 @@ pub fn kill_conflicts(report: &ConflictReport, our_pid: Option<u32>, data_dir: &
     let Some((body, names)) = build_kill_script(report, our_pid) else {
         return Ok(Vec::new());
     };
-    let script = crate::runner::TempFile::new(
+    let script = crate::runner::LockedScript::write(
         data_dir.join("logs").join(format!("conflict_kill_{}.ps1", std::process::id())),
-    );
-    crate::runner::write_ps1(script.path(), &body)?;
-    let r = run_script_privileged(script.path());
-    r.map(|_| names)
+        &body,
+    )?;
+    let code = run_script_privileged(script.path())?;
+    if code != 0 {
+        // Часть процессов устояла: не выдаём это за полный успех, но и не
+        // срываем повтор действия — остаток UI покажет через conflict_check.
+        crate::logger::log(
+            "warn",
+            "conflict",
+            &format!("часть процессов не закрылась (код {code})"),
+        );
+    }
+    Ok(names)
 }
 
 /// Строит командную строку службы: "C:\...\winws.exe" --arg "v" ...
@@ -431,18 +553,47 @@ pub(crate) fn build_service_cmdline(root: &Path, profile: &Profile, args: &[Stri
         .unwrap_or_else(|| root.join("bin").join(profile.exe_name()));
     let mut s = format!("\"{}\"", bin.to_string_lossy());
     for a in args {
-        // Квотируем не только пробел: табуляция/новая строка тоже разделяют
-        // аргументы; кавычки внутри аргумента экранируем.
-        if a.is_empty() || a.chars().any(char::is_whitespace) || a.contains('"') {
-            s.push_str(" \"");
-            s.push_str(&a.replace('"', "\\\""));
-            s.push('"');
-        } else {
-            s.push(' ');
-            s.push_str(a);
-        }
+        s.push(' ');
+        s.push_str(&quote_win_arg(a));
     }
     s
+}
+
+/// Квотирование аргумента для Windows-командной строки по правилам MS:
+/// кавычки экранируются `\"`, а бэкслеши перед кавычкой — включая хвостовые
+/// (`C:\dir\`) — удваиваются. Иначе закрывающая кавычка «съедала» бы хвостовой
+/// бэкслеш и путь ломался.
+pub(crate) fn quote_win_arg(a: &str) -> String {
+    if !a.is_empty() && !a.chars().any(char::is_whitespace) && !a.contains('"') {
+        return a.to_string();
+    }
+    let mut out = String::with_capacity(a.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in a.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..(backslashes * 2 + 1) {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push(c);
+            }
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
 }
 
 /// Экранирует строку для вставки в PowerShell-литерал в одинарных кавычках.
@@ -452,9 +603,6 @@ fn ps_single_quote(text: &str) -> String {
 
 pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir: &Path) -> Result<(), String> {
     let cmdline = build_service_cmdline(root, profile, args);
-    let script = crate::runner::TempFile::new(
-        data_dir.join("logs").join(format!("svc_install_{}.ps1", std::process::id())),
-    );
     // ВАЖНО (почему не sc.exe): `sc` в PowerShell — алиас Set-Content, а передать
     // binPath с кавычками через нативную командную строку PS 5.1 надёжно нельзя.
     // New-Service принимает готовую строку как есть — кавычки и пробелы не ломаются.
@@ -467,39 +615,70 @@ pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir
         ps_single_quote(&cmdline),
         SERVICE_NAME
     );
-    crate::runner::write_ps1(script.path(), &body)?;
+    let script = crate::runner::LockedScript::write(
+        data_dir.join("logs").join(format!("svc_install_{}.ps1", std::process::id())),
+        &body,
+    )?;
     let code = run_script_privileged(script.path()).map_err(|e| e.to_string())?;
     if code != 0 {
-        return Err(format!("установка службы завершилась с кодом {}", code));
+        return Err(crate::texts::service_install_failed_code(code));
     }
-    run_powershell(&[
-        "reg".into(),
-        "add".into(),
-        "HKLM\\System\\CurrentControlSet\\Services\\zapret".into(),
-        "/v".into(),
-        "zgui-strategy".into(),
-        "/t".into(),
-        "REG_SZ".into(),
-        "/d".into(),
-        profile.id.clone(),
-        "/f".into(),
-    ])
-    .ok();
+    // Прямой вызов reg.exe: profile.id — внешние данные (имя .bat или OTA-пресета),
+    // в `powershell -Command` он парсился бы как код (инъекция). argv безопасен.
+    match hidden_command("reg.exe")
+        .args([
+            "add",
+            "HKLM\\System\\CurrentControlSet\\Services\\zapret",
+            "/v",
+            "zgui-strategy",
+            "/t",
+            "REG_SZ",
+            "/d",
+            profile.id.as_str(),
+            "/f",
+        ])
+        .output()
+    {
+        Ok(o) if !o.status.success() => {
+            crate::logger::log(
+                "err",
+                "service",
+                "служба установлена, но стратегию записать не удалось — выберите её заново",
+            );
+        }
+        Err(_) => crate::logger::log(
+            "err",
+            "service",
+            "служба установлена, но reg.exe недоступен — стратегия не записана",
+        ),
+        _ => {}
+    }
     Ok(())
 }
 
 pub fn remove_service(data_dir: &Path) -> Result<(), String> {
-    let script = crate::runner::TempFile::new(
-        data_dir.join("logs").join(format!("svc_remove_{}.ps1", std::process::id())),
-    );
+    // Успех — «службы больше нет» (1060) или «помечена на удаление» (1072):
+    // `sc delete` может вернуть «marked for deletion» ещё до фактического
+    // снятия, и это не ошибка.
     let body = format!(
-        "{}\nStop-Service -Name '{}' -Force -ErrorAction SilentlyContinue\n& sc.exe delete {} 2>$null | Out-Null\nexit 0",
+        "{}\nStop-Service -Name '{}' -Force -ErrorAction SilentlyContinue\n\
+         & sc.exe delete {} 2>$null | Out-Null\nStart-Sleep -Milliseconds 500\n\
+         & sc.exe query {} 2>$null | Out-Null\n\
+         if ($LASTEXITCODE -eq 1060 -or $LASTEXITCODE -eq 1072) {{ exit 0 }} else {{ exit 1 }}",
         crate::runner::PS_HEADER,
+        SERVICE_NAME,
         SERVICE_NAME,
         SERVICE_NAME
     );
-    crate::runner::write_ps1(script.path(), &body).map_err(|e| e.to_string())?;
-    run_script_privileged(script.path()).map(|_| ())
+    let script = crate::runner::LockedScript::write(
+        data_dir.join("logs").join(format!("svc_remove_{}.ps1", std::process::id())),
+        &body,
+    )?;
+    let code = run_script_privileged(script.path())?;
+    if code != 0 {
+        return Err(crate::texts::service_remove_failed_code(code));
+    }
+    Ok(())
 }
 
 /// Служба `zapret` с путём в наш layout (`...\data\engines\...`) — наша, даже
@@ -536,6 +715,21 @@ pub fn service_state() -> (bool, bool) {
     }
 }
 
+/// Разбирает значение `zgui-strategy` из вывода `reg query`.
+/// Строка вида `    zgui-strategy    REG_SZ    general (ALT)` — id может
+/// содержать пробелы, поэтому режем ровно по типу, а не по whitespace
+/// (иначе «general (ALT)» превращался в «(ALT)»).
+fn parse_strategy_value(txt: &str) -> Option<String> {
+    let line = txt.lines().find(|l| l.contains("zgui-strategy"))?;
+    let (_, val) = line.split_once("REG_SZ")?;
+    let val = val.trim();
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
+}
+
 pub fn service_strategy(_data_dir: &Path) -> Option<String> {
     let out = hidden_command("reg.exe")
         .args([
@@ -547,9 +741,7 @@ pub fn service_strategy(_data_dir: &Path) -> Option<String> {
         .output()
         .ok()?;
     let txt = String::from_utf8_lossy(&out.stdout);
-    let line = txt.lines().find(|l| l.contains("zgui-strategy"))?;
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    parts.last().map(|s| s.to_string())
+    parse_strategy_value(&txt)
 }
 
 #[cfg(test)]
@@ -561,6 +753,22 @@ mod tests {
         for d in crate::config::engines() {
             assert!(ENGINE_EXES.contains(&d.exe), "нет в конфликтах: {}", d.exe);
         }
+    }
+
+    #[test]
+    fn strategy_value_keeps_spaces_and_semicolons() {
+        // id с пробелами — раньше резался по whitespace («general (ALT)» → «(ALT)»).
+        assert_eq!(
+            parse_strategy_value("    zgui-strategy    REG_SZ    general (ALT)\r\n"),
+            Some("general (ALT)".into())
+        );
+        // Внешне опасные символы остаются данными: reg.exe получает их argv.
+        assert_eq!(
+            parse_strategy_value("    zgui-strategy    REG_SZ    x; Start-Process calc"),
+            Some("x; Start-Process calc".into())
+        );
+        assert_eq!(parse_strategy_value("    zgui-strategy    REG_SZ    "), None);
+        assert_eq!(parse_strategy_value("нет такой строки"), None);
     }
 
     #[test]
@@ -577,6 +785,17 @@ mod tests {
         let c = build_service_cmdline(Path::new(r"D:\e"), &p, &p.args);
         assert!(c.contains("winws2.exe"));
         assert!(c.contains("\"--lua-init=@C:\\lua lib\\zapret-lib.lua\""));
+    }
+
+    #[test]
+    fn quote_win_arg_doubles_trailing_backslash() {
+        assert_eq!(quote_win_arg("plain"), "plain");
+        // Без пробелов/кавычек — как есть.
+        assert_eq!(quote_win_arg(r"C:\dir\"), r"C:\dir\");
+        // Хвостовой `\` перед закрывающей кавычкой удваивается.
+        assert_eq!(quote_win_arg(r"C:\my dir\"), r#""C:\my dir\\""#);
+        // Кавычка внутри — \", бэкслеши перед ней удваиваются.
+        assert_eq!(quote_win_arg(r#"--x="q""#), r#""--x=\"q\"""#);
     }
 
     #[test]
@@ -604,6 +823,7 @@ mod tests {
     #[test]
     fn detects_vpn_process_names() {
         assert!(is_vpn_process("Happ.exe"));
+        assert!(is_vpn_process("happd.exe"));
         assert!(is_vpn_process("wireguard.exe"));
         assert!(is_vpn_process("AmneziaVPN.exe"));
         assert!(is_vpn_process("sing-box.exe"));
@@ -664,6 +884,29 @@ mod tests {
         };
         let (body, _) = build_kill_script(&report, None).expect("должен быть скрипт");
         assert!(body.contains(r#"[regex]::Match([string]$_.PathName, '^\s*"([^"]+)"')"#), "разбор PathName по кавычкам: {body}");
+    }
+
+    #[test]
+    fn kill_script_keeps_services_stopped_not_deleted() {
+        // Службы VPN-клиентов (HappService и др.) только останавливаем:
+        // `Set Disabled`/`sc delete` ломали клиента до переустановки, а exe
+        // службы не должен добиваться taskkill-ом — процесс гасит сам SCM.
+        let report = ConflictReport {
+            vpn: vec![
+                ConflictProcess { pid: 7, name: "Happ.exe".into(), note: String::new() },
+                ConflictProcess { pid: 8, name: "happd.exe".into(), note: String::new() },
+            ],
+            ..Default::default()
+        };
+        let (body, _) = build_kill_script(&report, None).expect("должен быть скрипт");
+        assert!(!body.contains("StartupType Disabled"), "службу нельзя отключать: {body}");
+        assert!(!body.contains("sc.exe delete"), "службу нельзя удалять: {body}");
+        assert!(body.contains("Stop-Service"), "службу нужно останавливать: {body}");
+        assert!(body.contains("$zguiSvcExes"), "exe служб нужно запоминать: {body}");
+        assert!(
+            body.contains("if ($zguiSvcExes -contains $leaf)"),
+            "процессы остановленных служб не добиваем: {body}"
+        );
     }
 
     #[test]
@@ -729,5 +972,36 @@ mod tests {
         assert!(c.contains("zapret-discord-youtube-1.10.2"));
         assert!(c.contains("winws.exe"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn layout_engine_id_matches_any_copy_only_for_our_layout() {
+        assert_eq!(
+            layout_engine_id(r"\??\E:\Z GUI\target\release\data\engines\flowseal\bin\winws.exe"),
+            Some("flowseal")
+        );
+        assert_eq!(layout_engine_id(r"D:\ZGUI 2\data\engines\ZAPRET2\winws2.exe"), Some("zapret2"));
+        assert_eq!(layout_engine_id(r"E:\mydata\engines\flowseal\winws.exe"), None);
+        assert_eq!(layout_engine_id(r"C:\Windows\System32\drivers\windivert.sys"), None);
+    }
+
+    #[test]
+    fn own_windivert_path_detects_our_copies_not_foreign() {
+        // Наша раскладка: любая копия программы, включая старые сборки.
+        assert!(is_own_windivert_path(
+            r"\??\E:\Base\opencode\Z GUI\src-tauri\target\release\data\engines\flowseal\zapret-discord-youtube-1.10.2\bin\WinDivert64.sys"
+        ));
+        assert!(is_own_windivert_path(
+            r"E:\Base\ZGUI_Stable_24.09.2026_15-36\data\engines\goodbyedpi\WinDivert64.sys"
+        ));
+        assert!(is_own_windivert_path(r"D:\ZGUI-copy\data\engines\dpibreak\WinDivert.sys"));
+        assert!(is_own_windivert_path(r"x:/tmp/Z GUI 2/data/engines/zapret2/bin/windivert64.sys"));
+        // Чужие драйверы не трогаем.
+        assert!(!is_own_windivert_path(r"\SystemRoot\System32\drivers\WinDivert.sys"));
+        assert!(!is_own_windivert_path(r"C:\Program Files\FlyFrogLLC\Happ\windivert.sys"));
+        assert!(!is_own_windivert_path(r"E:\tools\data\engines\unknown\WinDivert64.sys"));
+        assert!(!is_own_windivert_path(
+            r"E:\Base\opencode\Z GUI\src-tauri\target\release\data\engines\flowseal\bin\fake.sys"
+        ));
     }
 }

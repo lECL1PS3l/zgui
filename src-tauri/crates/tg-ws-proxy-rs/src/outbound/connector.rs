@@ -108,12 +108,13 @@ impl OutboundConnector {
             },
         };
 
-        if let Ok(stream) = &result
-            && let Some(bytes) = self.socket_buffer_bytes
-        {
-            let socket = socket2::SockRef::from(stream);
-            let _ = socket.set_send_buffer_size(bytes);
-            let _ = socket.set_recv_buffer_size(bytes);
+        if let Ok(stream) = &result {
+            if let Some(bytes) = self.socket_buffer_bytes {
+                let socket = socket2::SockRef::from(stream);
+                let _ = socket.set_send_buffer_size(bytes);
+                let _ = socket.set_recv_buffer_size(bytes);
+            }
+            crate::limits::set_tcp_keepalive(stream);
         }
         result
     }

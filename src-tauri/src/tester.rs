@@ -1,8 +1,6 @@
 use crate::config::Profile;
 use std::path::{Path, PathBuf};
 
-const BUILTIN_TEST_DOMAINS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/test-domains-russia.lst"));
-
 #[cfg(test)]
 use std::net::TcpStream;
 #[cfg(test)]
@@ -16,13 +14,13 @@ pub struct DomainGroup {
     pub priority: u8,
 }
 
-pub const GROUP_YOUTUBE: DomainGroup = DomainGroup { id: "youtube", label: "YouTube", critical: true, priority: 1 };
-pub const GROUP_YOUTUBE_MUSIC: DomainGroup = DomainGroup { id: "youtube-music", label: "YouTube Music", critical: true, priority: 1 };
-pub const GROUP_DISCORD: DomainGroup = DomainGroup { id: "discord", label: "Discord", critical: true, priority: 1 };
-pub const GROUP_MICROSOFT_XBOX: DomainGroup = DomainGroup { id: "microsoft-xbox", label: "Microsoft / Xbox", critical: false, priority: 2 };
-pub const GROUP_GOOGLE: DomainGroup = DomainGroup { id: "google", label: "Google", critical: false, priority: 2 };
-pub const GROUP_CLOUDFLARE: DomainGroup = DomainGroup { id: "cloudflare", label: "Cloudflare", critical: false, priority: 2 };
-pub const GROUP_OTHER: DomainGroup = DomainGroup { id: "other", label: "Дополнительные домены", critical: false, priority: 3 };
+pub const GROUP_YOUTUBE: DomainGroup = DomainGroup { id: "youtube", label: crate::texts::GROUP_LABEL_YOUTUBE, critical: true, priority: 1 };
+pub const GROUP_YOUTUBE_MUSIC: DomainGroup = DomainGroup { id: "youtube-music", label: crate::texts::GROUP_LABEL_YOUTUBE_MUSIC, critical: true, priority: 1 };
+pub const GROUP_DISCORD: DomainGroup = DomainGroup { id: "discord", label: crate::texts::GROUP_LABEL_DISCORD, critical: true, priority: 1 };
+pub const GROUP_MICROSOFT_XBOX: DomainGroup = DomainGroup { id: "microsoft-xbox", label: crate::texts::GROUP_LABEL_MICROSOFT_XBOX, critical: false, priority: 2 };
+pub const GROUP_GOOGLE: DomainGroup = DomainGroup { id: "google", label: crate::texts::GROUP_LABEL_GOOGLE, critical: false, priority: 2 };
+pub const GROUP_CLOUDFLARE: DomainGroup = DomainGroup { id: "cloudflare", label: crate::texts::GROUP_LABEL_CLOUDFLARE, critical: false, priority: 2 };
+pub const GROUP_OTHER: DomainGroup = DomainGroup { id: "other", label: crate::texts::GROUP_LABEL_OTHER, critical: false, priority: 3 };
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -41,7 +39,11 @@ pub fn classify_domain(host: &str) -> DomainGroup {
     if h == "music.youtube.com" {
         return GROUP_YOUTUBE_MUSIC;
     }
-    if ["youtube.com", "www.youtube.com", "youtu.be", "youtube-nocookie.com", "youtube.googleapis.com", "youtubei.googleapis.com", "googlevideo.com", "ytimg.com", "ytimg.l.google.com", "yt3.googleusercontent.com"].contains(&h.as_str()) || h.ends_with(".youtube.com") {
+    if ["youtube.com", "www.youtube.com", "youtu.be", "youtube-nocookie.com", "youtube.googleapis.com", "youtubei.googleapis.com", "googlevideo.com", "ytimg.com", "ytimg.l.google.com", "yt3.googleusercontent.com"].contains(&h.as_str())
+        || h.ends_with(".youtube.com")
+        || h.ends_with(".ytimg.com")
+        || h.ends_with(".googlevideo.com")
+    {
         return GROUP_YOUTUBE;
     }
     if ["discord.com", "discord.gg", "discord.media", "discordapp.com", "discordapp.net", "discordapp.io", "discordapp.org", "discordstatus.com", "discord.status", "gateway.discord.gg", "dl.discordapp.net", "images.discordapp.net", "status.discordapp.com"].contains(&h.as_str()) || h.ends_with(".discord.com") || h.ends_with(".discordapp.com") {
@@ -54,7 +56,7 @@ pub fn classify_domain(host: &str) -> DomainGroup {
     if h.contains("gemini") || h.contains("aistudio") || h.contains("notebooklm") || h.ends_with(".ai.google") || h.contains("labs.google") {
         return GROUP_OTHER;
     }
-    if h == "google.com" || h.ends_with(".google.com") || h.ends_with(".googleusercontent.com") || h.ends_with(".googleapis.com") {
+    if h == "google.com" || h.ends_with(".google.com") || h.ends_with(".googleusercontent.com") || h.ends_with(".googleapis.com") || h == "gstatic.com" || h.ends_with(".gstatic.com") {
         return GROUP_GOOGLE;
     }
     if h == "cloudflare.com" || h.ends_with(".cloudflare.com") || h.ends_with(".cloudflare.net") || h == "cloudflare-dns.com" || h == "one.one.one.one" {
@@ -153,92 +155,34 @@ fn probe_tcp(host: &str, port: u16, timeout: Duration) -> (bool, u64, String) {
     }
 }
 
-/// Отсекает мусорные строки из .lst: `.ua`, IP-адреса, `*.domain`, ведущие/хвостовые точки.
-fn usable_test_host(host: &str) -> bool {
-    if host.is_empty() || host.len() > 253 || host.contains('*') || host.contains("..") {
-        return false;
-    }
-    if host.starts_with('.') || host.ends_with('.') {
-        return false;
-    }
-    let has_alpha = host.chars().any(|c| c.is_ascii_alphabetic());
-    let labels: Vec<&str> = host.split('.').collect();
-    has_alpha
-        && labels.len() >= 2
-        && labels
-            .iter()
-            .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-}
-
-/// Готовит список доменов из geoblock-списка (RAW .lst: по строке на домен).
-/// Разбор одной строки .lst в домен (отбрасывает комментарии, пути и мусор).
-/// Понимает и «человеческий» формат: `https://www.example.com/путь` → `www.example.com`
-/// (иначе строка резалась по первому `/` и превращалась в `https:` — домен терялся).
-fn parse_rule_line(raw: &str, seen: &mut std::collections::HashSet<String>) -> Option<(String, String)> {
-    let line = raw.trim();
-    if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
-        return None;
-    }
-    let without_scheme = line
-        .strip_prefix("https://")
-        .or_else(|| line.strip_prefix("http://"))
-        .or_else(|| line.strip_prefix("//"))
-        .unwrap_or(line);
-    let host = without_scheme
-        .split(['/', ' ', '\t', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .split(':') // порт (example.com:443)
-        .next()
-        .unwrap_or("")
-        .trim()
-        .trim_end_matches('.')
-        .to_lowercase();
-    if !usable_test_host(&host) {
-        return None;
-    }
-    if !seen.insert(host.clone()) {
-        return None;
-    }
-    let key = host.split('.').next().unwrap_or(&host).to_string();
-    Some((key, host))
-}
-
-/// Обязательные проверки — всегда в тесте. YouTube Music скрыт в UI,
-/// но остаётся жёстким требованием к успешной стратегии.
+/// Стандартный набор целей — 1:1 с `utils/targets.txt` оригинала flowseal
+/// (только URL-цели; ICMP-цели по IP убраны — пинг DNS есть во вкладке «DNS»).
+/// CDN-эндпоинты надёжнее «конкретных» доменов: их же проверяет авторский харнесс.
 pub const REQUIRED_DOMAINS: &[&str] = &[
-    "www.youtube.com",
-    "music.youtube.com",
-    "youtu.be",
-    "youtube-nocookie.com",
-    "googlevideo.com",
-    "ytimg.com",
     "discord.com",
-    "discord.gg",
-    "discordapp.com",
     "gateway.discord.gg",
-    "login.live.com",
-    "account.live.com",
-    "microsoft.com",
-    "xbox.com",
-    "xboxlive.com",
-    "xboxservices.com",
+    "cdn.discordapp.com",
+    "updates.discord.com",
+    "www.youtube.com",
+    "youtu.be",
+    "i.ytimg.com",
+    "redirector.googlevideo.com",
     "www.google.com",
-    "google.com",
+    "www.gstatic.com",
     "www.cloudflare.com",
-    "cloudflare.com",
+    "cdnjs.cloudflare.com",
 ];
 
 /// Онлайн-списки геоблока — отдельный диагностический тест (лимит задаёт UI).
-/// Основной набор теста: критические домены (YouTube, Discord) и вторые по
-/// приоритету (Microsoft/Xbox, Google, Cloudflare — сообщаются, но для успеха
-/// не обязательны). Доп. домены в стандартный тест НЕ входят: они в отдельном
-/// редактируемом файле, для них отдельная кнопка (см. `load_extra_domains`).
+/// Основной набор: критические группы (YouTube, Discord) и вторые по приоритету
+/// (Google, Cloudflare — сообщаются, но для успеха не обязательны).
 pub fn main_domains(limit: usize) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for host in REQUIRED_DOMAINS {
         let host = host.to_string();
-        out.push((host.split('.').next().unwrap_or(&host).to_string(), host));
+        // Ключ — полный слаг хоста: первые лейблы не уникальны ("www").
+        let key = host.replace('.', "_");
+        out.push((key, host));
         if out.len() >= limit {
             break;
         }
@@ -246,75 +190,98 @@ pub fn main_domains(limit: usize) -> Vec<(String, String)> {
     out
 }
 
-/// Путь к редактируемому списку доп. доменов (рядом с данными программы).
-pub fn extra_domains_path(data: &Path) -> std::path::PathBuf {
-    data.join("catalog").join("test-domains-extra.lst")
-}
-
-/// Создаёт файл доп. доменов из вшитого списка, если его ещё нет: пользователь
-/// правит файл руками, вшитая таблица — только стартовое наполнение.
-pub fn ensure_extra_domains_file(data: &Path) -> std::path::PathBuf {
-    let p = extra_domains_path(data);
-    if !p.exists() {
-        let mut text = String::from(
-            "# Дополнительные домены для отдельного теста «Доп. домены».\r\n\
-             # Формат: один домен в строке; строки с # игнорируются.\r\n\
-             # В стандартном тесте эти домены НЕ проверяются (там только YouTube/Discord\r\n\
-             # и вторые по приоритету Microsoft/Xbox, Google, Cloudflare).\r\n\
-             # Этот список гоняется отдельной кнопкой «Доп. домены».\r\n",
-        );
-        text.push_str(&String::from_utf8_lossy(BUILTIN_TEST_DOMAINS));
-        let _ = crate::config::atomic_write(&p, text.as_bytes());
+/// Есть ли `curl.exe` (Windows 10 1803+ кладёт его в System32; иначе ищем в PATH).
+/// Без curl проба не работает — тест обязан честно отказаться, а не «всё fail».
+pub fn curl_available() -> bool {
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        if std::path::Path::new(&root).join("System32").join("curl.exe").is_file() {
+            return true;
+        }
     }
-    p
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join("curl.exe").is_file()))
+        .unwrap_or(false)
 }
 
-/// Читает список доп. доменов (при отсутствии файла — создаёт из вшитого).
-pub fn load_extra_domains(data: &Path, limit: usize) -> Vec<(String, String)> {
-    let p = ensure_extra_domains_file(data);
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    if let Some(text) = crate::config::read_text_auto(&p) {
-        for raw in text.lines() {
-            if let Some(d) = parse_rule_line(raw, &mut seen) {
-                out.push(d);
-                if out.len() >= limit {
-                    break;
+/// На время теста ipset переводится в режим «any» (пустой файл): прогон не
+/// зависит от десятков тысяч IP-правил (так же делает авторский харнесс).
+/// При выходе файл восстанавливается — даже при отмене/ошибке (Drop).
+pub struct IpsetAnyGuard {
+    restored: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+/// Запись с ретраями: антивирус/индексатор Windows может транзиентно держать
+/// свежесозданный файл. Возврат false — файл остаётся как был (fail-safe).
+fn write_retry(path: &std::path::Path, data: &[u8]) -> bool {
+    for attempt in 0..3 {
+        if std::fs::write(path, data).is_ok() {
+            return true;
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    false
+}
+
+/// Переводит указанные `ipset-all.txt` в «any»; лечит последствия прошлого
+/// сбоя (оставшийся `.test-backup` при пропавшем live-файле).
+pub fn activate_ipset_any(paths: &[std::path::PathBuf]) -> IpsetAnyGuard {
+    let mut restored = Vec::new();
+    for live in paths {
+        let backup = live.with_extension("txt.test-backup");
+        // Лечение последствий прошлого сбоя: бэкап есть, а live пуст (остался
+        // «any») или пропал — сначала возвращаем оригинал, потом переводим в «any»
+        // заново. Без этого после неудачного Drop ipset оставался пустым навсегда.
+        let live_empty = std::fs::read(live)
+            .map(|c| c.iter().all(|b| b.is_ascii_whitespace()))
+            .unwrap_or(false);
+        if backup.is_file() && (!live.is_file() || live_empty) {
+            if std::fs::copy(&backup, live).is_ok() {
+                let _ = std::fs::remove_file(&backup);
+            } else {
+                continue; // вернуть нечего — live не трогаем
+            }
+        }
+        let Ok(content) = std::fs::read(live) else { continue };
+        if content.iter().all(|b| b.is_ascii_whitespace()) {
+            continue; // уже «any» — трогать нечего
+        }
+        if write_retry(&backup, &content) && write_retry(live, b"") {
+            restored.push((live.clone(), backup));
+        }
+    }
+    IpsetAnyGuard { restored }
+}
+
+impl Drop for IpsetAnyGuard {
+    fn drop(&mut self) {
+        for (live, backup) in &self.restored {
+            if backup.is_file() {
+                let mut ok = false;
+                for attempt in 0..3 {
+                    if std::fs::copy(backup, live).is_ok() {
+                        ok = true;
+                        break;
+                    }
+                    if attempt < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+                if ok {
+                    let _ = std::fs::remove_file(backup);
+                } else {
+                    // Бэкап НЕ удаляем: следующий activate_ipset_any вылечит
+                    // пустой live из него (см. выше), иначе список терялся.
+                    crate::logger::log(
+                        "err",
+                        "test",
+                        &format!("не удалось вернуть {} из .test-backup — восстановлю при следующем тесте", live.display()),
+                    );
                 }
             }
         }
     }
-    out
-}
-
-pub fn load_geoblock_domains(data: &Path, limit: usize) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let dir = data.join("catalog/geoblock");
-    let files = [
-        "allow-domains-russia-inside.lst",
-        "allow-domains-geoblock.lst",
-        "allow-domains-youtube.lst",
-        "allow-domains-discord.lst",
-        "allow-domains-news.lst",
-        "allow-domains-telegram.lst",
-        "allow-domains-twitter.lst",
-        "allow-domains-meta.lst",
-        "allow-domains-block.lst",
-    ];
-    for f in files {
-        let p = dir.join(f);
-        let Ok(text) = std::fs::read_to_string(&p) else { continue };
-        for raw in text.lines() {
-            if let Some(d) = parse_rule_line(raw, &mut seen) {
-                out.push(d);
-                if out.len() >= limit {
-                    return out;
-                }
-            }
-        }
-    }
-    out
 }
 
 /// Запоминает, какие стратегии уже тестировались (id → ok).
@@ -334,10 +301,12 @@ impl TestCache {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
+    /// Атомарная запись (tmp + rename): обрыв на середине не оставит
+    /// повреждённый `tests.json`, который молча превращается в пустой кэш.
     pub fn save(&self, data: &Path) {
         let p = data.join("tests.json");
         if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(p, s);
+            let _ = crate::config::atomic_write(&p, s.as_bytes());
         }
     }
 }
@@ -374,14 +343,11 @@ pub fn write_test_runner(
     data: &Path,
     steps: &[TestStep],
     domains: &[(String, String)],
-    baseline: bool,
 ) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let plan_path = data.join("logs/test-plan.json");
     let out_path = data.join("logs/test-out.json");
-    let baseline_path = data.join("logs/test-baseline.json");
     let script_path = data.join("logs/test-runner.ps1");
     let _ = std::fs::remove_file(&out_path);
-    let _ = std::fs::remove_file(&baseline_path);
     // Ступ-маркеры «резкого останова»: флаг + PID раннера + PID активного winws.
     let stop_flag = data.join("logs/test-stop.flag");
     let run_pid = data.join("logs/test-runner.pid");
@@ -404,8 +370,6 @@ pub fn write_test_runner(
             })
         }).collect::<Vec<_>>(),
         "out": out_path.to_string_lossy(),
-        "baselineOut": baseline_path.to_string_lossy(),
-        "baseline": baseline,
         "pid": run_pid.to_string_lossy(),
         "winPid": win_pid.to_string_lossy(),
         "flag": stop_flag.to_string_lossy(),
@@ -424,70 +388,127 @@ $out = $plan.out
 $errDir = Split-Path -Parent $out
 $all = @()
 $i = 0
-# HTTPS probe. TCP connect is not enough: DPI lets the TCP handshake through
-# and cuts TLS by SNI, so a blocked site "passes" while the browser cannot open
-# it. We check the full HTTPS exchange (TLS + HTTP headers), like a browser does.
-# Add-Type is required: in PS 5.1 the type System.Net.Http.HttpClientHandler is
-# not resolved until the System.Net.Http assembly is loaded (checked on Win11).
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Add-Type -AssemblyName System.Net.Http
-function New-ProbeClient {{
-  $h = New-Object System.Net.Http.HttpClientHandler
-  $h.UseProxy = $false
-  $h.AllowAutoRedirect = $false
-  $c = New-Object System.Net.Http.HttpClient -ArgumentList $h
-  $c.Timeout = [TimeSpan]::FromSeconds(6)
-  return $c
+# Probe method is copied from the author's harness (utils/test zapret.ps1):
+# three curl checks per host - HTTP/1.1, TLS1.2, TLS1.3 - timeout 4 s,
+# connect-timeout 3 s, small parallel batches. curl.exe ships with Windows
+# 10+ and matches the reference measurements 1:1.
+$probeTimeout = 4
+$connectTimeout = 3
+$probeParallel = 8
+$curlExe = 'curl.exe'
+$foundCurl = Get-Command curl.exe -ErrorAction SilentlyContinue
+if ($foundCurl) {{ $curlExe = $foundCurl.Source }}
+
+function Start-HttpsProbe {{
+  # One curl run for one check; output "<code> <time_total>" goes to $file.
+  # NB: parameter is NOT named $host - that name is a read-only automatic
+  # variable in PowerShell and assignment to it fails.
+  param($target, $label, $protoArgs)
+  $safe = ($target -replace '[^A-Za-z0-9._-]', '_')
+  $file = Join-Path $errDir ("probe-$safe-$label.txt")
+  $errFile = Join-Path $errDir ("probe-$safe-$label.err.txt")
+  $ca = @('-sS', '-o', 'NUL', '-m', "$probeTimeout", '--connect-timeout', "$connectTimeout") + $protoArgs + @('-w', '"%{{http_code}} %{{time_total}}"', "https://$target/")
+  $p = Start-Process -FilePath $curlExe -ArgumentList $ca -WindowStyle Hidden -PassThru -RedirectStandardOutput $file -RedirectStandardError $errFile
+  return [pscustomobject]@{{ host = $target; label = $label; proc = $p; file = $file }}
 }}
-function Start-Probe($client, $target) {{
-  try {{
-    return $client.GetAsync("https://$target/", [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
-  }} catch {{
-    return $null
-  }}
-}}
-function Finish-Probe($task) {{
-  if ($null -eq $task) {{ return [ordered]@{{ ok = $false; detail = 'request failed' }} }}
-  try {{
-    $resp = $task.GetAwaiter().GetResult()
-    $code = [int]$resp.StatusCode
-    $resp.Dispose()
-    return [ordered]@{{ ok = $true; detail = "http $code" }}
-  }} catch {{
-    $msg = $_.Exception.Message
-    if ($_.Exception.InnerException) {{ $msg = $_.Exception.InnerException.Message }}
-    if (-not $msg) {{ $msg = 'failed' }}
-    return [ordered]@{{ ok = $false; detail = $msg }}
-  }}
-}}
-if ($plan.baseline) {{
-  # Baseline probe WITHOUT Zapret: distinguishes "site down / not resolving"
-  # from "blocked but bypassable". Written to a separate file.
-  # Probes run in small batches: with many parallel handshakes the WinDivert
-  # queue chokes and even healthy sites answer at ~6 s (timeout) - see below.
-  $baseOut = @()
-  $baseClient = New-ProbeClient
-  $batchSize = 8
-  $bi = 0
-  for ($offset = 0; $offset -lt $plan.domains.Count; $offset += $batchSize) {{
-    $end = [Math]::Min($offset + $batchSize - 1, $plan.domains.Count - 1)
-    $baseChecks = @()
-    foreach ($d in $plan.domains[$offset..$end]) {{
-      $baseChecks += [pscustomobject]@{{ host = $d.host; task = (Start-Probe $baseClient $d.host) }}
+
+function Finish-HttpsProbe {{
+  # ok = any HTTP code received (three digits, not 000); ms from curl.
+  param($check)
+  $code = '000'
+  $ms = 0
+  if (Test-Path -LiteralPath $check.file) {{
+    $t = (Get-Content -LiteralPath $check.file -Raw -ErrorAction SilentlyContinue)
+    if ($t) {{ $t = $t.Trim() }}
+    if ($t -match '^([0-9]{{3}})\s+([0-9.]+)$') {{
+      $code = $matches[1]
+      $ms = [int]([double]$matches[2] * 1000)
     }}
-    foreach ($c in $baseChecks) {{
-      $r = Finish-Probe $c.task
-      $baseOut += [ordered]@{{ host = $c.host; ok = [bool]$r.ok }}
-      $bi++
-    }}
-    # Cancel/exit: do not wait for the whole list, leave now.
-    if (Test-Path -LiteralPath $plan.flag) {{ exit 0 }}
-    $state = [ordered]@{{ baseline = [ordered]@{{ done = $bi; total = $plan.domains.Count }}; results = @() }}
-    ($state | ConvertTo-Json -Depth 4) | Out-File -LiteralPath "$out.tmp" -Encoding utf8
-    Move-Item -LiteralPath "$out.tmp" -Destination $out -Force
   }}
-  $baseClient.Dispose()
-  ($baseOut | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $plan.baselineOut -Encoding utf8
+  $ok = ($code -ne '000')
+  return [ordered]@{{ ok = $ok; code = $code; ms = $ms }}
+}}
+
+function Invoke-HttpsMatrix {{
+  # Checks for every host: HTTP1.1, TLS1.2, TLS1.3; up to $probeParallel curl
+  # processes at once. Returns host -> array of check results.
+  param($hosts)
+  $protos = @(
+    @{{ label = 'HTTP1.1'; args = @('--http1.1') }},
+    @{{ label = 'TLS1.2'; args = @('--tlsv1.2', '--tls-max', '1.2') }},
+    @{{ label = 'TLS1.3'; args = @('--tlsv1.3', '--tls-max', '1.3') }}
+  )
+  $res = @{{}}
+  $queue = @()
+  foreach ($h in $hosts) {{
+    $res[$h] = @()
+    foreach ($p in $protos) {{ $queue += [pscustomobject]@{{ host = $h; label = $p.label; args = $p.args }} }}
+  }}
+  $running = @()
+  $qi = 0
+  while (($qi -lt $queue.Count) -or ($running.Count -gt 0)) {{
+    while (($qi -lt $queue.Count) -and ($running.Count -lt $probeParallel)) {{
+      $q = $queue[$qi]
+      $qi++
+      $running += Start-HttpsProbe -target $q.host -label $q.label -protoArgs $q.args
+    }}
+    if ($running.Count -gt 0) {{
+      $first = $running[0]
+      $first.proc.WaitForExit()
+      $r = Finish-HttpsProbe $first
+      $r['label'] = $first.label
+      $res[$first.host] += $r
+      $running = @($running | Where-Object {{ $_.proc.Id -ne $first.proc.Id }})
+    }}
+    # Stop flag: kill the remaining curl processes and return what we have.
+    if (Test-Path -LiteralPath $plan.flag) {{
+      foreach ($x in $running) {{ if ($x.proc -and -not $x.proc.HasExited) {{ Stop-Process -Id $x.proc.Id -Force -ErrorAction SilentlyContinue }} }}
+      return $res
+    }}
+  }}
+  return $res
+}}
+
+function New-DomainRows {{
+  # host list -> domain rows (ok = any check passed, ms = fastest check).
+  param($hosts, $matrix)
+  $rows = @()
+  foreach ($h in $hosts) {{
+    $ok = $false
+    $best = 0
+    $parts = @()
+    foreach ($c in @($matrix[$h])) {{
+      $mark = 'fail'
+      if ($c.ok) {{ $mark = 'ok' }}
+      $parts += ("{{0}} {{1}} {{2}}" -f $c.label, $c.code, $mark)
+      if ($c.ok) {{
+        $ok = $true
+        if (($best -eq 0) -or ($c.ms -lt $best)) {{ $best = $c.ms }}
+      }}
+    }}
+    $rows += [ordered]@{{ host = $h; ok = $ok; ms = $best; detail = ($parts -join '; ') }}
+  }}
+  return $rows
+}}
+
+function Invoke-PingPass {{
+  # One ICMP packet per host, all in parallel; true when ping.exe exit code 0.
+  param($hosts)
+  $info = @{{}}
+  $procs = @()
+  foreach ($h in $hosts) {{
+    $pf = Join-Path $errDir ("ping-" + ($h -replace '[^A-Za-z0-9._-]', '_') + ".txt")
+    $pp = Start-Process -FilePath 'ping.exe' -ArgumentList @('-n', '1', '-w', '1200', $h) -WindowStyle Hidden -PassThru -RedirectStandardOutput $pf -RedirectStandardError ($pf + '.err')
+    $procs += [pscustomobject]@{{ host = $h; file = $pf; proc = $pp }}
+  }}
+  foreach ($pp in $procs) {{
+    $pp.proc.WaitForExit()
+    # ExitCode is not populated for Start-Process -PassThru with redirects;
+    # "TTL=" in the reply is locale-independent proof of a successful ping.
+    $txt = Get-Content -LiteralPath $pp.file -Raw -ErrorAction SilentlyContinue
+    $info[$pp.host] = [bool]($txt -match 'TTL=')
+  }}
+  return $info
 }}
 function Measure-Step($step) {{
   $res = [ordered]@{{ id = $step.id; name = $step.name; engine = $step.engine; group = $step.group; started = $false; score = 0; maxScore = $plan.domains.Count; domains = @(); groups = @(); criticalOk = $false; error = $null }}
@@ -513,52 +534,47 @@ function Measure-Step($step) {{
     }}
     if ($p -and -not $p.HasExited) {{
       $res.started = $true
-      # HTTPS probes in small parallel batches (like the author's own tester,
-      # "parallel: 8"). One hundred simultaneous handshakes overload the
-      # WinDivert desync path: every host then answers at ~6 s and honest
-      # strategies look broken (author's harness: 92/105, ours: 19/115).
-      $doms = @()
-      $client = New-ProbeClient
-      $batchSize = 8
-      for ($offset = 0; $offset -lt $plan.domains.Count; $offset += $batchSize) {{
-        $end = [Math]::Min($offset + $batchSize - 1, $plan.domains.Count - 1)
-        $checks = @()
-        foreach ($d in $plan.domains[$offset..$end]) {{
-          $checks += [pscustomobject]@{{ key = $d.key; host = $d.host; group = $d.group; groupLabel = $d.groupLabel; started = [DateTime]::UtcNow; task = (Start-Probe $client $d.host) }}
-        }}
-        foreach ($c in $checks) {{
-          $r = Finish-Probe $c.task
-          $ms = [int]([DateTime]::UtcNow - $c.started).TotalMilliseconds
-          $doms += [ordered]@{{ key = $c.key; host = $c.host; group = $c.group; groupLabel = $c.groupLabel; ok = [bool]$r.ok; ms = $ms; detail = $r.detail }}
-        }}
-        # Stop flag: the user pressed "stop" (or the GUI is closing) - kill the
-        # engine right away and leave the batch loop; the step loop writes STOPPED
-        # itself, so the GUI never waits minutes for the current step.
-        if (Test-Path -LiteralPath $plan.flag) {{
-          if ($p -and -not $p.HasExited) {{ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }}
-          break
+      # Curl matrix (same method as the author's harness): HTTP1.1 + TLS1.2 +
+      # TLS1.3 per host in small parallel batches. Small batches keep the
+      # WinDivert desync path from choking (author's harness: 92/105, our old
+      # 115-at-once probe: 19/115).
+      $allHosts = @($plan.domains | ForEach-Object {{ $_.host }})
+      $matrix = Invoke-HttpsMatrix -hosts $allHosts
+      $rows = New-DomainRows -hosts $allHosts -matrix $matrix
+      # Every failed host gets one more chance: a browser-like retry, so a
+      # single dropped connection/RST cannot mark a strategy as broken.
+      $failedHosts = @($rows | Where-Object {{ -not $_.ok }} | ForEach-Object {{ $_.host }})
+      if ($failedHosts.Count -gt 0) {{
+        $matrix2 = Invoke-HttpsMatrix -hosts $failedHosts
+        $rows2 = New-DomainRows -hosts $failedHosts -matrix $matrix2
+        foreach ($r2 in $rows2) {{
+          if ($r2.ok) {{
+            $r = $rows | Where-Object {{ $_.host -eq $r2.host }} | Select-Object -First 1
+            $r.ok = $true
+            $r.ms = $r2.ms
+            $r.detail = $r.detail + ' | retry: ' + $r2.detail
+          }}
         }}
       }}
-      $client.Dispose()
+      # ICMP ping for every host (informational only, like the author's harness).
+      $pingOk = Invoke-PingPass -hosts $allHosts
+      $doms = @()
+      foreach ($d in $plan.domains) {{
+        $r = $rows | Where-Object {{ $_.host -eq $d.host }} | Select-Object -First 1
+        $detail = $r.detail
+        $pingMark = 'ping fail'
+        if ($pingOk[$d.host]) {{ $pingMark = 'ping ok' }}
+        $detail = $detail + '; ' + $pingMark
+        $doms += [ordered]@{{ key = $d.key; host = $d.host; group = $d.group; groupLabel = $d.groupLabel; ok = [bool]$r.ok; ms = [int]$r.ms; detail = $detail }}
+      }}
+      # Stop flag: the user pressed "stop" (or the GUI is closing) - kill the
+      # engine right away; the step loop writes STOPPED itself, so the GUI
+      # never waits minutes for the current step.
+      if (Test-Path -LiteralPath $plan.flag) {{
+        if ($p -and -not $p.HasExited) {{ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }}
+      }}
       $res.domains = $doms
       $res.score = @($doms | Where-Object {{ $_.ok }}).Count
-      # Critical domains are probed once more (parallel): a single timeout/RST
-      # must not label a strategy as broken.
-      $critKeys = @($plan.domains | Where-Object {{ $_.critical }} | ForEach-Object {{ $_.key }})
-      $failedCrit = @($doms | Where-Object {{ -not $_.ok -and ($critKeys -contains $_.key) }})
-      if ($failedCrit.Count -gt 0) {{
-        $client2 = New-ProbeClient
-        $again = @()
-        foreach ($d in $failedCrit) {{
-          $again += [pscustomobject]@{{ d = $d; task = (Start-Probe $client2 $d.host) }}
-        }}
-        foreach ($x in $again) {{
-          $r2 = Finish-Probe $x.task
-          if ($r2.ok) {{ $x.d.ok = $true; $x.d.detail = $r2.detail + ' (retry)' }}
-        }}
-        $client2.Dispose()
-        $res.score = @($doms | Where-Object {{ $_.ok }}).Count
-      }}
       $groupRows = @()
       foreach ($group in @($plan.domains | Group-Object group)) {{
         $items = @($doms | Where-Object {{ $_.group -eq $group.Name }})
@@ -619,68 +635,6 @@ $marker | Out-File -LiteralPath $out -Encoding utf8 -Append
     Ok((plan_path, script_path, out_path))
 }
 
-/// Читает базовую пробу (без Zapret): host → был ли доступен напрямую.
-/// Сейчас не участвует в калибровке (недоступные = не прошли ни у одной стратегии),
-/// но полезна для диагностики.
-#[allow(dead_code)]
-pub fn read_baseline(data: &Path) -> Vec<(String, bool)> {
-    let p = data.join("logs/test-baseline.json");
-    let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
-    let text = text.trim_start_matches('\u{feff}').trim();
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
-    v.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| {
-                    let host = e["host"].as_str()?.to_string();
-                    let ok = e["ok"].as_bool().unwrap_or(false);
-                    Some((host, ok))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Сохраняет результаты калибровки: обходимые Zapret домены и требующие VPN.
-/// `reachable` — прошли хотя бы у одной стратегии; `vpn_only` — не прошли ни у кого,
-/// но базовая проба (без Zapret) их видела (значит, сам сайт жив).
-pub fn save_reachability(data: &Path, reachable: &[String], vpn_only: &[String]) {
-    let dir = data.join("catalog/geoblock");
-    let _ = std::fs::create_dir_all(&dir);
-    let write = |name: &str, list: &[String]| {
-        let mut sorted: Vec<&String> = list.iter().collect();
-        sorted.sort();
-        sorted.dedup();
-        let body: String = sorted.iter().map(|s| format!("{}\n", s)).collect();
-        let _ = std::fs::write(dir.join(name), body);
-    };
-    write("zapret-reachable.lst", reachable);
-    write("vpn-only.lst", vpn_only);
-}
-
-/// Загружает список ранее откалиброванных «обходимых» доменов (может отсутствовать).
-/// Пока не используется в тесте (фильтруем по `vpn-only`), но нужен для UI/статистики.
-#[allow(dead_code)]
-pub fn load_reachable(data: &Path) -> Vec<String> {
-    let p = data.join("catalog/geoblock/zapret-reachable.lst");
-    let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
-    text.lines()
-        .map(|l| l.trim().to_lowercase())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect()
-}
-
-/// Загружает список доменов, которым нужен только VPN (недоступны через Zapret).
-/// Используется, чтобы вырезать их из основного теста (не физически из .lst).
-pub fn load_vpn_only(data: &Path) -> Vec<String> {
-    let p = data.join("catalog/geoblock/vpn-only.lst");
-    let Ok(text) = std::fs::read_to_string(&p) else { return Vec::new() };
-    text.lines()
-        .map(|l| l.trim().to_lowercase())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect()
-}
-
 /// Читает частичный/финальный результат встроенного раннера.
 pub fn read_test_progress(out_path: &Path) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(out_path).ok()?;
@@ -710,7 +664,7 @@ pub fn group_of(p: &Profile) -> String {
 /// Общая для кнопки «Результаты в журнал» и полного отчёта.
 pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String {
     if results.is_empty() {
-        return "Результаты теста отсутствуют — прогоните «Тест стратегий».\r\n".into();
+        return format!("{}\r\n", crate::texts::RESULTS_EMPTY);
     }
     let mut sorted: Vec<&StrategyResult> = results.iter().collect();
     sorted.sort_by(|a, b| {
@@ -720,8 +674,8 @@ pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String
     });
     let best = best_id
         .and_then(|id| results.iter().find(|r| r.id == id))
-        .map(|r| format!("{} ({}/{})", r.name, r.score, r.max_score))
-        .unwrap_or_else(|| "не определена".into());
+        .map(|r| crate::texts::results_best_line(&r.name, r.score, r.max_score))
+        .unwrap_or_else(|| crate::texts::BEST_NONE.into());
     let width = sorted
         .iter()
         .map(|r| r.name.chars().count())
@@ -730,16 +684,16 @@ pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String
         .min(48);
 
     let mut out = String::new();
-    out.push_str(&format!("Лучшая стратегия: {best}\r\n\r\n"));
+    out.push_str(&format!("{best}\r\n\r\n"));
     for r in &sorted {
         let state = if !r.started {
             let err: String = r.error.clone().unwrap_or_default().replace(['\r', '\n'], " ");
             let err: String = err.chars().take(120).collect();
-            format!("не запустилась: {err}")
+            crate::texts::result_not_started(&crate::human::humanize(&err))
         } else if r.critical_ok {
-            "критические домены пройдены".to_string()
+            crate::texts::RESULT_CRIT_OK.to_string()
         } else {
-            "критические домены НЕ пройдены".to_string()
+            crate::texts::RESULT_CRIT_FAIL.to_string()
         };
         out.push_str(&format!(
             "  {:<width$}  {:>3}/{:<3}  {}\r\n",
@@ -786,7 +740,7 @@ pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String
         ));
     }
     if !bad.is_empty() {
-        out.push_str("\r\nНе ответившие критические домены:\r\n");
+        out.push_str(&format!("\r\n{}\r\n", crate::texts::RESULTS_FAILED_HEADER));
         out.push_str(&bad.join("\r\n"));
         out.push_str("\r\n");
     }
@@ -824,6 +778,29 @@ pub fn summarize(results: &[StrategyResult]) -> (Vec<StrategyResult>, Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipset_heal_restores_backup_when_live_empty() {
+        let dir = std::env::temp_dir().join(format!("zgui-ipset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("ipset-all.txt");
+        let backup = live.with_extension("txt.test-backup");
+        // Последствие прошлого сбоя: live пуст, бэкап с оригиналом на месте.
+        std::fs::write(&live, b"").unwrap();
+        std::fs::write(&backup, b"1.2.3.4/32\n").unwrap();
+        {
+            let guard = activate_ipset_any(std::slice::from_ref(&live));
+            // Активация вылечила live из бэкапа и снова перевела в «any».
+            assert!(std::fs::read(&live).unwrap().is_empty());
+            assert_eq!(std::fs::read(&backup).unwrap(), b"1.2.3.4/32\n");
+            drop(guard);
+        }
+        // Drop вернул оригинал и убрал бэкап.
+        assert_eq!(std::fs::read(&live).unwrap(), b"1.2.3.4/32\n");
+        assert!(!backup.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn summarize_picks_best() {
@@ -951,11 +928,11 @@ mod tests {
             Some("a"),
         );
         assert!(text.contains("Лучшая стратегия: general · ALT11 (84/115)"), "{text}");
-        assert!(text.contains("критические домены пройдены"), "{text}");
-        assert!(text.contains("критические домены НЕ пройдены"), "{text}");
-        assert!(text.contains("не запустилась: process exited immediately"), "{text}");
+        assert!(text.contains(crate::texts::RESULT_CRIT_OK), "{text}");
+        assert!(text.contains(crate::texts::RESULT_CRIT_FAIL), "{text}");
+        assert!(text.contains("не запустилась: Движок сразу завершился"), "{text}");
         assert!(
-            text.contains("general · ALT2 (3/115): youtube.com, discord.com"),
+            text.contains(&format!("{} (3/115): youtube.com, discord.com", "general · ALT2")),
             "упавшие критические хосты должны быть перечислены: {text}"
         );
         // Порядок строк — по очкам (лучший выше), не стартовавшая в конце.
@@ -994,97 +971,27 @@ mod tests {
     }
 
     #[test]
-    fn load_domains_parses() {
-        // Разбор списка доп. доменов из файла (он же — формат, который правит юзер).
-        let tmp = std::env::temp_dir().join(format!("zgui-test-{}", std::process::id()));
-        let dir = tmp.join("catalog");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("test-domains-extra.lst"),
-            "# comment\nwww.youtube.com/abc\n.googlevideo.com\n.ua\n123.45.67.89\n*.wild.bad\nbad.domain.\ngooglevideo.com\nchess.com\n",
-        )
-        .unwrap();
-        let d = load_extra_domains(&tmp, 10);
-        assert!(d.iter().any(|(_, h)| h == "www.youtube.com"));
-        assert!(d.iter().any(|(_, h)| h == "googlevideo.com"));
-        assert!(d.iter().any(|(_, h)| h == "chess.com"));
-        assert!(!d.iter().any(|(_, h)| h.starts_with(".")));
-        assert!(!d.iter().any(|(_, h)| h.contains('*')));
-        assert!(!d.iter().any(|(_, h)| h == "123.45.67.89"), "IP в списке хостов недопустим");
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn extra_domains_accept_urls_and_trailing_junk() {
-        // Реальный файл пользователя: полные URL со схемой, пути, хвостовые пробелы.
-        let tmp = std::env::temp_dir().join(format!("zgui-urls-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        let dir = tmp.join("catalog");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("test-domains-extra.lst"),
-            "http://chess.com/\nhttps://www.deviantart.com/\nhttps://www.instagram.com/\nhttp://notepad-plus-plus.org/\nhttps://weather.com/\nhttp://x.com/ \nhttps://rutracker.org/\nhttps://soundcloud.com/\nhttp://linkedin.com/\nhttps://www.facebook.com/\nexample.com:8443/path\nhttps://trailing.dot./\n",
-        )
-        .unwrap();
-        let d = load_extra_domains(&tmp, 100);
-        let hosts: Vec<&str> = d.iter().map(|(_, h)| h.as_str()).collect();
-        assert_eq!(hosts.len(), 12, "все строки должны распознаться: {hosts:?}");
-        assert!(hosts.contains(&"chess.com"));
-        assert!(hosts.contains(&"www.deviantart.com"));
-        assert!(hosts.contains(&"x.com"), "хвостовой пробел не мешает: {hosts:?}");
-        assert!(hosts.contains(&"example.com"), "порт отрезается: {hosts:?}");
-        assert!(hosts.contains(&"trailing.dot"), "точка в конце отрезается: {hosts:?}");
-        assert!(!hosts.iter().any(|h| h.contains(':') || h.contains('/') || h.ends_with('.')));
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn main_domains_only_critical_and_secondary() {
+    fn main_domains_match_author_targets() {
+        // URL-часть списка 1:1 с utils/targets.txt оригинала; ICMP-цели по IP
+        // убраны из теста (пинг DNS — во вкладке «DNS»).
         let d = main_domains(500);
-        assert_eq!(d.len(), REQUIRED_DOMAINS.len(), "стандартный тест — ровно критичные и вторые");
+        assert_eq!(d.len(), REQUIRED_DOMAINS.len());
+        assert!(d.iter().any(|(_, h)| h == "cdn.discordapp.com"));
+        assert!(d.iter().any(|(_, h)| h == "cdnjs.cloudflare.com"));
+        assert!(!d.iter().any(|(_, h)| h.chars().all(|c| c.is_ascii_digit() || c == '.')), "IP-целей в тесте быть не должно");
+        // Ключи уникальны (ключ — полный слаг хоста).
+        let keys: std::collections::HashSet<&String> = d.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys.len(), d.len(), "ключи целей должны быть уникальны");
         for (_, host) in &d {
             let group = classify_domain(host);
             assert!(
                 group.critical || group.priority == 2,
-                "доп. домен {host} не должен попадать в стандартный тест (группа {})",
+                "{host} не должен попадать в стандартный тест (группа {})",
                 group.id
             );
         }
-        // Доп. домены из вшитого списка — только в отдельном наборе.
-        assert!(!d.iter().any(|(_, h)| h == "hdrezka.fm" || h == "chess.com"));
     }
 
-
-    #[test]
-    fn usable_host_rejects_junk() {
-        assert!(usable_test_host("www.youtube.com"));
-        assert!(usable_test_host("xn--e1afmkfd.xn--p1ai"));
-        assert!(!usable_test_host(".ua"));
-        assert!(!usable_test_host("ua."));
-        assert!(!usable_test_host("192.168.1.1"));
-        assert!(!usable_test_host("*.example.com"));
-        assert!(!usable_test_host("exa mple.com"));
-    }
-
-    #[test]
-    fn extra_domains_seeded_from_builtin_and_filtered() {
-        // Файла нет — он создаётся из вшитого списка (стартовое наполнение),
-        // который потом правит пользователь.
-        let tmp = std::env::temp_dir().join(format!("zgui-builtin-domains-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let domains = load_extra_domains(&tmp, 500);
-        let path = extra_domains_path(&tmp);
-        assert!(path.is_file(), "файл доп. доменов должен создаться: {path:?}");
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("# Дополнительные домены"), "в файле должна быть шапка-подсказка");
-        assert!(domains.iter().any(|(_, host)| host == "hdrezka.fm"));
-        assert!(domains.len() >= 100);
-        // Вычищенные категории не должны вернуться (почта/СМИ/.ua).
-        assert!(!domains.iter().any(|(_, host)| host == "10minutemail.com"));
-        assert!(!domains.iter().any(|(_, host)| host.ends_with(".ua")));
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
 
     #[test]
     fn cache_roundtrip() {
@@ -1116,6 +1023,12 @@ mod tests {
         assert_eq!(classify_domain("www.google.com").id, "google");
         assert_eq!(classify_domain("gemini.google.com").id, "other");
         assert_eq!(classify_domain("www.cloudflare.com").id, "cloudflare");
+        assert_eq!(classify_domain("1.1.1.1").id, "other");
+        assert_eq!(classify_domain("i.ytimg.com").id, "youtube");
+        assert_eq!(classify_domain("redirector.googlevideo.com").id, "youtube");
+        assert_eq!(classify_domain("www.gstatic.com").id, "google");
+        assert_eq!(classify_domain("cdn.discordapp.com").id, "discord");
+        assert_eq!(GROUP_OTHER.label, "Другие сайты");
     }
 
     #[cfg(windows)]
@@ -1135,8 +1048,13 @@ mod tests {
             // процесса и подтверждает корректное quoting в $argLine.
             args: vec!["/c".into(), "ping -n 6 127.0.0.1 >nul".into()],
         }];
-        let domains = vec![("y".to_string(), "127.0.0.1".to_string())];
-        let (_plan, script, out) = write_test_runner(&tmp, &steps, &domains, false).unwrap();
+        // Оба хоста без сервера: curl-матрица обязана корректно завершиться,
+        // ничего не пройдёт. Тест герметичен (без сети).
+        let domains = vec![
+            ("y".to_string(), "127.0.0.1".to_string()),
+            ("x".to_string(), "example.invalid".to_string()),
+        ];
+        let (_plan, script, out) = write_test_runner(&tmp, &steps, &domains).unwrap();
 
         // Скрипт обязан быть ASCII (BOM допустим) — иначе PS 5.1 ломает кириллицу.
         let raw = std::fs::read(&script).unwrap();
@@ -1145,10 +1063,18 @@ mod tests {
         let script_text = std::str::from_utf8(body).unwrap();
         assert!(script_text.contains("$argLine"));
         assert!(script_text.contains("if ($a -match '[\\s\"]')"));
-        // Проба — HTTPS (TLS+HTTP), не голый TCP-connect.
+        // Проба — методика автора: curl HTTP/1.1 + TLS1.2 + TLS1.3 на домен.
         assert!(script_text.contains("https://$target/"), "проба должна быть HTTPS");
-        assert!(script_text.contains("Add-Type -AssemblyName System.Net.Http"), "нужен Add-Type для PS 5.1");
+        assert!(script_text.contains("--http1.1"), "нужна HTTP/1.1-проверка");
+        assert!(script_text.contains("--tlsv1.2"), "нужна TLS1.2-проверка");
+        assert!(script_text.contains("--tlsv1.3"), "нужна TLS1.3-проверка");
+        assert!(script_text.contains("--connect-timeout"), "connect-timeout как у автора");
+        assert!(script_text.contains("Invoke-HttpsMatrix"), "матрица проб должна быть в скрипте");
+        assert!(script_text.contains("retry: "), "повтор для всех упавших доменов");
+        assert!(script_text.contains("ping ok"), "ICMP-пинг хостов остаётся информационным");
+        assert!(!script_text.contains("ping-only:"), "DNS-пинг убран из теста");
         assert!(!script_text.contains("TcpClient"), "TCP-проба не должна вернуться");
+        assert!(!script_text.contains("System.Net.Http"), "HttpClient-проба больше не используется");
 
         let status = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -1162,13 +1088,72 @@ mod tests {
         let results = v["results"].as_array().unwrap();
         let r: StrategyResult = serde_json::from_value(results[0].clone()).unwrap();
         assert!(r.started, "процесс не запустился: {:?}", r.error);
-        // Проба обязана отработать без исключений: 127.0.0.1 просто недоступен.
-        // (Именно так ловится «Не удается найти тип HttpClientHandler» в PS 5.1.)
+        // Проба обязана отработать без исключений (curl-запуск и ping).
         assert!(r.error.is_none(), "проба упала с ошибкой: {:?}", r.error);
-        // 127.0.0.1 без HTTPS-сервера — недоступен: тест герметичен (без интернета).
-        assert_eq!(r.score, 0, "локальный адрес не должен считаться доступным");
-        assert_eq!(r.max_score, 1);
+        // Ни одного HTTPS-сервера нет — очков быть не должно.
+        assert_eq!(r.score, 0, "без сервера домены не проходят");
+        assert_eq!(r.max_score, 2);
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ipset_guard_sets_any_and_restores() {
+        // Windows-антивирус может транзиентно держать файл — читаем с ретраями.
+        fn read_retry(p: &std::path::Path) -> Vec<u8> {
+            for _ in 0..50 {
+                if let Ok(b) = std::fs::read(p) {
+                    return b;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("файл не читается: {}", p.display());
+        }
+        fn gone_retry(p: &std::path::Path) -> bool {
+            for _ in 0..50 {
+                if !p.exists() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            false
+        }
+        let tmp = std::env::temp_dir().join(format!("zgui-ipset-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let live = tmp.join("ipset-all.txt");
+        let backup = tmp.join("ipset-all.txt.test-backup");
+        assert!(write_retry(&live, b"1.2.3.0/24\n5.6.7.0/24\n"));
+        {
+            let _g = activate_ipset_any(std::slice::from_ref(&live));
+            assert!(read_retry(&live).is_empty(), "на время теста ipset пуст (any)");
+            assert!(backup.is_file(), "оригинал сохранён в .test-backup");
+        }
+        assert_eq!(
+            read_retry(&live),
+            b"1.2.3.0/24\n5.6.7.0/24\n",
+            "после теста ipset восстановлен"
+        );
+        assert!(gone_retry(&backup), "бэкап убран");
+        // Уже «any» (пустой) — файл не трогаем, бэкап не создаём.
+        assert!(write_retry(&live, b""));
+        {
+            let _g = activate_ipset_any(std::slice::from_ref(&live));
+            assert!(!backup.exists());
+        }
+        // Хвост прошлого сбоя: бэкап есть, live пропал — лечим при активации.
+        assert!(gone_retry(&live) || std::fs::remove_file(&live).is_ok());
+        assert!(write_retry(&backup, b"9.9.9.0/24\n"));
+        {
+            let _g = activate_ipset_any(std::slice::from_ref(&live));
+            assert_eq!(
+                read_retry(&backup),
+                b"9.9.9.0/24\n",
+                "застрявший бэкап вернулся и снова сохранён"
+            );
+            assert!(read_retry(&live).is_empty(), "live снова в «any»");
+        }
+        assert_eq!(read_retry(&live), b"9.9.9.0/24\n", "после Drop — снова валидный список");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

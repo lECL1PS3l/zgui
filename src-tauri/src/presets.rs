@@ -13,6 +13,21 @@ pub fn preset_profile_id(id: &str) -> String {
     format!("preset:{id}")
 }
 
+/// Максимальная длина короткого id пресета.
+pub const PRESET_ID_MAX: usize = 64;
+
+/// Годится ли короткий id пресета: только `[A-Za-z0-9._-]`, без `..`, не пустой,
+/// не длиннее лимита. OTA-набор приходит извне, а id попадает в `preset:{id}` и
+/// в имя файла логов (`stdout-{id}.txt`) — `..`/разделители недопустимы.
+pub fn valid_preset_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= PRESET_ID_MAX
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 pub struct PresetDef {
     pub id: &'static str,
     pub engine: &'static str,
@@ -49,51 +64,20 @@ pub fn preset_profile(id: &str, engine: &str, name: &str, args: Vec<String>) -> 
 /// Версия вшитой таблицы пресетов — та же, что уезжает в ассет релиза
 /// `presets.json`. Если применённый OTA-набор НОВЕЕ этой версии, он приоритетнее
 /// вшитой таблицы; иначе таблица из кода обновляет профили (см. ensure_presets).
-pub const BUILTIN_PRESETS_VERSION: &str = "2026.09.24";
+pub const BUILTIN_PRESETS_VERSION: &str = "2026.09.25";
 
 /// Вшитые пресеты, вырезанные в новых версиях (id без префикса `preset:`).
 /// Их профили удаляются при старте — иначе остаются мёртвые стратегии
-/// (например `-7/-8/-9` у GoodbyeDPI v0.2.2 → `unknown option`).
+/// (например `-7/-8/-9` у GoodbyeDPI v0.2.2 → `unknown option`), а также наш
+/// старый упрощённый `flowseal-general` (дубликат `general.bat` из движка:
+/// в оригинальном репо такой отдельной стратегии нет).
 /// Чистим ТОЛЬКО этот явный список: пресеты, доставленные по воздуху (OTA),
 /// могут иметь id, которых нет во вшитой таблице, и удалять их нельзя.
-pub const REMOVED_PRESET_IDS: [&str; 3] = ["goodbyedpi-7", "goodbyedpi-8", "goodbyedpi-9"];
+pub const REMOVED_PRESET_IDS: [&str; 4] =
+    ["flowseal-general", "goodbyedpi-7", "goodbyedpi-8", "goodbyedpi-9"];
 
 pub fn builtin_presets() -> Vec<PresetDef> {
     vec![
-        PresetDef {
-            id: "flowseal-general",
-            engine: "flowseal",
-            name: "Flowseal · General",
-            args: &[
-                "--wf-tcp=80,443,2053,2083,2087,2096,8443,%GameFilterTCP%",
-                "--wf-udp=443,19294-19344,50000-50100,%GameFilterUDP%",
-                "--filter-udp=443",
-                "--hostlist=%ENGINE_ROOT%lists/list-general.txt",
-                "--hostlist=%ENGINE_ROOT%lists/list-general-user.txt",
-                "--hostlist-exclude=%ENGINE_ROOT%lists/list-exclude.txt",
-                "--hostlist-exclude=%ENGINE_ROOT%lists/list-exclude-user.txt",
-                "--dpi-desync=fake",
-                "--dpi-desync-repeats=6",
-                "--dpi-desync-fake-quic=%ENGINE_ROOT%bin/quic_initial_www_google_com.bin",
-                "--new",
-                "--filter-tcp=80,443",
-                "--hostlist=%ENGINE_ROOT%lists/list-general.txt",
-                "--hostlist=%ENGINE_ROOT%lists/list-general-user.txt",
-                "--hostlist-exclude=%ENGINE_ROOT%lists/list-exclude.txt",
-                "--hostlist-exclude=%ENGINE_ROOT%lists/list-exclude-user.txt",
-                "--dpi-desync=multisplit",
-                "--dpi-desync-split-pos=1",
-                "--dpi-desync-split-seqovl=568",
-                "--dpi-desync-split-seqovl-pattern=%ENGINE_ROOT%bin/tls_clienthello_4pda_to.bin",
-                "--new",
-                "--filter-tcp=443",
-                "--hostlist=%ENGINE_ROOT%lists/list-google.txt",
-                "--dpi-desync=multisplit",
-                "--dpi-desync-split-pos=1",
-                "--dpi-desync-split-seqovl=681",
-                "--dpi-desync-split-seqovl-pattern=%ENGINE_ROOT%bin/tls_clienthello_www_google_com.bin",
-            ],
-        },
         // Дословный порт официального preset2_example.cmd из bol-van/zapret-win-bundle
         // (zapret-winws/preset2_example.cmd): HTTP fake/fakedsplit + TLS youtube-hostlist +
         // TLS general + QUIC (hostlist и general) + wireguard/stun/discord.
@@ -300,7 +284,9 @@ mod tests {
     #[test]
     fn presets_cover_all_engines_and_substitute_root() {
         let ps = builtin_presets();
-        assert!(ps.iter().any(|p| p.engine == "flowseal"));
+        // Пресеты flowseal мы вырезали: стратегии там — .bat-файлы движка,
+        // а наш старый `flowseal-general` был дубликатом general.bat.
+        assert!(!ps.iter().any(|p| p.id == "flowseal-general"), "дубликат general.bat не должен вернуться");
         assert!(ps.iter().any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
         assert!(ps.iter().any(|p| p.engine == "goodbyedpi" && p.args.contains(&"-5")));
         assert!(ps.iter().any(|p| p.engine == "dpibreak" && p.args.iter().any(|a| a.starts_with("-o"))));
@@ -329,6 +315,18 @@ mod tests {
         assert_eq!(set.version, "2026.09.24");
         assert_eq!(set.presets.len(), builtin_presets().len(), "все пресеты должны пережить round-trip");
         assert!(set.presets.iter().any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
+    }
+
+    #[test]
+    fn preset_id_validation_rejects_path_and_junk() {
+        assert!(valid_preset_id("goodbyedpi-5"));
+        assert!(valid_preset_id("zapret2_youtube.v2"));
+        assert!(!valid_preset_id(""));
+        assert!(!valid_preset_id(".."));
+        assert!(!valid_preset_id("a/../b"));
+        assert!(!valid_preset_id("a\\b"));
+        assert!(!valid_preset_id("имя"));
+        assert!(!valid_preset_id(&"x".repeat(PRESET_ID_MAX + 1)));
     }
 
     #[test]

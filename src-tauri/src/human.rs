@@ -46,7 +46,7 @@ fn looks_technical(s: &str) -> bool {
 pub fn humanize(raw: &str) -> String {
     let s = raw.trim();
     if s.is_empty() {
-        return "неизвестная ошибка (подробности в журнале)".into();
+        return crate::texts::HUMAN_EMPTY.into();
     }
     let l = s.to_ascii_lowercase();
 
@@ -62,15 +62,15 @@ pub fn humanize(raw: &str) -> String {
         || l.contains("administrator")
         || l.contains("admin_required")
     {
-        Some("Windows запросит права администратора для запуска обхода — включите «Всегда запускать программу от администратора» в «Настройках»")
+        Some(crate::texts::HUMAN_ADMIN)
     } else if l.contains("os error 32") || l.contains("being used by another process") {
-        Some("файл занят другой программой — закройте её и повторите")
-    } else if l.contains("os error 112") || l.contains("not enough space") {
-        Some("на диске не хватает места")
+        Some(crate::texts::HUMAN_FILE_BUSY)
+    } else if l.contains("os error 112") || l.contains("not enough space") || l.contains("no space left") {
+        Some(crate::texts::HUMAN_NO_SPACE)
     } else if l.contains("os error 2") || l.contains("os error 3") || l.contains("cannot find")
         || l.contains("не удается найти")
     {
-        Some("файл или папка не найдены — возможно, движок ещё не установлен")
+        Some(crate::texts::HUMAN_NOT_FOUND)
     } else if l.contains("error sending request")
         || l.contains("error trying to connect")
         || l.contains("dns error")
@@ -79,25 +79,27 @@ pub fn humanize(raw: &str) -> String {
         || l.contains("connection reset")
         || l.contains("network is unreachable")
     {
-        Some("нет связи с сервером — проверьте интернет (или выключите VPN) и повторите")
+        Some(crate::texts::HUMAN_NETWORK)
+    } else if l.contains("certificate") || l.contains("tls handshake") || l.contains("ssl") {
+        Some(crate::texts::HUMAN_CERT)
     } else if l.contains("http 403") || l.contains(" 403") {
-        Some("сервер отклонил запрос (403) — возможно, исчерпан лимит обращений к GitHub, попробуйте позже")
+        Some(crate::texts::HUMAN_HTTP_403)
     } else if l.contains("http 404") || l.contains(" 404") {
-        Some("на сервере нет такого файла (404) — обновите программу")
+        Some(crate::texts::HUMAN_HTTP_404)
     } else if l.contains("http 5") {
-        Some("сервер временно недоступен (ошибка 5xx) — попробуйте позже")
+        Some(crate::texts::HUMAN_HTTP_5XX)
     } else if l.contains("invalid args") || l.contains("expected u16") || l.contains("invalid type")
         || l.contains("invalid value")
     {
-        Some("недопустимое значение поля — проверьте введённые числа")
+        Some(crate::texts::HUMAN_BAD_VALUE)
     } else if l.contains("process exited immediately") || l.contains("сразу завершился") {
-        Some("движок сразу завершился — подробности в «Журнале»")
+        Some(crate::texts::HUMAN_ENGINE_DIED)
     } else if l.contains("launch_error") || l.contains("не удалось запустить процесс") {
-        Some("не удалось запустить процесс — возможно, запрос прав администратора отклонён")
+        Some(crate::texts::HUMAN_LAUNCH)
     } else if l.contains("panic") || l.contains("panicked") {
-        Some("внутренняя ошибка программы — подробности в «Журнале»")
+        Some(crate::texts::HUMAN_PANIC)
     } else if l.contains("no such file") || l.contains("not found") {
-        Some("файл не найден — проверьте, что движок установлен")
+        Some(crate::texts::HUMAN_FILE_MISSING)
     } else {
         None
     };
@@ -108,7 +110,7 @@ pub fn humanize(raw: &str) -> String {
             if has_cyr {
                 s.to_string()
             } else {
-                format!("непредвиденная ошибка: {} (подробности в «Журнале»)", cut(s))
+                crate::texts::human_unexpected(&cut(s))
             }
         }
     }
@@ -128,10 +130,10 @@ mod tests {
         assert!(humanize("failed to remove file: Отказано в доступе (os error 5)")
             .contains("права администратора"));
         assert!(humanize("error sending request for url (https://api.github.com/…): error trying to connect")
-            .contains("нет связи с сервером"));
+            .contains("Нет связи с сервером"));
         assert!(humanize("HTTP status client error (403 Forbidden)").contains("403"));
         assert!(humanize("invalid args `port` for command `tg_start`: invalid type: integer 70000, expected u16")
-            .contains("недопустимое значение поля"));
+            .contains("Недопустимое значение поля"));
         assert!(humanize("ADMIN_REQUIRED: winws needs administrator rights").contains("права администратора"));
     }
 

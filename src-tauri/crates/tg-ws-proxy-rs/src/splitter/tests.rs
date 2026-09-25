@@ -22,7 +22,24 @@ fn intermediate_packet(payload_len: usize) -> Vec<u8> {
 
 fn feed(splitter: &mut MsgSplitter, enc: &mut AesCtr256, packet: &[u8]) -> Vec<Vec<u8>> {
     let mut plaintext = packet.to_vec();
-    splitter.split_and_encrypt(&mut plaintext, enc)
+    splitter
+        .split_and_encrypt(&mut plaintext, enc)
+        .expect("splitter refused a well-formed packet")
+}
+
+#[test]
+fn an_oversized_packet_header_is_refused_before_allocating() {
+    let (mut splitter, mut enc) = splitter_and_encryptor(ProtoTag::Intermediate);
+    // Intermediate header announcing 0x7f000000 payload bytes (~2 GiB).
+    let mut plaintext = 0x7f00_0000u32.to_le_bytes().to_vec();
+
+    let err = splitter
+        .split_and_encrypt(&mut plaintext, &mut enc)
+        .unwrap_err();
+
+    assert!(matches!(err, SplitError::PacketTooLarge(_)));
+    // Only the header bytes were buffered, not the announced payload.
+    assert!(splitter.packet.capacity() < 1024);
 }
 
 #[test]

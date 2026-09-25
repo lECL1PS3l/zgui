@@ -87,7 +87,7 @@ foreach ($id in $Engines) {
     if ($assets.Count -eq 0) { throw "$id`: в последнем релизе нет zip-архива — скачайте вручную" }
 
     # Приоритет кандидатов: имя содержит exe → «win» в имени → остальные.
-    # Сначала пробуем zip с exe в имени, затем «win», затем остальные. 
+    # Сначала пробуем zip с exe в имени, затем «win», затем остальные.
     $rank = { param($n) [int]($n -like "*$exe*") * 2 + [int]($n -like "*win*") }
     $byPriority = $assets | Sort-Object { & $rank $_.name } -Descending
     $chosen = $null
