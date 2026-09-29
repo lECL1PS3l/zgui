@@ -1,0 +1,614 @@
+use std::fs;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+pub const PS_HEADER: &str = "$ErrorActionPreference = 'Stop'";
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Creates a command without a transient console window in the GUI process.
+pub fn hidden_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+/// Экранирует аргумент для вставки в PowerShell в двойных кавычках.
+pub fn ps_quote(arg: &str) -> String {
+    let mut s = String::with_capacity(arg.len() + 2);
+    s.push('"');
+    for c in arg.chars() {
+        match c {
+            '"' => s.push_str("`\""),
+            '`' => s.push_str("``"),
+            '$' => s.push_str("`$"),
+            _ => s.push(c),
+        }
+    }
+    s.push('"');
+    s
+}
+
+/// Формирует -ArgumentList @( ... ) для Start-Process.
+pub fn ps_arg_list(args: &[String]) -> String {
+    let v: Vec<String> = args.iter().map(|a| ps_quote(a)).collect();
+    v.join(",")
+}
+
+pub fn run_powershell(args: &[String]) -> Result<String, String> {
+    let mut cmd = hidden_command("powershell.exe");
+    cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass"]);
+    for a in args {
+        cmd.arg(a);
+    }
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    let code = out.status.code().unwrap_or(-1);
+    if code == 0 {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Результат проверки прав для текущего процесса: элевация не меняется за
+/// жизнь процесса, а каждый вызов стоит запуска `powershell.exe` (bootstrap
+/// зовёт её каждые несколько секунд) — считаем один раз.
+static ELEVATED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Проверяет, запущен ли текущий процесс от администратора.
+pub fn is_elevated() -> bool {
+    *ELEVATED.get_or_init(|| {
+        let out = hidden_command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+            ])
+            .output();
+        match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().eq_ignore_ascii_case("true"),
+            Err(_) => false,
+        }
+    })
+}
+
+/// Перезапускает текущий exe с UAC (RunAs).
+///
+/// Возвращает `true`, если привилегированный экземпляр действительно стартовал.
+/// `false` — пользователь отклонил запрос UAC: вызывающий код должен продолжить
+/// работу без прав администратора, а не молча закрывать программу.
+pub fn relaunch_as_admin() -> Result<bool, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let script = format!(
+        "$ErrorActionPreference='Stop'; try {{ $p = Start-Process -FilePath {} -Verb RunAs -WindowStyle Hidden -ArgumentList @('--elevated') -PassThru; if ($p) {{ exit 0 }} else {{ exit 1 }} }} catch {{ exit 1 }}",
+        ps_quote(&exe.to_string_lossy()),
+    );
+    let out = hidden_command("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(out.status.code().unwrap_or(1) == 0)
+}
+
+/// Запускает ps1-скрипт с UAC-элевацией (окно скрыто, ждём завершения).
+pub fn run_elevated_script(script: &Path) -> Result<i32, String> {
+    let inner = format!(
+        "-NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        script.to_string_lossy()
+    );
+    let mut cmd = hidden_command("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &format!(
+            "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -ArgumentList @({}) -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode }} catch {{ Write-Output 'UAC_DENIED'; exit 1 }}",
+            ps_quote(&inner)
+        ),
+    ]);
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    let code = out.status.code().unwrap_or(-1);
+    // Отказ пользователя в UAC — это не «код 1 без объяснений»: возвращаем
+    // понятную ошибку (её показывают служба, «Восстановить интернет», DNS).
+    if code == 1 && String::from_utf8_lossy(&out.stdout).contains("UAC_DENIED") {
+        return Err(crate::texts::ADMIN_REQUIRED.into());
+    }
+    Ok(code)
+}
+
+/// Запускает ps1-скрипт с правами администратора и ЖДЁТ результат.
+///
+/// Выбор пути критичен: `Start-Process -Verb RunAs` из УЖЕ повышенного процесса
+/// может не запустить дочерний процесс (или зависнуть) — тогда кнопка «делает
+/// вид, что работает», а действие не выполняется. Если GUI уже админ — запускаем
+/// напрямую; иначе — обычная UAC-элевация.
+pub fn run_script_privileged(script: &Path) -> Result<i32, String> {
+    if is_elevated() {
+        let status = hidden_command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script.to_string_lossy(),
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+        Ok(status.code().unwrap_or(-1))
+    } else {
+        run_elevated_script(script)
+    }
+}
+// ------------------------------------------------------------ автозапуск GUI
+
+/// Имя задачи в планировщике для запуска GUI при входе пользователя.
+pub const BOOT_TASK: &str = "ZapretGUI";
+const BOOT_RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+/// Есть ли задача планировщика автозапуска GUI.
+pub fn boot_task_exists() -> bool {
+    hidden_command("schtasks.exe")
+        .args(["/query", "/tn", BOOT_TASK])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Удаляет старую запись HKCU\...\Run — чтобы не было двойного запуска.
+pub fn remove_legacy_boot() {
+    let _ = hidden_command("reg.exe")
+        .args(["delete", BOOT_RUN_KEY, "/v", "zgui", "/f"])
+        .output();
+}
+
+/// Удаляет задачу планировщика «ZapretGUI» (механизм программного автозапуска
+/// вырезан — задача остаётся только у старых версий и должна быть убрана).
+/// Требует прав администратора: если GUI не повышен, скрипт уходит через UAC.
+pub fn remove_boot_task(data_dir: &Path) -> Result<(), String> {
+    let script = LockedScript::write(
+        data_dir.join("logs").join(format!("boot_task_remove_{}.ps1", std::process::id())),
+        &format!(
+            "{}\nUnregister-ScheduledTask -TaskName '{}' -Confirm:$false -ErrorAction SilentlyContinue\nexit 0\n",
+            PS_HEADER, BOOT_TASK
+        ),
+    )?;
+    let result = if is_elevated() {
+        run_powershell(&["-File".into(), script.path().to_string_lossy().into_owned()])
+    } else {
+        run_elevated_script(script.path()).map(|_| String::new())
+    };
+    drop(script);
+    result.map(|_| ())?;
+    // Проверяем факт: молчаливая ошибка тут недопустима.
+    if boot_task_exists() {
+        return Err("не удалось удалить задачу планировщика".into());
+    }
+    Ok(())
+}
+
+/// Пишет .ps1 в UTF-8 с BOM — иначе PowerShell 5.1 читает кириллицу как ANSI
+/// и ломает кавычки/строки (ParserError). Нужен тестам сервиса/сброса сети.
+#[cfg(test)]
+pub fn write_ps1(path: &Path, body: &str) -> Result<(), String> {
+    write_utf8_bom(path, body.as_bytes())
+}
+
+#[cfg(test)]
+pub fn write_utf8_bom(path: &Path, body: &[u8]) -> Result<(), String> {
+    let mut bytes = Vec::with_capacity(body.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(body);
+    fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+/// Временный файл, который удаляется при выходе из области видимости — в том
+/// числе при ошибке (`?`) или панике. Иначе .ps1-скрипты привилегированных
+/// операций копились в `logs/`.
+pub struct TempFile(PathBuf);
+
+impl TempFile {
+    pub fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Скрипт привилегированной операции, удерживаемый открытым с запретом записи
+/// и удаления другими процессами. Закрывает окно TOCTOU: между записью файла
+/// в пользовательский каталог и его запуском через UAC файл нельзя подменить.
+/// Файл удаляется при выходе из области видимости (как `TempFile`).
+pub struct LockedScript {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl LockedScript {
+    pub fn write(path: PathBuf, body: &str) -> Result<Self, String> {
+        use std::io::Write as _;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ: читать можно (PowerShell -File), писать/удалять — нет.
+            options.share_mode(1);
+        }
+        let mut file = options.open(&path).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::with_capacity(body.len() + 3);
+        bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        bytes.extend_from_slice(body.as_bytes());
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())?;
+        // ВАЖНО: write-дескриптор держать нельзя — Windows не даёт читать файл
+        // процессу, чей share-режим не разрешает запись, а PowerShell `-File`
+        // открывает .ps1 с FileShare.Read → sharing violation, и скрипт молча
+        // не выполнялся (регресс: запуск без админа, служба, UAC-операции).
+        // Переоткрываем только на чтение с FILE_SHARE_READ: читать могут все,
+        // переписать/удалить до запуска — никто (защита от подмены до UAC).
+        drop(file);
+        let mut ro = std::fs::OpenOptions::new();
+        ro.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            ro.share_mode(1);
+        }
+        let file = ro.open(&path).map_err(|e| e.to_string())?;
+        Ok(Self { path, file: Some(file) })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for LockedScript {
+    fn drop(&mut self) {
+        // Сначала закрываем handle — иначе файл не удалится (нет FILE_SHARE_DELETE).
+        self.file.take();
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Запускает процесс НАПРЯМУЮ (без UAC) — используется, когда GUI уже elevated.
+/// Возвращает реальный PID процесса и пишет stdout/stderr в лог-файлы.
+/// Без ShellExecute: Rust сам корректно квотит аргументы с пробелами.
+pub fn spawn_direct(
+    exe: &Path,
+    wd: &Path,
+    args: &[String],
+    out_log: &Path,
+    err_log: &Path,
+) -> Result<u32, String> {
+    use std::fs::OpenOptions;
+    let out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out_log)
+        .map_err(|e| format!("лог: {}", e))?;
+    let err = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(err_log)
+        .map_err(|e| format!("лог: {}", e))?;
+    let mut cmd = Command::new(exe);
+    cmd.current_dir(wd).args(args).stdout(out).stderr(err);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("не удалось запустить процесс: {}", e))?;
+    Ok(child.id())
+}
+
+/// Пишет launcher-скрипт для запуска winws/winws2 от администратора.
+///
+/// ВАЖНО: `Start-Process -Verb RunAs` НЕсовместим с `-RedirectStandardOutput/Error`
+/// (падает с «не удалось запустить процесс с использованием указанных параметров»),
+/// а обёртка через `cmd /c` ломается на разборе кавычек. Поэтому здесь — простой
+/// запуск без редиректов; логи в этом пути не собираются (для elevated GUI
+/// используется `spawn_direct`, который их пишет).
+pub fn write_launcher(exe: &Path, wd: &Path, args: &[String], pid_file: &Path) -> Result<LockedScript, String> {
+    let script_path = pid_file.with_extension("ps1");
+    let mut s = String::new();
+    s.push_str(PS_HEADER);
+    s.push('\n');
+    s.push_str(&format!("$pidFile = {}\n", ps_quote(&pid_file.to_string_lossy())));
+    // Квотирование по правилам MS: кавычка внутри — `\"`, бэкслеши перед
+    // кавычкой (включая хвостовые, `C:\dir\`) удваиваются. Простой
+    // `.Replace('"','\"')` ломал путь с хвостовым бэкслешем.
+    s.push_str("function Quote-WinArg { param([string]$a)\n");
+    s.push_str("  if ($a -notmatch '[\\s\"]') { return $a }\n");
+    s.push_str("  $out = '\"'\n");
+    s.push_str("  $bs = 0\n");
+    s.push_str("  foreach ($ch in $a.ToCharArray()) {\n");
+    s.push_str("    if ($ch -eq '\\') { $bs++; continue }\n");
+    s.push_str("    if ($ch -eq '\"') { $out += '\\' * ($bs * 2 + 1) + '\"'; $bs = 0; continue }\n");
+    s.push_str("    if ($bs -gt 0) { $out += '\\' * $bs; $bs = 0 }\n");
+    s.push_str("    $out += $ch\n");
+    s.push_str("  }\n");
+    s.push_str("  if ($bs -gt 0) { $out += '\\' * ($bs * 2) }\n");
+    s.push_str("  return $out + '\"'\n");
+    s.push_str("}\n");
+    s.push_str(&format!(
+        "try {{\n  $argsRaw = @({})\n  # Start-Process flattens arrays without preserving quotes around paths with spaces.\n  $argLine = ($argsRaw | ForEach-Object {{ Quote-WinArg ([string]$_) }}) -join ' '\n  $p = Start-Process -FilePath {} -WorkingDirectory {} -WindowStyle Hidden -Verb RunAs -ArgumentList $argLine -PassThru\n  Start-Sleep -Milliseconds 700\n  if ($p -and -not $p.HasExited) {{ $status = [string]$p.Id }} else {{ $status = 'process exited immediately' }}\n}} catch {{\n  $status = 'LAUNCH_ERROR: ' + $_.Exception.Message\n}}\n# Один файл статуса, UTF-8 с BOM: читатель декодирует без «иероглифов».\nSet-Content -LiteralPath $pidFile -Value $status -Encoding UTF8\nif ($status -notmatch '^[0-9]+$') {{ exit 1 }}\n",
+        ps_arg_list(args),
+        ps_quote(&exe.to_string_lossy()),
+        ps_quote(&wd.to_string_lossy()),
+    ));
+    LockedScript::write(script_path, &s)
+}
+
+/// Запускает лаунчер и ждёт появления pid-файла.
+pub fn spawn_and_wait_pid(script: &Path, pid_file: &Path, timeout: Duration) -> Result<u32, String> {
+    let _ = fs::remove_file(pid_file);
+    let _ = run_powershell(&["-File".into(), script.to_string_lossy().into_owned()]);
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(text) = crate::config::read_text_auto(pid_file) {
+            let t = text.trim();
+            if let Ok(pid) = t.parse::<u32>() {
+                return Ok(pid);
+            }
+            if !t.is_empty() {
+                // Лаунчер записал ошибку — не ждём таймаут впустую.
+                let msg = t
+                    .lines()
+                    .find(|l| l.starts_with("LAUNCH_ERROR"))
+                    .unwrap_or(t)
+                    .trim()
+                    .to_string();
+                return Err(msg);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err("не удалось запустить процесс — подтверждение прав администратора отклонено или файл недоступен".into())
+}
+
+/// Проверяет наличие процесса по PID (без элевации).
+pub fn pid_alive(pid: u32) -> bool {
+    // PID 0 — System Idle Process: `tasklist` его показывает, но это не процесс.
+    if pid == 0 {
+        return false;
+    }
+    // ponytail: OpenProcess дешевле tasklist (спавн процесса ~30 мс каждый
+    // вызов; проверок много: watcher-цикл 2 c, bootstrap, current_owner).
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let ok = unsafe { is_process_alive(handle) };
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
+        ok
+    }
+    #[cfg(not(windows))]
+    {
+    let out = hidden_command("tasklist.exe")
+        .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+        .output();
+    match out {
+        Ok(o) => {
+            let txt = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            txt.contains(&format!("\"{}\"", pid))
+        }
+        Err(_) => false,
+    }
+    }
+}
+
+/// Выходной код 259 (STILL_ACTIVE) — процесс жив.
+#[cfg(windows)]
+unsafe fn is_process_alive(handle: std::os::windows::io::RawHandle) -> bool {
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+    let mut code: u32 = 0;
+    if unsafe { GetExitCodeProcess(handle, &mut code) } == 0 {
+        return false;
+    }
+    code == 259
+}
+
+/// Прямой `taskkill` без PowerShell. Из админ-процесса это рабочий путь
+/// (проверено вживую: код 0 и смерть процесса за ~0.5 с), а PowerShell-скрипты
+/// в проблемном окружении падали на старте («код 1» через 200 мс — скрипт
+/// вообще не выполнялся).
+fn taskkill_direct(pid: u32) -> Result<i32, String> {
+    let out = hidden_command("taskkill.exe")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(out.status.code().unwrap_or(-1))
+}
+
+/// Ждёт фактической смерти процесса: `taskkill` возвращает управление раньше,
+/// чем процесс исчезает из списка.
+fn wait_dead(pid: u32, attempts: u32) -> bool {
+    for _ in 0..attempts {
+        if !pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    !pid_alive(pid)
+}
+
+/// Прямой `taskkill` без UAC (для выхода из приложения, где диалоги не
+/// показываем). `true` — процесса больше нет.
+pub fn kill_pid_direct(pid: u32) -> bool {
+    if !pid_alive(pid) {
+        return true;
+    }
+    let _ = taskkill_direct(pid);
+    wait_dead(pid, 6)
+}
+
+/// Прибивает процесс и его дочерние (через UAC, только если GUI не админ).
+///
+/// Успех — по факту (процесса больше нет), а не по коду `taskkill`: у
+/// завершающегося процесса команда может ответить «доступ запрещён», хотя
+/// процесс уже умирает.
+pub fn stop_pid(pid: u32, data_dir: &Path) -> Result<(), String> {
+    if !pid_alive(pid) {
+        return Ok(());
+    }
+    let mut code = if is_elevated() {
+        taskkill_direct(pid).unwrap_or(-1)
+    } else {
+        let script = LockedScript::write(
+            data_dir.join("logs").join(format!("kill_{}_{}.ps1", std::process::id(), pid)),
+            &format!("{}\ntry {{ taskkill /F /T /PID {} 2>$null | Out-Null }} catch {{}}\nexit 0", PS_HEADER, pid),
+        )?;
+        run_script_privileged(script.path())?
+    };
+    if wait_dead(pid, 8) {
+        return Ok(());
+    }
+    // Вторая попытка — и окончательный вердикт по живости процесса.
+    if is_elevated() {
+        code = taskkill_direct(pid).unwrap_or(code);
+    }
+    if wait_dead(pid, 4) {
+        return Ok(());
+    }
+    Err(crate::texts::process_stop_failed(if code == 0 { 1 } else { code }))
+}
+
+/// Прибивает несколько процессов и их деревья через один UAC.
+pub fn stop_pids(pids: &[u32], data_dir: &Path) -> Result<(), String> {
+    let mut alive: Vec<u32> = pids.iter().copied().filter(|p| pid_alive(*p)).collect();
+    if alive.is_empty() {
+        return Ok(());
+    }
+    if is_elevated() {
+        for pid in &alive {
+            let _ = taskkill_direct(*pid);
+        }
+    } else {
+        let mut body = String::new();
+        body.push_str(PS_HEADER);
+        body.push('\n');
+        for id in &alive {
+            body.push_str(&format!("try {{ taskkill /F /T /PID {} 2>$null | Out-Null }} catch {{}}\n", id));
+        }
+        body.push_str("exit 0\n");
+        let script = LockedScript::write(
+            data_dir.join("logs").join(format!("kill_multi_{}.ps1", std::process::id())),
+            &body,
+        )?;
+        run_script_privileged(script.path())?;
+    }
+    for _ in 0..8 {
+        alive.retain(|p| pid_alive(*p));
+        if alive.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    if is_elevated() {
+        for pid in &alive {
+            let _ = taskkill_direct(*pid);
+        }
+    }
+    for _ in 0..4 {
+        alive.retain(|p| pid_alive(*p));
+        if alive.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Err(crate::texts::process_stop_failed(1))
+}
+
+/// Планирует выключение компьютера/перезагрузку (для UI).
+/// Хвост лог-файла.
+pub fn tail(path: &Path, max_chars: usize) -> String {
+    crate::config::tail_file(path, max_chars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launcher_quotes_arguments_with_spaces() {
+        let dir = std::env::temp_dir().join(format!("zgui-launcher-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let script = write_launcher(
+            Path::new("C:\\Program Files\\Zapret\\winws.exe"),
+            Path::new("C:\\Program Files\\Zapret\\bin"),
+            &["--hostlist=C:\\Program Files\\Zapret\\lists\\list.txt".into()],
+            &dir.join("pid.txt"),
+        )
+        .unwrap();
+        let raw = fs::read(script.path()).unwrap();
+        let text = String::from_utf8(raw[3..].to_vec()).unwrap();
+        assert!(text.contains("$argLine"));
+        // RunAs без редиректов (редиректы + -Verb несовместимы).
+        assert!(text.contains("-ArgumentList $argLine"));
+        assert!(text.contains("-Verb RunAs"));
+        assert!(!text.contains("-RedirectStandard"));
+        assert!(text.contains("-WindowStyle Hidden"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locked_script_denies_rewrite_until_drop() {
+        let dir = std::env::temp_dir().join(format!("zgui-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.ps1");
+        let script = LockedScript::write(path.clone(), "Write-Host 1").unwrap();
+        // Пока handle открыт, перезапись (подмена) файла запрещена.
+        assert!(fs::write(&path, "Write-Host 2").is_err(), "файл удалось перезаписать");
+        // Файл читается (PowerShell -File): защита не мешает запуску.
+        assert!(fs::read(&path).is_ok());
+        drop(script);
+        // После снятия — handle закрыт и файл удалён (RAII).
+        assert!(!path.exists(), "файл не удалён после drop");
+        assert!(fs::write(&path, "Write-Host 3").is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locked_script_is_readable_by_powershell() {
+        // Регресс: write-дескриптор с FILE_SHARE_READ блокировал чтение .ps1
+        // процессом PowerShell (sharing violation) — лаунчер/служба/UAC-скрипты
+        // молча не выполнялись. Теперь файл держится read-only, и скрипт
+        // реально запускается, оставаясь защищённым от перезаписи.
+        let dir = std::env::temp_dir().join(format!("zgui-lockps-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("probe.ps1");
+        let script = LockedScript::write(path.clone(), "Write-Output 'ZGUI_LOCKED_OK'\nexit 0\n").unwrap();
+
+        let out = run_powershell(&["-File".into(), script.path().to_string_lossy().into_owned()]);
+        assert!(out.is_ok(), "PowerShell не смог прочитать скрипт: {out:?}");
+        assert!(out.unwrap().contains("ZGUI_LOCKED_OK"));
+
+        assert!(fs::write(&path, "Write-Host x").is_err(), "перезапись под защитой должна блокироваться");
+        drop(script);
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

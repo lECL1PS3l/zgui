@@ -1,0 +1,23 @@
+# Node / Vite
+/node_modules/
+/dist/
+/.vite/
+
+# Rust / Tauri
+/src-tauri/gen/
+**/target/
+
+# Артефакты сборки и релизов
+/release/
+
+# Данные рядом с программой
+/data/
+**/data/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Служебные файлы
+*.log
+.DS_Store

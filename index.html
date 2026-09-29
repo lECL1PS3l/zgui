@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n="app_title"></title>
+  </head>
+  <body>
+    <div class="space-bg" aria-hidden="true">
+      <div class="topo"></div>
+      <div class="stars stars-far"></div>
+      <div class="stars stars-mid"></div>
+      <div class="stars stars-near"></div>
+    </div>
+    <div id="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-logo"><img src="./src/assets/z-logo.png" data-i18n-alt="logo_alt" /></div>
+          <div class="brand-text">
+            <div class="brand-title" data-i18n="app_title"></div>
+            <div class="brand-sub">winws</div>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-view="strategies">
+            <span class="nav-ico"></span><span data-i18n="nav_strategies"></span>
+          </button>
+          <button class="nav-item" data-view="tests">
+            <span class="nav-ico"></span><span data-i18n="nav_tests"></span>
+          </button>
+          <button class="nav-item" data-view="scanner">
+            <span class="nav-ico"></span><span data-i18n="nav_scanner"></span>
+          </button>
+          <button class="nav-item" data-view="updates">
+            <span class="nav-ico"></span><span data-i18n="nav_updates"></span>
+          </button>
+          <button class="nav-item" data-view="telegram">
+            <span class="nav-ico"></span><span data-i18n="nav_telegram"></span>
+          </button>
+          <button class="nav-item" data-view="dns">
+            <span class="nav-ico"></span><span data-i18n="nav_dns"></span>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <span class="nav-ico"></span><span data-i18n="nav_settings"></span>
+          </button>
+          <button class="nav-item" data-view="tools">
+            <span class="nav-ico"></span><span data-i18n="nav_tools"></span>
+          </button>
+          <button class="nav-item" data-view="logs">
+            <span class="nav-ico"></span><span data-i18n="nav_logs"></span>
+          </button>
+          <button class="nav-item" data-view="appearance">
+            <span class="nav-ico"></span><span data-i18n="nav_appearance"></span>
+          </button>
+          <button class="nav-item" data-view="about">
+            <span class="nav-ico"></span><span data-i18n="nav_about"></span>
+          </button>
+        </nav>
+        <div class="sidebar-foot">
+          <div id="appMeta"></div>
+          <div class="side-slogan" data-i18n="slogan"></div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div id="runState" class="run-state idle" data-i18n="run_idle"></div>
+          <div class="topbar-actions">
+            <button id="btnStop" class="btn btn-danger ghost" disabled data-i18n="btn_stop"></button>
+          </div>
+        </header>
+
+        <section class="page active" id="view-strategies">
+          <div class="card" id="autostartCard">
+            <div class="card-head">
+              <h3 data-i18n="card_autostart"></h3>
+              <span class="chip" id="bootStateChip"></span>
+            </div>
+            <div class="form-grid">
+              <div class="boot-row">
+                <label><span data-i18n="label_start_on_login"></span>
+                  <select id="cfAutostart"></select>
+                </label>
+                <label class="inline-check boot-svc">
+                  <input type="checkbox" id="cfSvcBoot" /> <span data-i18n="label_run_as_service"></span>
+                </label>
+              </div>
+            </div>
+            <p class="hint" id="bootStateNote"></p>
+            <p class="muted card-sub" data-i18n="autostart_note"></p>
+          </div>
+
+          <div class="card" id="profilesCard">
+            <div class="card-head">
+              <h3 data-i18n="card_profiles"></h3>
+              <div class="tabs" id="profileTabs"></div>
+            </div>
+            <div id="profileList" class="profile-list"></div>
+          </div>
+        </section>
+
+        <section class="page" id="view-tests">
+          <div class="card" id="testCard">
+            <div class="card-head">
+              <h3 data-i18n-html="card_tests_title"></h3>
+              <label class="muted inline-check">
+                <input type="checkbox" id="testSelectAll" checked /> <span data-i18n="label_select_all"></span>
+              </label>
+              <button class="btn primary small" id="btnRunTest" data-i18n="btn_run_test"></button>
+              <button class="btn danger small" id="btnStopTest" disabled data-i18n="btn_stop_test"></button>
+              <button class="btn ghost small" id="btnTestReport" data-i18n="btn_test_report"></button>
+              <button class="btn ghost small" id="btnTestFolder" data-i18n="btn_test_folder"></button>
+            </div>
+            <p class="hint" data-i18n="test_hint"></p>
+            <div class="tabs test-tabs" id="testTabs"></div>
+            <div id="testPick" class="test-pick"></div>
+            <div id="testProgBar" class="prog hidden"><div class="prog-fill" id="testProgFill"></div><span id="testProgLabel"></span></div>
+            <div id="testBest" class="test-best hidden"></div>
+            <div id="testResults" class="test-results"></div>
+          </div>
+        </section>
+
+        <section class="page" id="view-updates">
+          <div class="tiles" id="updTiles">
+            <div class="card tile" id="autoCheckCard">
+              <div class="tile-head">
+                <span class="tile-name" data-i18n="upd_check_title"></span>
+                <button class="btn primary small" id="btnCheck" data-i18n="btn_check"></button>
+              </div>
+              <div class="tile-note muted" data-i18n="upd_check_note"></div>
+              <label class="tile-field"><span data-i18n="label_every_hours"></span>
+                <input id="cfInterval" type="number" min="0" step="1" />
+              </label>
+              <div class="tile-note muted" data-i18n="upd_interval_note"></div>
+            </div>
+            <div class="card tile engine" id="engine-flowseal">
+              <div class="tile-head">
+                <span class="tile-name">Flowseal</span>
+                <span class="chip">winws</span>
+                <span class="state-chip" id="fsState" data-i18n="chip_none"></span>
+              </div>
+              <div class="tile-note muted" data-i18n="fs_note"></div>
+              <div class="root-row" id="fsRoot"></div>
+            </div>
+            <!-- Остальные движки (zapret2/goodbyedpi/dpibreak) рендерятся в main.js -->
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3 data-i18n="upd_cfg_title"></h3>
+              <span class="muted" id="lastCheck" data-i18n="never_checked"></span>
+            </div>
+            <p class="muted card-sub" data-i18n="upd_cfg_note"></p>
+            <div class="update-actions">
+              <button class="btn" id="btnApplyAll" data-i18n="btn_apply_available"></button>
+              <button class="btn ghost" id="btnApplySel" data-i18n="btn_apply_selected"></button>
+            </div>
+            <div id="progBar" class="prog hidden"><div class="prog-fill" id="progFill"></div><span id="progLabel"></span></div>
+            <div id="updList" class="upd-list"></div>
+          </div>
+        </section>
+
+
+        <section class="page" id="view-telegram">
+          <div class="card">
+            <div class="card-head">
+              <h3 data-i18n="tg_title"></h3>
+              <span id="tgBadge" class="chip" data-i18n="tg_off"></span>
+            </div>
+            <p class="muted card-sub" data-i18n="tg_note"></p>
+            <div class="form-actions">
+              <button class="btn primary" id="btnTgToggle" data-i18n="btn_tg_on"></button>
+              <button class="btn ghost" id="btnTgConnect" disabled data-i18n="btn_tg_connect"></button>
+            </div>
+            <p class="muted" id="tgHint" data-i18n="tg_hint_default"></p>
+            <p class="muted" id="tgBridge"></p>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h3 data-i18n="tg_settings_title"></h3></div>
+            <label class="inline-check tg-opt">
+              <input type="checkbox" id="tgOffer" checked />
+              <span data-i18n="tg_offer_label"></span>
+            </label>
+            <label class="inline-check tg-opt">
+              <input type="checkbox" id="tgAutostart" />
+              <span data-i18n="tg_autostart_label"></span>
+            </label>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h3 data-i18n="tg_howto_title"></h3></div>
+            <p class="card-sub" data-i18n="tg_howto_text"></p>
+            <figure class="tg-tip-figure">
+              <img src="./src/assets/tg-tips.png" data-i18n-alt="tg_tips_alt" loading="lazy" />
+              <figcaption data-i18n="tg_tips_caption"></figcaption>
+            </figure>
+          </div>
+        </section>
+
+
+        <section class="page" id="view-settings">
+          <div class="card">
+            <div class="card-head"><h3 data-i18n-html="settings_title"></h3></div>
+            <div class="form-grid">
+              <label><span>Game Filter <span class="muted" style="font-weight:400" data-i18n="settings_gf_hint"></span></span>
+                <select id="cfGameFilter">
+                  <option value="off" data-i18n="opt_off"></option>
+                  <option value="all" data-i18n="opt_all"></option>
+                  <option value="tcp" data-i18n="opt_tcp"></option>
+                  <option value="udp" data-i18n="opt_udp"></option>
+                </select>
+              </label>
+              <label><span>ipsets <span class="muted" style="font-weight:400" data-i18n="settings_ipset_hint"></span></span>
+                <select id="cfIpset">
+                  <option value="loaded">loaded</option>
+                  <option value="any">any</option>
+                  <option value="none">none</option>
+                </select>
+              </label>
+            </div>
+            <p class="hint" data-i18n-html="settings_hint"></p>
+          </div>
+          <div class="card" id="netResetCard">
+            <div class="card-head"><h3 data-i18n-html="netreset_title"></h3></div>
+            <p class="hint" data-i18n-html="netreset_hint"></p>
+            <div class="form-actions">
+              <button class="btn danger" id="btnNetReset" data-i18n="btn_net_reset"></button>
+              <button class="btn ghost" id="btnShowAdapters" data-i18n="btn_show_adapters"></button>
+            </div>
+            <div id="netResetOut" class="muted hidden"></div>
+          </div>
+        </section>
+
+        <section class="page" id="view-tools">
+          <div class="card">
+            <div class="card-head"><h3 data-i18n-html="tools_title"></h3></div>
+            <div class="form-actions log-actions">
+              <button class="btn ghost" id="btnDiscordCache" data-i18n="btn_discord_cache"></button>
+              <button class="btn ghost" id="btnHostsUpdate" data-i18n="btn_hosts_update"></button>
+            </div>
+            <div class="form-grid" style="margin-top:10px">
+              <label><span data-i18n="label_fake_discord"></span>
+                <select id="cfFakeDiscord"></select>
+              </label>
+              <label><span data-i18n="label_fake_game"></span>
+                <select id="cfFakeGame"></select>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button class="btn ghost" id="btnFakeApply" data-i18n="btn_fake_apply"></button>
+            </div>
+            <p class="hint tools-hint" data-i18n-html="tools_hint"></p>
+          </div>
+        </section>
+
+        <section class="page" id="view-logs">
+          <div class="card">
+            <div class="card-head"><h3 data-i18n="logs_title"></h3></div>
+            <p class="muted card-sub" data-i18n="logs_note"></p>
+            <div class="form-actions log-actions">
+              <button class="btn primary" id="btnReportSave" data-i18n="btn_report_save"></button>
+              <button class="btn ghost" id="btnReportIssue" data-i18n="btn_report_issue"></button>
+              <button class="btn ghost" id="btnLogOpenDir" data-i18n="btn_log_dir"></button>
+            </div>
+            <div class="log-filters">
+              <input id="logSearch" data-i18n-placeholder="log_search_placeholder" />
+              <div class="log-levels" id="logLevels">
+                <button class="lvl-chip active" data-level="all" data-i18n="log_lvl_all"></button>
+                <button class="lvl-chip" data-level="err" data-i18n="log_lvl_err"></button>
+                <button class="lvl-chip" data-level="warn" data-i18n="log_lvl_warn"></button>
+                <button class="lvl-chip" data-level="ok" data-i18n="log_lvl_ok"></button>
+                <button class="lvl-chip" data-level="info" data-i18n="log_lvl_info"></button>
+              </div>
+            </div>
+            <div id="logList" class="log-list"></div>
+            <div id="logFoot" class="muted log-foot" data-i18n="log_loading"></div>
+          </div>
+        </section>
+
+        <section class="page" id="view-appearance">
+          <div class="card">
+            <div class="card-head"><h3 data-i18n-html="appearance_title"></h3></div>
+            <p class="muted card-sub" data-i18n="appearance_note"></p>
+            <div class="theme-grid" id="themeGrid">
+              <button class="theme-card" data-theme="grey">
+                <span class="theme-swatch swatch-grey"></span>
+                <b data-i18n="theme_grey_name"></b><span class="muted" data-i18n="theme_grey_hint"></span>
+              </button>
+              <button class="theme-card" data-theme="dark">
+                <span class="theme-swatch swatch-dark"></span>
+                <b data-i18n="theme_dark_name"></b><span class="muted">Deep Space Ops</span>
+              </button>
+              <button class="theme-card" data-theme="light">
+                <span class="theme-swatch swatch-light"></span>
+                <b data-i18n="theme_light_name"></b><span class="muted" data-i18n="theme_light_hint"></span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="page" id="view-dns">
+          <div class="card" id="dnsCard">
+            <div class="card-head"><h3 data-i18n-html="dns_title"></h3></div>
+            <p class="muted card-sub" data-i18n="dns_note"></p>
+            <div class="form-grid">
+              <label><span data-i18n="dns_provider_label"></span>
+                <select id="dnsProvider"><option value="" data-i18n="log_loading"></option></select>
+              </label>
+              <label><span data-i18n="dns_adapter_label"></span>
+                <input id="dnsAdapter" data-i18n-placeholder="dns_adapter_placeholder" />
+              </label>
+            </div>
+            <div id="dnsInfo" class="muted dns-info"></div>
+            <div id="dnsDesc" class="dns-desc hidden"></div>
+            <div class="form-actions">
+              <button class="btn primary" id="btnApplyDns" data-i18n="btn_apply_dns"></button>
+              <button class="btn ghost" id="btnResetDns" data-i18n="btn_reset_dns"></button>
+              <button class="btn ghost" id="btnDnsBench" data-i18n="btn_dns_bench"></button>
+            </div>
+            <div id="dnsBench" class="muted dns-bench hidden"></div>
+          </div>
+        </section>
+
+        <section class="page" id="view-about">
+          <div class="card">
+            <div class="card-head"><h3 data-i18n="about_title"></h3></div>
+            <div id="aboutBody"></div>
+          </div>
+        </section>
+
+        <section class="page" id="view-scanner">
+          <div class="card">
+            <div class="card-head">
+              <h3 data-i18n="scan_title"></h3>
+              <div class="scan-head-right">
+                <button class="btn primary hidden" id="btnScanRefresh" data-i18n="scan_refresh"></button>
+                <label class="inline-check tg-opt"><input type="checkbox" id="scanFocus" /><span data-i18n="scan_focus"></span></label>
+              </div>
+            </div>
+            <p class="muted card-sub" data-i18n="scan_intro"></p>
+            <div class="tabs" id="scanTabs">
+              <button class="tab active" data-scan-kind="site" data-i18n="scan_tab_site"></button>
+              <button class="tab" data-scan-kind="process" data-i18n="scan_tab_process"></button>
+            </div>
+            <div class="form-grid" style="margin-top:14px">
+              <label id="scanSiteField"><span data-i18n="scan_target_site"></span>
+                <input id="scanTargetSite" data-i18n-placeholder="scan_ph_site" />
+              </label>
+              <label id="scanProcField" class="hidden"><span data-i18n="scan_target_process"></span>
+                <select id="scanProcList"></select>
+              </label>
+              <label id="scanProcAddr" class="hidden"><span data-i18n="scan_or_addr"></span>
+                <input id="scanTargetProc" data-i18n-placeholder="scan_ph_process" />
+              </label>
+              <label><span data-i18n="scan_strategy"></span>
+                <select id="scanStrategy"></select>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button class="btn ghost hidden" id="btnScanBrowse" data-i18n="scan_browse"></button>
+              <button class="btn primary" id="btnScanRun" data-i18n="scan_run"></button>
+              <button class="btn danger hidden" id="btnScanCancel" data-i18n="scan_cancel"></button>
+              <button class="btn ghost" id="btnScanSave" disabled data-i18n="scan_save"></button>
+              <button class="btn warn" id="btnScanApply" disabled data-i18n="scan_apply"></button>
+            </div>
+            <div id="scanProgress" class="scan-progress hidden">
+              <div class="scan-bar"><div id="scanFill" class="scan-fill"></div><span id="scanTimer">0:00</span></div>
+              <div id="scanPhase" class="scan-phase"></div>
+            </div>
+            <div id="scanResult" class="muted scan-result"></div>
+            <div class="hint card-sub" data-i18n-html="scan_guide_html" style="margin-top:14px"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toasts"></div>
+
+    <div id="profileModal" class="modal hidden">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3 id="pmTitle" data-i18n="pm_title"></h3>
+            <button class="modal-x" id="pmClose"></button>
+        </div>
+        <div id="pmMeta" class="muted"></div>
+        <pre id="pmArgs" class="profile-args"></pre>
+        <div class="modal-actions">
+          <button class="btn ghost" id="pmClose2" data-i18n="btn_close"></button>
+        </div>
+      </div>
+    </div>
+
+    <div id="confirmModal" class="modal hidden">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3 id="cmTitle" data-i18n="cm_title"></h3>
+            <button class="modal-x" id="cmX"></button>
+        </div>
+        <div id="cmBody" class="confirm-body"></div>
+        <div class="modal-actions">
+          <button class="btn primary" id="cmOk" data-i18n="btn_continue"></button>
+          <button class="btn ghost" id="cmCancel" data-i18n="btn_cancel"></button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
