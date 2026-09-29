@@ -6,6 +6,8 @@
 
 **[Скачать последнюю версию](https://github.com/lECL1PS3l/zgui/releases/latest)** — архив `Z-GUI.Stable.1.0.zip`: распаковать и запустить `zgui.exe`.
 
+Исходный код (MIT) приложен к релизу отдельным архивом `Z-GUI-1.0.0-source.zip` — его можно собрать самостоятельно (`npm ci` + `scripts/build.ps1`).
+
 Портативная графическая оболочка для Windows к движкам оптимизации трафика:
 [Flowseal / zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) (winws),
 [zapret2](https://github.com/bol-van/zapret2) (winws2),
