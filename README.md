@@ -4,7 +4,7 @@
 [![Платформа](https://img.shields.io/badge/Платформа-Windows%2010%2F11-blue.svg)](#)
 [![Скачать](https://img.shields.io/badge/Скачать-Z_GUI_Stable-brightgreen?style=for-the-badge)](https://github.com/lECL1PS3l/zgui/releases/latest)
 
-**[Скачать последнюю версию](https://github.com/lECL1PS3l/zgui/releases/latest)** — архив `0-Z-GUI-Stable-<версия>.zip`: распаковать и запустить `zgui.exe`.
+**[Скачать последнюю версию](https://github.com/lECL1PS3l/zgui/releases/latest)** — архив `Z-GUI Stable <версия>.zip`: распаковать и запустить `zgui.exe`.
 
 Портативная графическая оболочка для Windows к движкам оптимизации трафика:
 [Flowseal / zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) (winws),
@@ -50,7 +50,7 @@
 
 ## Быстрый старт
 
-1. Скачайте свежий архив `0-Z-GUI-Stable-*.zip` со [страницы релизов](https://github.com/lECL1PS3l/zgui/releases) и распакуйте
+1. Скачайте свежий архив `Z-GUI Stable <версия>.zip` со [страницы релизов](https://github.com/lECL1PS3l/zgui/releases) и распакуйте
    в папку без кириллицы и пробелов (например `D:\Zapret`).
 2. Запустите `zgui.exe`. Рядом уже лежит папка `data/` — движки, стратегии и списки;
    первый запуск работает без интернета.
