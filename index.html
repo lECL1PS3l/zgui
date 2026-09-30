@@ -18,7 +18,6 @@
           <div class="brand-logo"><img src="./src/assets/z-logo.png" data-i18n-alt="logo_alt" /></div>
           <div class="brand-text">
             <div class="brand-title" data-i18n="app_title"></div>
-            <div class="brand-sub">winws</div>
           </div>
         </div>
         <nav class="nav">
@@ -121,7 +120,7 @@
         </section>
 
         <section class="page" id="view-updates">
-          <div class="tiles" id="updTiles">
+          <div class="tiles" id="updTopTiles">
             <div class="card tile" id="autoCheckCard">
               <div class="tile-head">
                 <span class="tile-name" data-i18n="upd_check_title"></span>
@@ -133,6 +132,22 @@
               </label>
               <div class="tile-note muted" data-i18n="upd_interval_note"></div>
             </div>
+            <div class="card tile" id="appUpdCard">
+              <div class="tile-head">
+                <span class="tile-name" data-i18n="app_upd_title"></span>
+                <span class="chip" id="appVer"></span>
+                <span class="state-chip" id="appUpdState"></span>
+                <button class="btn primary small" id="btnAppUpdCheck" data-i18n="btn_app_check"></button>
+              </div>
+              <div class="tile-note muted" data-i18n="app_upd_note"></div>
+              <div class="root-row"><code id="appUpdPath"></code></div>
+              <div class="update-actions">
+                <button class="btn small" id="btnAppUpdOpen" data-i18n="btn_open_folder"></button>
+                <button class="btn primary small hidden" id="btnAppUpdDownload" data-i18n="btn_app_download"></button>
+              </div>
+            </div>
+          </div>
+          <div class="tiles" id="updTiles">
             <div class="card tile engine" id="engine-flowseal">
               <div class="tile-head">
                 <span class="tile-name">Flowseal</span>
@@ -190,11 +205,7 @@
 
           <div class="card">
             <div class="card-head"><h3 data-i18n="tg_howto_title"></h3></div>
-            <p class="card-sub" data-i18n="tg_howto_text"></p>
-            <figure class="tg-tip-figure">
-              <img src="./src/assets/tg-tips.png" data-i18n-alt="tg_tips_alt" loading="lazy" />
-              <figcaption data-i18n="tg_tips_caption"></figcaption>
-            </figure>
+            <div data-i18n-html="tg_howto_html"></div>
           </div>
         </section>
 
@@ -202,8 +213,8 @@
         <section class="page" id="view-settings">
           <div class="card">
             <div class="card-head"><h3 data-i18n-html="settings_title"></h3></div>
-            <div class="form-grid">
-              <label><span>Game Filter <span class="muted" style="font-weight:400" data-i18n="settings_gf_hint"></span></span>
+            <div class="settings-block">
+              <label><span data-i18n="settings_gf_label"></span>
                 <select id="cfGameFilter">
                   <option value="off" data-i18n="opt_off"></option>
                   <option value="all" data-i18n="opt_all"></option>
@@ -211,15 +222,38 @@
                   <option value="udp" data-i18n="opt_udp"></option>
                 </select>
               </label>
-              <label><span>ipsets <span class="muted" style="font-weight:400" data-i18n="settings_ipset_hint"></span></span>
+              <p class="hint" data-i18n-html="gf_guide"></p>
+            </div>
+            <div class="settings-block">
+              <label class="inline-check tg-opt"><input type="checkbox" id="cfAnticheat" /><span data-i18n="settings_anticheat"></span></label>
+              <p class="hint" data-i18n-html="anticheat_guide"></p>
+            </div>
+            <div class="settings-block">
+              <label><span data-i18n="settings_ipset_label"></span>
                 <select id="cfIpset">
                   <option value="loaded">loaded</option>
                   <option value="any">any</option>
                   <option value="none">none</option>
                 </select>
               </label>
+              <p class="hint" data-i18n-html="ipset_guide"></p>
             </div>
-            <p class="hint" data-i18n-html="settings_hint"></p>
+            <div class="settings-block">
+              <label><span data-i18n="settings_filtermode_label"></span>
+                <select id="cfFilterMode">
+                  <option value="auto" data-i18n="fm_auto"></option>
+                  <option value="hostlist" data-i18n="fm_hostlist"></option>
+                  <option value="ipset" data-i18n="fm_ipset"></option>
+                </select>
+              </label>
+              <p class="hint" data-i18n-html="filtermode_guide"></p>
+            </div>
+            <div class="settings-block">
+              <p class="muted card-sub" data-i18n="settings_tour_note"></p>
+              <div class="form-actions">
+                <button class="btn ghost" id="btnTourStart" data-i18n="tour_start"></button>
+              </div>
+            </div>
           </div>
           <div class="card" id="netResetCard">
             <div class="card-head"><h3 data-i18n-html="netreset_title"></h3></div>
@@ -359,6 +393,8 @@
             </div>
             <div class="form-actions">
               <button class="btn ghost hidden" id="btnScanBrowse" data-i18n="scan_browse"></button>
+              <button class="btn ghost" id="btnScanMethod" data-i18n="scan_method"></button>
+              <button class="btn ghost" id="btnScanTtl" data-i18n="scan_ttl"></button>
               <button class="btn primary" id="btnScanRun" data-i18n="scan_run"></button>
               <button class="btn danger hidden" id="btnScanCancel" data-i18n="scan_cancel"></button>
               <button class="btn ghost" id="btnScanSave" disabled data-i18n="scan_save"></button>
@@ -370,6 +406,7 @@
             </div>
             <div id="scanResult" class="muted scan-result"></div>
             <div class="hint card-sub" data-i18n-html="scan_guide_html" style="margin-top:14px"></div>
+            <div class="hint card-sub" data-i18n-html="scan_ttl_guide_html" style="margin-top:10px"></div>
           </div>
         </section>
       </main>

@@ -39,7 +39,135 @@ pub struct Recommendation {
 }
 
 fn none_note(note: &str) -> Recommendation {
-    Recommendation { file: None, lines: Vec::new(), note: note.to_string() }
+    Recommendation {
+        file: None,
+        lines: Vec::new(),
+        note: note.to_string(),
+    }
+}
+
+/// Определение метода блокировки домена (только пробы, ничего не меняет).
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct MethodReport {
+    pub dns_ok: bool,
+    pub ips: Vec<String>,
+    pub tcp: String,
+    pub tls_ok: bool,
+    pub code: String,
+    pub verdict: String,
+    pub note: String,
+}
+
+/// Чистая классификация: (код, вердикт) по фактам «DNS есть? / TCP / TLS».
+pub fn classify_method(dns_ok: bool, tcp: &str, tls_ok: bool) -> (&'static str, &'static str) {
+    if !dns_ok {
+        return ("dns", "имя не разрешается (DNS)");
+    }
+    match tcp {
+        "timeout" => ("ip", "TCP-таймаут — блок похож на IP/подсеть"),
+        "reset" | "refused" => ("sni", "TCP сбрасывается (RST) — блок по соединению/SNI"),
+        "ok" => {
+            if tls_ok {
+                ("none", "TLS проходит — домен не блокируется")
+            } else {
+                ("sni", "TCP открыт, TLS срывается — блок по SNI")
+            }
+        }
+        _ => ("unknown", "метод не определён"),
+    }
+}
+
+/// Метод блокировки домена: resolver + TCP:443 + TLS (1.3, при неудаче 1.2).
+pub fn diagnose_method(host: &str) -> MethodReport {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addrs: Vec<std::net::SocketAddr> = (host, 443u16)
+        .to_socket_addrs()
+        .map(|it| it.collect())
+        .unwrap_or_default();
+    let dns_ok = !addrs.is_empty();
+    let mut ips: Vec<String> = addrs.iter().map(|a| a.ip().to_string()).collect();
+    ips.sort();
+    ips.dedup();
+    let tcp = match addrs.first() {
+        Some(a) => match TcpStream::connect_timeout(a, std::time::Duration::from_secs(3)) {
+            Ok(_) => "ok",
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::TimedOut => "timeout",
+                std::io::ErrorKind::ConnectionRefused => "refused",
+                std::io::ErrorKind::ConnectionReset => "reset",
+                _ => "error",
+            },
+        },
+        None => "error",
+    };
+    let tls_ok =
+        dns_ok && tcp == "ok" && (crate::tester::tls13_ok(host) || crate::tester::tls12_ok(host));
+    let (code, verdict) = classify_method(dns_ok, tcp, tls_ok);
+    let note = match code {
+        "none" => "Оптимизация не нужна — домен открыт.",
+        "dns" => "Похоже на проблему DNS: попробуйте DoH или доверенный DNS; оптимизация тут ни при чём.",
+        "ip" => "Похоже на блокировку по адресу у провайдера — оптимизация не поможет, нужен другой маршрут.",
+        "sni" => "Блок по SNI: поможет оптимизация flowseal (fake/multisplit).",
+        _ => "Уточните цель или попробуйте другой домен.",
+    }
+    .to_string();
+    MethodReport {
+        dns_ok,
+        ips,
+        tcp: tcp.to_string(),
+        tls_ok,
+        code: code.to_string(),
+        verdict: verdict.to_string(),
+        note,
+    }
+}
+
+/// Значения TTL для перебора (подбор `--dpi-desync-ttl`).
+pub const TTL_CANDIDATES: [u32; 8] = [2, 4, 6, 8, 10, 12, 16, 20];
+
+/// Подставляет `--dpi-desync-ttl=N` в каждую группу (`--new`), убирая прежние TTL.
+pub fn inject_ttl(args: &[String], ttl: u32) -> Vec<String> {
+    let mut cleaned: Vec<String> = Vec::with_capacity(args.len() + 4);
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--dpi-desync-ttl" {
+            skip_next = true; // следующий токен — значение
+            continue;
+        }
+        if a.starts_with("--dpi-desync-ttl=") {
+            continue;
+        }
+        cleaned.push(a.clone());
+    }
+    let set = format!("--dpi-desync-ttl={ttl}");
+    let mut out: Vec<String> = Vec::with_capacity(cleaned.len() + 4);
+    for a in &cleaned {
+        if a == "--new" {
+            out.push(set.clone());
+        }
+        out.push(a.clone());
+    }
+    out.push(set);
+    out
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct TtlResult {
+    pub ttl: u32,
+    pub ok: bool,
+    pub ms: u64,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct TtlReport {
+    pub host: String,
+    pub strategy: String,
+    pub results: Vec<TtlResult>,
+    pub best: Option<u32>,
 }
 
 /// Нормализует URL/домен в host (без схемы/пути/порта, нижний регистр).
@@ -63,7 +191,9 @@ pub fn parse_site_target(input: &str) -> Option<String> {
         .to_ascii_lowercase();
     if host.is_empty()
         || !host.contains('.')
-        || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     {
         return None;
     }
@@ -71,7 +201,11 @@ pub fn parse_site_target(input: &str) -> Option<String> {
 }
 
 fn ipv4_u32(ip: &str) -> Option<u32> {
-    let o: Vec<u32> = ip.trim().split('.').map(|p| p.parse().ok()).collect::<Option<Vec<_>>>()?;
+    let o: Vec<u32> = ip
+        .trim()
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
     if o.len() != 4 || o.iter().any(|x| *x > 255) {
         return None;
     }
@@ -125,10 +259,17 @@ pub fn decide_site(
         };
         (
             Verdict::Collateral,
-            Recommendation { file: Some("list-exclude-user.txt".into()), lines: Vec::new(), note: note.into() },
+            Recommendation {
+                file: Some("list-exclude-user.txt".into()),
+                lines: Vec::new(),
+                note: note.into(),
+            },
         )
     } else if !without.ok && !with.ok {
-        (Verdict::Unrelated, none_note("не похоже на проблему оптимизации"))
+        (
+            Verdict::Unrelated,
+            none_note("не похоже на проблему оптимизации"),
+        )
     } else {
         (Verdict::NoEffect, none_note("оптимизация цели не мешает"))
     }
@@ -153,7 +294,11 @@ pub fn wait_and_measure(
     cancel_flag: &std::path::Path,
 ) -> PhaseMeasure {
     if ipv4_u32(ip).is_none() {
-        return PhaseMeasure { ok: false, ms: 0, detail: "некорректный адрес".into() };
+        return PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "некорректный адрес".into(),
+        };
     }
     let script = format!(
         "$flag='{flag}'; $rip='{ip}'; $rport={port}; $wait={wait}; $meas={meas}; \
@@ -178,18 +323,34 @@ pub fn wait_and_measure(
     let out = crate::runner::run_powershell(&["-Command".into(), script]).unwrap_or_default();
     let line = out.trim();
     if line == "cancelled" {
-        return PhaseMeasure { ok: false, ms: 0, detail: "проверка отменена".into() };
+        return PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "проверка отменена".into(),
+        };
     }
     let parts: Vec<&str> = line.split(';').collect();
     if parts.len() != 3 || parts[0] != "yes" {
-        return PhaseMeasure { ok: false, ms: 0, detail: "соединение не появилось (создайте сессию)".into() };
+        return PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "соединение не появилось (создайте сессию)".into(),
+        };
     }
     let ms: u64 = parts[1].parse().unwrap_or(0);
     let alive = parts[2].trim().eq_ignore_ascii_case("true");
     if alive {
-        PhaseMeasure { ok: true, ms, detail: format!("держится ≥ {} с", ms / 1000) }
+        PhaseMeasure {
+            ok: true,
+            ms,
+            detail: format!("держится ≥ {} с", ms / 1000),
+        }
     } else {
-        PhaseMeasure { ok: false, ms, detail: format!("оборвалось через {} с", ms / 1000) }
+        PhaseMeasure {
+            ok: false,
+            ms,
+            detail: format!("оборвалось через {} с", ms / 1000),
+        }
     }
 }
 
@@ -203,9 +364,15 @@ pub fn watch_process(
 ) -> PhaseMeasure {
     let name = process.trim();
     if name.is_empty()
-        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
     {
-        return PhaseMeasure { ok: false, ms: 0, detail: "некорректное имя процесса".into() };
+        return PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "некорректное имя процесса".into(),
+        };
     }
     let script = format!(
         "$flag='{flag}'; $proc='{proc}'; $wait={wait}; $meas={meas}; \
@@ -235,18 +402,34 @@ pub fn watch_process(
 fn parse_watch(out: &str) -> PhaseMeasure {
     let line = out.trim();
     if line == "cancelled" {
-        return PhaseMeasure { ok: false, ms: 0, detail: "проверка отменена".into() };
+        return PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "проверка отменена".into(),
+        };
     }
     let parts: Vec<&str> = line.split(';').collect();
     if parts.len() != 3 || parts[0] != "yes" {
-        return PhaseMeasure { ok: false, ms: 0, detail: "соединение не появилось (создайте сессию)".into() };
+        return PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "соединение не появилось (создайте сессию)".into(),
+        };
     }
     let ms: u64 = parts[1].parse().unwrap_or(0);
     let alive = parts[2].trim().eq_ignore_ascii_case("true");
     if alive {
-        PhaseMeasure { ok: true, ms, detail: format!("держится ≥ {} с", ms / 1000) }
+        PhaseMeasure {
+            ok: true,
+            ms,
+            detail: format!("держится ≥ {} с", ms / 1000),
+        }
     } else {
-        PhaseMeasure { ok: false, ms, detail: format!("оборвалось через {} с", ms / 1000) }
+        PhaseMeasure {
+            ok: false,
+            ms,
+            detail: format!("оборвалось через {} с", ms / 1000),
+        }
     }
 }
 
@@ -264,7 +447,9 @@ fn focus_main(app: &tauri::AppHandle) {
 pub fn capture_process_endpoints(name: &str, secs: u64) -> Vec<Endpoint> {
     let name = name.trim();
     if name.is_empty()
-        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
     {
         return Vec::new();
     }
@@ -285,7 +470,11 @@ pub fn capture_process_endpoints(name: &str, secs: u64) -> Vec<Endpoint> {
         if let Some((ip, port)) = line.rsplit_once(':') {
             if let Ok(p) = port.parse::<u16>() {
                 if !ip.is_empty() {
-                    eps.push(Endpoint { ip: ip.to_string(), port: p, state: "Established".into() });
+                    eps.push(Endpoint {
+                        ip: ip.to_string(),
+                        port: p,
+                        state: "Established".into(),
+                    });
                 }
             }
         }
@@ -353,7 +542,11 @@ pub fn domain_excluded(host: &str, lists_dir: &std::path::Path) -> bool {
 fn measure_site(target: &str) -> PhaseMeasure {
     match parse_site_target(target) {
         Some(host) => crate::tester::site_measure(&host),
-        None => PhaseMeasure { ok: false, ms: 0, detail: "некорректный домен".into() },
+        None => PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "некорректный домен".into(),
+        },
     }
 }
 
@@ -366,7 +559,10 @@ pub fn decide_process(
     game_filter: bool,
 ) -> (Verdict, Recommendation) {
     if !without.ok && with.ok {
-        (Verdict::Covered, none_note("оптимизация нужна и удерживает соединение"))
+        (
+            Verdict::Covered,
+            none_note("оптимизация нужна и удерживает соединение"),
+        )
     } else if without.ok && !with.ok {
         (
             Verdict::Collateral,
@@ -386,10 +582,17 @@ pub fn decide_process(
         };
         (
             Verdict::NotCovered,
-            Recommendation { file: Some("ipset-all-user.txt".into()), lines: Vec::new(), note: note.into() },
+            Recommendation {
+                file: Some("ipset-all-user.txt".into()),
+                lines: Vec::new(),
+                note: note.into(),
+            },
         )
     } else {
-        (Verdict::NoEffect, none_note("соединение держится и без оптимизации — проблема не в ней"))
+        (
+            Verdict::NoEffect,
+            none_note("соединение держится и без оптимизации — проблема не в ней"),
+        )
     }
 }
 
@@ -405,7 +608,10 @@ pub fn run_scan(
 ) -> Result<ScanReport, String> {
     let (prev_profile, prev_service) = {
         let s = crate::st(g);
-        (s.runtime.as_ref().map(|r| r.profile_id.clone()), s.service_running.unwrap_or(false))
+        (
+            s.runtime.as_ref().map(|r| r.profile_id.clone()),
+            s.service_running.unwrap_or(false),
+        )
     };
     let data = crate::st(g).data.clone();
     let flag = data.join("logs/scan-stop.flag");
@@ -417,7 +623,11 @@ pub fn run_scan(
     // Возврат прежнего состояния: служба важнее профиля (они взаимоисключающие).
     if prev_service {
         if let Err(e) = crate::service::start_service(&data) {
-            crate::logger::log("warn", "scanner", &format!("служба не вернулась после скана: {e}"));
+            crate::logger::log(
+                "warn",
+                "scanner",
+                &format!("служба не вернулась после скана: {e}"),
+            );
         }
     } else if let Some(id) = prev_profile {
         let _ = crate::do_start(app, g, &id);
@@ -442,23 +652,41 @@ fn scan_inner(
             return Err("не найден curl.exe — проба сайта невозможна".into());
         }
         crate::stop_all_own(app, g)?;
-        if focus { focus_main(app); }
-        crate::emit(app, "zgui:scan", serde_json::json!({"phase": "without", "msg": "Замер без оптимизации…"}));
+        if focus {
+            focus_main(app);
+        }
+        crate::emit(
+            app,
+            "zgui:scan",
+            serde_json::json!({"phase": "without", "msg": "Замер без оптимизации…"}),
+        );
         let without = measure_site(target);
         let start_res = crate::do_start(app, g, strategy_id);
-        if focus { focus_main(app); }
-        crate::emit(app, "zgui:scan", serde_json::json!({"phase": "with", "msg": "Замер с оптимизацией…"}));
+        if focus {
+            focus_main(app);
+        }
+        crate::emit(
+            app,
+            "zgui:scan",
+            serde_json::json!({"phase": "with", "msg": "Замер с оптимизацией…"}),
+        );
         let with = if start_res.is_ok() {
             measure_site(target)
         } else {
-            PhaseMeasure { ok: false, ms: 0, detail: "стратегия не запустилась".into() }
+            PhaseMeasure {
+                ok: false,
+                ms: 0,
+                detail: "стратегия не запустилась".into(),
+            }
         };
         let _ = crate::stop_all_own(app, g);
 
         let (in_ipset, excluded) = match lists {
             Some(l) => {
                 let host = parse_site_target(target).unwrap_or_default();
-                let hit = resolve_first_ip(&host).map(|ip| ip_in_ipset(&ip, &l.join("ipset-all.txt"))).unwrap_or(false);
+                let hit = resolve_first_ip(&host)
+                    .map(|ip| ip_in_ipset(&ip, &l.join("ipset-all.txt")))
+                    .unwrap_or(false);
                 (hit, domain_excluded(&host, l))
             }
             None => (false, false),
@@ -489,8 +717,14 @@ fn scan_inner(
         let do_measure = |ip: &str, port: u16| wait_and_measure(ip, port, 30, 40, flag);
 
         crate::stop_all_own(app, g)?;
-        if focus { focus_main(app); }
-        crate::emit(app, "zgui:scan", serde_json::json!({"phase": "without", "msg": format!("Фаза 1/2 (без оптимизации): создайте сессию — {desc}")}));
+        if focus {
+            focus_main(app);
+        }
+        crate::emit(
+            app,
+            "zgui:scan",
+            serde_json::json!({"phase": "without", "msg": format!("Фаза 1/2 (без оптимизации): создайте сессию — {desc}")}),
+        );
         let without = match &endpoint {
             Some((ip, p)) => wait_and_measure(ip, *p, 45, 40, flag),
             None => watch_process(target, 45, 40, flag),
@@ -500,15 +734,25 @@ fn scan_inner(
             return Err("проверка отменена".into());
         }
         let start_res = crate::do_start(app, g, strategy_id);
-        if focus { focus_main(app); }
-        crate::emit(app, "zgui:scan", serde_json::json!({"phase": "with", "msg": format!("Фаза 2/2 (с оптимизацией): пересоздайте сессию — {desc}")}));
+        if focus {
+            focus_main(app);
+        }
+        crate::emit(
+            app,
+            "zgui:scan",
+            serde_json::json!({"phase": "with", "msg": format!("Фаза 2/2 (с оптимизацией): пересоздайте сессию — {desc}")}),
+        );
         let with = if start_res.is_ok() {
             match &endpoint {
                 Some((ip, p)) => do_measure(ip, *p),
                 None => watch_process(target, 30, 40, flag),
             }
         } else {
-            PhaseMeasure { ok: false, ms: 0, detail: "стратегия не запустилась".into() }
+            PhaseMeasure {
+                ok: false,
+                ms: 0,
+                detail: "стратегия не запустилась".into(),
+            }
         };
         let _ = crate::stop_all_own(app, g);
         if with.detail == "проверка отменена" {
@@ -542,10 +786,16 @@ fn scan_inner(
 
 /// Применяет рекомендацию: домен в исключения либо подсеть в include + Game Filter.
 pub fn apply_report(g: &crate::Global, report: &ScanReport) -> Result<String, String> {
-    let lists = crate::scanner_lists_dir(g).ok_or("движок flowseal не настроен — применить некуда")?;
+    let lists =
+        crate::scanner_lists_dir(g).ok_or("движок flowseal не настроен — применить некуда")?;
     match report.verdict {
         Verdict::Collateral if report.kind == "site" => {
-            let host = report.recommendation.lines.first().cloned().unwrap_or_default();
+            let host = report
+                .recommendation
+                .lines
+                .first()
+                .cloned()
+                .unwrap_or_default();
             if host.is_empty() {
                 return Err("пустой домен".into());
             }
@@ -559,10 +809,17 @@ pub fn apply_report(g: &crate::Global, report: &ScanReport) -> Result<String, St
                 cur.push('\n');
                 std::fs::write(&f, cur).map_err(|e| e.to_string())?;
             }
-            Ok(format!("Добавлено в исключения: {host}. Перезапустите стратегию."))
+            Ok(format!(
+                "Добавлено в исключения: {host}. Перезапустите стратегию."
+            ))
         }
         Verdict::NotCovered => {
-            let line = report.recommendation.lines.first().cloned().unwrap_or_default();
+            let line = report
+                .recommendation
+                .lines
+                .first()
+                .cloned()
+                .unwrap_or_default();
             if line.is_empty() {
                 return Err("пустая подсеть".into());
             }
@@ -580,12 +837,18 @@ pub fn apply_report(g: &crate::Global, report: &ScanReport) -> Result<String, St
                 let mut s = crate::st(g);
                 s.settings.game_filter = "all".into();
                 s.save();
-                (s.roots.path(crate::config::ENGINE_FLOWSEAL), s.data.clone(), s.settings.clone())
+                (
+                    s.roots.path(crate::config::ENGINE_FLOWSEAL),
+                    s.data.clone(),
+                    s.settings.clone(),
+                )
             };
             if let Some(root) = root {
                 crate::updater::sync_ipset(&root, &data, &settings);
             }
-            Ok(format!("Добавлено в обход: {line}; включён «Игровой фильтр». Перезапустите стратегию."))
+            Ok(format!(
+                "Добавлено в обход: {line}; включён «Игровой фильтр». Перезапустите стратегию."
+            ))
         }
         _ => Ok("Рекомендация не требует правок.".into()),
     }
@@ -601,7 +864,16 @@ pub fn save_report(data: &std::path::Path, report: &ScanReport) -> Result<String
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("scan-{ts}.txt"));
     let ph = |name: &str, m: &PhaseMeasure| {
-        format!("{name}: {} ({}), {} мс", if m.ok { "есть ответ" } else { "нет ответа" }, m.detail, m.ms)
+        format!(
+            "{name}: {} ({}), {} мс",
+            if m.ok {
+                "есть ответ"
+            } else {
+                "нет ответа"
+            },
+            m.detail,
+            m.ms
+        )
     };
     let text = format!(
         "Диагностика сервиса\r\nЦель: {} ({})\r\nСтратегия: {}\r\nБез оптимизации: {}\r\nС оптимизацией: {}\r\nВердикт: {:?}\r\nРекомендация: {}\r\nФайл: {}\r\nСтроки: {}\r\n",
@@ -624,6 +896,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn classify_method_maps_facts_to_block_kind() {
+        assert_eq!(classify_method(false, "error", false).0, "dns");
+        assert_eq!(classify_method(true, "timeout", false).0, "ip");
+        assert_eq!(classify_method(true, "reset", false).0, "sni");
+        assert_eq!(classify_method(true, "ok", false).0, "sni");
+        assert_eq!(classify_method(true, "ok", true).0, "none");
+    }
+
+    #[test]
+    fn inject_ttl_covers_each_group_and_drops_old() {
+        let base: Vec<String> = [
+            "--wf-tcp=80,443",
+            "--dpi-desync=fake",
+            "--dpi-desync-ttl",
+            "5",
+            "--new",
+            "--dpi-desync=split",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = inject_ttl(&base, 6);
+        assert!(!out.iter().any(|a| a == "5"), "старое значение TTL убрано");
+        assert!(
+            !out.iter().any(|a| a == "--dpi-desync-ttl"),
+            "старый флаг без = убран"
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|a| a.starts_with("--dpi-desync-ttl="))
+                .count(),
+            2,
+            "TTL в обеих группах"
+        );
+        assert_eq!(out.last().unwrap(), "--dpi-desync-ttl=6");
+    }
+
+    #[test]
     fn parse_site_target_normalizes_urls() {
         assert_eq!(
             parse_site_target("https://store.steampowered.com/app/1?x=2").as_deref(),
@@ -633,7 +943,10 @@ mod tests {
             parse_site_target("cdn.cloudflare.steamstatic.com:443").as_deref(),
             Some("cdn.cloudflare.steamstatic.com")
         );
-        assert_eq!(parse_site_target("  steamcommunity.com  ").as_deref(), Some("steamcommunity.com"));
+        assert_eq!(
+            parse_site_target("  steamcommunity.com  ").as_deref(),
+            Some("steamcommunity.com")
+        );
         assert_eq!(parse_site_target(""), None);
         assert_eq!(parse_site_target("bad host!!"), None);
     }
@@ -654,8 +967,16 @@ mod tests {
 
     #[test]
     fn decide_site_flags_collateral() {
-        let ok = PhaseMeasure { ok: true, ms: 120, detail: String::new() };
-        let bad = PhaseMeasure { ok: false, ms: 0, detail: "таймаут".into() };
+        let ok = PhaseMeasure {
+            ok: true,
+            ms: 120,
+            detail: String::new(),
+        };
+        let bad = PhaseMeasure {
+            ok: false,
+            ms: 0,
+            detail: "таймаут".into(),
+        };
         let (v, rec) = decide_site(&ok, &bad, true, false);
         assert!(matches!(v, Verdict::Collateral));
         assert_eq!(rec.file.as_deref(), Some("list-exclude-user.txt"));
@@ -668,7 +989,11 @@ mod tests {
 
     #[test]
     fn decide_process_needs_include_when_dead_both_ways() {
-        let dead = PhaseMeasure { ok: false, ms: 22000, detail: "give-up".into() };
+        let dead = PhaseMeasure {
+            ok: false,
+            ms: 22000,
+            detail: "give-up".into(),
+        };
         let (v, rec) = decide_process(&dead, &dead, false, false);
         assert!(matches!(v, Verdict::NotCovered));
         assert_eq!(rec.file.as_deref(), Some("ipset-all-user.txt"));

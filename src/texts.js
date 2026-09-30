@@ -12,9 +12,9 @@ const plural = (n, one, few, many) => {
 
 export const T = {
   // ------------------------------------------------------------- общее
-  app_title: "Zapret GUI",
+  app_title: "Z-GUI",
   slogan: "Локальная оптимизация сетевых пакетов",
-  logo_alt: "Логотип Zapret GUI",
+  logo_alt: "Логотип Z-GUI",
 
   // ------------------------------------------------------------- навигация
   nav_strategies: "Стратегии",
@@ -32,12 +32,12 @@ export const T = {
   run_idle: "выключено",
   run_op: "идёт операция…",
   run_test: "идёт проверка стратегий",
-  run_active: "winws активен",
+  run_active: "движок активен",
   btn_stop: "Остановить",
   btn_start: "Запустить",
 
   // ------------------------------------------------------------- ошибки
-  err_admin: "Не хватает прав администратора. Запустите программу заново и подтвердите запрос Windows",
+  err_admin: "Для операции не хватает прав администратора. Подробности в «Журнале»",
   err_busy: "Файл занят другой программой. Закройте её и повторите",
   err_space: "На диске не хватает места",
   err_not_found: "Файл или папка не найдены. Возможно, движок ещё не установлен",
@@ -47,7 +47,7 @@ export const T = {
   err_5xx: "Сервер временно недоступен. Попробуйте позже",
   err_invalid: "Недопустимое значение поля. Проверьте данные",
   err_exit: "Движок сразу завершился. Подробности в «Журнале»",
-  err_launch: "Не удалось запустить. Возможно, отклонён запрос прав администратора",
+  err_launch: "Не удалось запустить. Подробности в «Журнале»",
   err_panic: "Внутренняя ошибка программы. Подробности в «Журнале»",
   err_unknown: "Неизвестная ошибка. Подробности в «Журнале»",
   err_unexpected: (s) => "Непредвиденная ошибка: " + s,
@@ -154,6 +154,52 @@ export const T = {
   upd_loading: "Список загружается при старте…",
   upd_group_err: (n) => `${n} ${plural(n, "ошибка", "ошибки", "ошибок")}`,
   upd_group_avail: (n) => `${n} обновить`,
+  app_upd_title: "Обновление программы",
+  app_upd_note: "Свежая сборка с GitHub. Скачается в папку обновлений — распакуйте её поверх старой.",
+  scan_need_strategy: "Выберите стратегию для проверки",
+  settings_tour_note: "Обучение: короткий тур по программе (запуск, тест, служба).",
+  tour_start: "Пройти обучение снова",
+  tour_next: "Далее",
+  tour_back: "Назад",
+  tour_skip: "Пропустить",
+  tour_done_btn: "Готово",
+  tour_offer_title: "Приветик! Помочь настроить программу?",
+  tour_offer_text: "Быстро покажу, где запускается оптимизация, как подобрать стратегию под вашего провайдера и как включить её службой.",
+  tour_offer_yes: "Да",
+  tour_offer_no: "Нет",
+  tour_welcome_title: "Добро пожаловать в Z-GUI!",
+  tour_welcome_text: "Быстрый гайд по программе: подберём стратегию, покажем как и где включать. Займёт всего минуту, можно пропустить в любой момент.",
+  tour_tabs_title: "Тест стратегий",
+  tour_tabs_text: "Здесь программа сама проверит стратегии и покажет, какие подходят вашему провайдеру.",
+  tour_flow_title: "Выберите Flowseal (winws)",
+  tour_flow_text: "Начните с этого движка — он подходит большинству провайдеров. Остальные можно протестировать позже.",
+  tour_run_title: "Запустите тест",
+  tour_run_text: "Нажмите «Запустить тест». Во время теста интернет может пропадать — вплоть до полного обрыва. Это нормально.",
+  tour_strat_title: "Ваши стратегии",
+  tour_strat_text: "После теста вернитесь сюда: лучшие стратегии уже отмечены. Это готовые профили оптимизации.",
+  tour_launch_title: "Как запустить",
+  tour_launch_text: "Нажмите «Запустить» у подходящей стратегии — оптимизация включится.",
+  tour_svc_title: "Автозапуск службой",
+  tour_svc_text: "Чтобы оптимизация включалась сама при запуске ПК (без запуска программы) — выберите стратегию и поставьте галочку «Запускать службой».",
+  tour_stop_title: "Остановить",
+  tour_stop_text: "Кнопка «Остановить» сверху выключает оптимизацию и снимает службу. Готово!",
+
+  btn_app_check: "Проверить",
+  btn_app_download: "Скачать",
+  app_upd_ok: "У вас последняя версия.",
+  app_upd_ok_short: "актуально",
+  app_upd_latest: (v) => `Доступна версия ${v}`,
+  app_upd_avail: (v) => `доступна ${v}`,
+  app_upd_err_short: "ошибка проверки",
+  app_upd_err: (e) => `Не удалось проверить обновление: ${e}`,
+  app_upd_saved: (p) => `Сборка сохранена: ${p}`,
+  wins_summary: (k, n) => `Рабочих стратегий: ${k} из ${n}`,
+  scan_method: "Метод блокировки",
+  settings_anticheat: "Пауза, если запущен античит",
+  anticheat_guide: "Если в списке процессов появится античит (EAC, BattlEye, Vanguard) — оптимизация автоматически выключится, чтобы не мешать игре.",
+  scan_ttl: "Подобрать TTL",
+  scan_ttl_best: "Лучший TTL",
+  scan_ttl_none: "Ни один TTL не сработал",
   st_ok: "актуально",
   st_avail: "обновить",
   st_new: "новый",
@@ -184,7 +230,7 @@ export const T = {
   auto_off: "Автозапуск выключен",
   auto_saved: "Стратегия сохранена — включите службу галочкой",
   svc_switched: "Служба переключена на выбранную стратегию",
-  svc_installing: "Ставлю службу — Windows спросит права администратора",
+  svc_installing: "Ставлю службу…",
   svc_installed: "Готово: оптимизацию включает служба — программа не нужна",
   svc_removed: "Служба выключена",
   pick_profile_first: "Сначала выберите стратегию",
@@ -243,11 +289,54 @@ export const T = {
   tg_offer_label: "Предлагать, когда запущен Telegram и нет VPN",
   tg_autostart_label: "Включать прокси при старте программы",
   tg_howto_title: "Как отключить прокси в Telegram",
-  tg_howto_text:
-    "Прокси включается сам, а выключается только в Telegram: Настройки → Продвинутые настройки → Тип подключения. Там же удалите лишнюю запись через ⋮.",
-  tg_tips_alt: "Telegram: отключение и удаление прокси",
-  tg_tips_caption:
-    "1 — меню → Настройки; 2 — Продвинутые настройки; 3 — Тип подключения; 4 — «Отключить прокси»; лишнюю запись удалите через ⋮.",
+  tg_howto_html: `
+    <div class="tg-howto">
+      <div class="tg-panel">
+        <span class="tg-step">1</span>
+        <div class="tg-profile"><span class="tg-avatar"><i class="tg-ico i-user"></i></span><div class="tg-pinfo"><b>Имя аккаунта</b><span class="tg-sub">Установить эмодзи-статус</span></div></div>
+        <div class="tg-row"><i class="tg-ico i-user"></i>Мой профиль</div>
+        <div class="tg-row"><i class="tg-ico i-users"></i>Создать группу</div>
+        <div class="tg-row"><i class="tg-ico i-mega"></i>Создать канал</div>
+        <div class="tg-row"><i class="tg-ico i-user"></i>Контакты</div>
+        <div class="tg-row"><i class="tg-ico i-phone"></i>Звонки</div>
+        <div class="tg-row"><i class="tg-ico i-star"></i>Избранное</div>
+        <div class="tg-row on"><i class="tg-ico i-gear"></i>Настройки<span class="tg-arw"></span></div>
+      </div>
+      <div class="tg-panel">
+        <span class="tg-step">2</span>
+        <div class="tg-phead"><b>Настройки</b></div>
+        <div class="tg-profile"><span class="tg-avatar"><i class="tg-ico i-user"></i></span><div class="tg-pinfo"><b>Имя аккаунта</b><span class="tg-dim">+7 (123) 456-78-90</span><span class="tg-dim">@username</span></div></div>
+        <div class="tg-row"><i class="tg-ico i-user"></i>Мой аккаунт</div>
+        <div class="tg-row"><i class="tg-ico i-bell"></i>Уведомления и звуки</div>
+        <div class="tg-row"><i class="tg-ico i-lock"></i>Конфиденциальность</div>
+        <div class="tg-row"><i class="tg-ico i-bell"></i>Настройки чатов</div>
+        <div class="tg-row"><i class="tg-ico i-folder"></i>Папки с чатами</div>
+        <div class="tg-row on"><i class="tg-ico i-grid"></i>Продвинутые настройки<span class="tg-arw"></span></div>
+      </div>
+      <div class="tg-panel">
+        <span class="tg-step">3</span>
+        <div class="tg-nav"><i class="tg-ico i-back"></i><b>Продвинутые настройки</b><i class="tg-ico i-x"></i></div>
+        <div class="tg-sec">Данные и память</div>
+        <div class="tg-row on"><i class="tg-ico i-swap"></i>Тип соединения<span class="tg-val">Подключение через прокси</span></div>
+        <div class="tg-row"><i class="tg-ico i-folder"></i>Путь для сохранения<span class="tg-val">папка по умолчанию</span></div>
+        <div class="tg-row"><i class="tg-ico i-db"></i>Управление памятью устройства</div>
+        <div class="tg-row"><i class="tg-ico i-download"></i>Загрузки</div>
+      </div>
+      <div class="tg-panel">
+        <span class="tg-step">4</span>
+        <div class="tg-nav"><b>Настройки прокси</b><i class="tg-ico i-dots"></i></div>
+        <div class="tg-row"><span class="tg-check"></span>Через IPv6 (если возможно)</div>
+        <div class="tg-row on"><span class="tg-radio"></span>Отключить прокси<span class="tg-arw"></span></div>
+        <div class="tg-row"><span class="tg-radio"></span>Использовать системные настройки прокси</div>
+        <div class="tg-row"><span class="tg-radio sel"></span>Использовать собственный прокси</div>
+        <div class="tg-row"><span class="tg-check"></span>Автопереключение прокси</div>
+        <div class="tg-hint">Использование прокси-сервера может помочь, если Telegram не удаётся установить соединение в Вашем регионе.</div>
+        <div class="tg-row"><span class="tg-radio sel"></span><b class="tg-mono">MTPROTO</b><span class="tg-dim">127.0.0.1:1443</span></div>
+        <div class="tg-accind">подключён</div>
+        <div class="tg-row"><i class="tg-ico i-copy"></i>Поделиться списком прокси</div>
+        <div class="tg-actions"><span class="tg-btn">Закрыть</span><span class="tg-btn acc">Добавить прокси</span></div>
+      </div>
+    </div>`,
   tg_bridge_checking: "Проверяю обновление моста…",
   tg_bridge_update: (up, local) =>
     `Есть новая версия моста: ${up || "новее"} (у вас ${local}). Обновите Z GUI`,
@@ -264,15 +353,22 @@ export const T = {
 
   // ------------------------------------------------------------- настройки
   settings_title: 'Настройки <span class="chip">применяются сразу</span>',
-  settings_gf_hint: "— порты для игр",
-  settings_ipset_hint: "— как использовать список IP",
+  settings_gf_label: "Game Filter",
   opt_off: "выкл",
   opt_all: "все",
+  gf_guide:
+    "Добавляет порты игр в оптимизацию. Обычно не нужен — оставьте «выкл». Включите, если игра не ловит соединение.",
+  settings_ipset_label: "ipsets",
+  ipset_guide:
+    "Как использовать список IP: <b>loaded</b> — применять список (рекомендуется), <b>any</b> — все IP, <b>none</b> — не использовать. Без необходимости не меняйте.",
+  settings_filtermode_label: "Фильтр стратегии",
+  filtermode_guide:
+    "По какому признаку ловить трафик: <b>как в стратегии</b> — не менять (по умолчанию), <b>по доменам</b> — по спискам сайтов, <b>по IP</b> — по спискам подсетей. Обычно оставьте «как в стратегии».",
+  fm_auto: "как в стратегии",
+  fm_hostlist: "по доменам",
+  fm_ipset: "по IP",
   opt_tcp: "только TCP",
   opt_udp: "только UDP",
-  settings_hint:
-    '<b>Game Filter</b> — добавляет порты игр в оптимизацию. Обычно не нужен: оставьте «выкл».<br>' +
-    '<b>ipsets</b> — как использовать список IP: <b>loaded</b> — применять список (рекомендуется), <b>any</b> — все IP, <b>none</b> — не использовать. Без необходимости не меняйте.',
 
   // ------------------------------------------------------------- сброс сети
   netreset_title: 'Восстановление интернета <span class="chip">если пропала сеть</span>',
@@ -337,7 +433,7 @@ export const T = {
   btn_fake_apply: "Заменить фейки",
   tools_hint:
     "<b>Кэш Discord</b> — закроет Discord и почистит кэш, если он залипает.<br>" +
-    "<b>hosts</b> — скачает свежий файл автора и откроет его. Заменить системный нужно вручную, от админа.<br>" +
+    "<b>hosts</b> — скачает свежий файл автора и откроет его. Системный файл замените вручную.<br>" +
     "<b>Фейки</b> — заменит служебные файлы движка файлами из bin\\*.bin.",
   discord_cache_title: "Очистить кэш Discord?",
   discord_cache_html: "Discord закроется, затем удалится кэш. Потом откройте его заново.",
@@ -407,5 +503,12 @@ export const T = {
     '1. Выберите вкладку: <b>Сайт</b> — если тормозит сайт; <b>Программа</b> — если сбоит игра или приложение.<br>' +
     '2. Нажмите «Начать проверку». На это время оптимизация ненадолго выключается — так и надо.<br>' +
     '<b>Сайт:</b> впишите домен и дождитесь вердикта. Если «ломает» — нажмите «Применить»: домен добавят в исключения.<br>' +
-    '<b>Программа:</b> выберите её из списка (кнопка «Обновить» — если только что запустили). Затем войдите в игру/приложение и, когда попросит, создайте сессию (лобби) заново — два раза. Если «не покрывает» — «Применить» добавит подсеть в обход.',
+    '<b>Программа:</b> выберите её из списка (кнопка «Обновить» — если только что запустили). Затем войдите в игру/приложение и, когда попросит, создайте сессию (лобби) заново — два раза. Если «не покрывает» — «Применить» добавит подсеть в список оптимизации.',
+  scan_ttl_guide_html:
+    '<b>Подбор TTL — если обычная оптимизация не помогает</b><br>' +
+    'TTL — «время жизни» поддельного пакета: разным провайдерам подходит своё значение.<br>' +
+    '1. Выберите стратегию в списке справа.<br>' +
+    '2. Нажмите «Подобрать TTL» и дождитесь шкалы (примерно 40 секунд).<br>' +
+    '3. Программа по очереди запустит стратегию с разными TTL и покажет, какой сработал и оказался быстрее всех.<br>' +
+    'Интернет на это время может кратко мигать — это норма.',
 };

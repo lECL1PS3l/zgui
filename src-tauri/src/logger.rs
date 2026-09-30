@@ -100,7 +100,11 @@ pub fn log(level: &str, scope: &str, msg: &str) {
     let msg = msg.trim();
     let msg = if msg.chars().count() > MAX_MSG {
         let cut: String = msg.chars().take(MAX_MSG).collect();
-        format!("{}… [обрезано {} символов]", cut, msg.chars().count() - MAX_MSG)
+        format!(
+            "{}… [обрезано {} символов]",
+            cut,
+            msg.chars().count() - MAX_MSG
+        )
     } else {
         msg.to_string()
     };
@@ -165,7 +169,11 @@ fn write_file(g: &mut Inner, e: &Entry) {
             }
         }
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         if f.write_all(line.as_bytes()).is_ok() {
             g.file_len += line.len() as u64;
         }
@@ -174,7 +182,10 @@ fn write_file(g: &mut Inner, e: &Entry) {
 
 /// Имя файла с отметкой времени (для отчёта) — без символов, запрещённых в путях.
 pub fn now_stamp() -> String {
-    stamp(now_ms()).replace(':', "-").replace(' ', "_").replace('.', "-")
+    stamp(now_ms())
+        .replace(':', "-")
+        .replace(' ', "_")
+        .replace('.', "-")
 }
 
 /// Простое форматирование UTC без внешних крейтов: YYYY-MM-DD HH:MM:SS.mmm
@@ -239,7 +250,10 @@ pub fn clear() {
 
 /// Папка с файлами журнала (для кнопки «Открыть папку»).
 pub fn dir() -> Option<PathBuf> {
-    lock().file.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    lock()
+        .file
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
 }
 
 /// Пишем панику в журнал, не ломая штатный вывод.

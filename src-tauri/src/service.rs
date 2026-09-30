@@ -95,7 +95,9 @@ fn list_processes(mut want: impl FnMut(&str) -> bool) -> Vec<(String, u32)> {
     let txt = String::from_utf8_lossy(&o.stdout);
     let mut found = Vec::new();
     for line in txt.lines() {
-        let Some((name, pid)) = tasklist_name_pid(line) else { continue };
+        let Some((name, pid)) = tasklist_name_pid(line) else {
+            continue;
+        };
         if want(&name) {
             found.push((name, pid));
         }
@@ -103,16 +105,68 @@ fn list_processes(mut want: impl FnMut(&str) -> bool) -> Vec<(String, u32)> {
     found
 }
 
+/// Устаревший `zgui.lock` мог оставить PID, который система переиспользовала
+/// под другой процесс. Живым нашим экземпляром считаем только `zgui.exe`.
+pub fn pid_is_zgui(pid: u32) -> bool {
+    list_processes(|n| n.eq_ignore_ascii_case("zgui.exe"))
+        .iter()
+        .any(|(_, p)| *p == pid)
+}
+
+/// PID-ы всех запущенных копий программы (`zgui.exe`), включая фоновый раннер теста.
+pub fn zgui_pids() -> Vec<u32> {
+    list_processes(|n| n.eq_ignore_ascii_case("zgui.exe"))
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect()
+}
+
+/// PID-ы фоновых тест-раннеров (`zgui.exe --test-runner`). Их нельзя закрывать
+/// вместе с прочими копиями: там может идти прогон теста.
+pub fn zgui_runner_pids() -> Vec<u32> {
+    let out = crate::runner::run_powershell(&[
+        "-NoProfile".into(),
+        "-Command".into(),
+        "Get-CimInstance Win32_Process -Filter \"Name='zgui.exe'\" | Where-Object { $_.CommandLine -like '*--test-runner*' } | Select-Object -ExpandProperty ProcessId".into(),
+    ])
+    .unwrap_or_default();
+    out.lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect()
+}
+
 fn is_vpn_process(name: &str) -> bool {
     let n = name.to_lowercase();
     let base = n.trim_end_matches(".exe");
-    VPN_PROCESSES.iter().any(|v| base == *v || base.starts_with(&format!("{}-", v)))
+    VPN_PROCESSES
+        .iter()
+        .any(|v| base == *v || base.starts_with(&format!("{}-", v)))
 }
 
 /// Запущен ли Telegram Desktop (для предложения прокси-моста при свежем старте).
 /// Имя процесса — Telegram.exe; сравнение по базовому имени без расширения.
 pub fn telegram_running() -> bool {
     !list_processes(|n| n.to_lowercase().trim_end_matches(".exe") == "telegram").is_empty()
+}
+
+/// Запущен ли клиент античита (для опции «античит-пауза»). Возвращает имя.
+pub fn anticheat_running() -> Option<String> {
+    const NAMES: [&str; 6] = [
+        "easyanticheat",
+        "easyanticheat_eos",
+        "beservice",
+        "bedaisy",
+        "vgc",
+        "vgtray",
+    ];
+    list_processes(|n| {
+        NAMES
+            .iter()
+            .any(|x| n.to_lowercase().trim_end_matches(".exe") == *x)
+    })
+    .into_iter()
+    .map(|(n, _)| n)
+    .next()
 }
 
 /// Находит запущенные VPN/прокси-клиенты.
@@ -166,7 +220,9 @@ fn process_image_paths(names: &[&str]) -> HashMap<u32, PathBuf> {
     let mut map = HashMap::new();
     for line in txt.lines() {
         let Some(sep) = line.find('|') else { continue };
-        let Ok(pid) = line[..sep].trim().parse::<u32>() else { continue };
+        let Ok(pid) = line[..sep].trim().parse::<u32>() else {
+            continue;
+        };
         let path = PathBuf::from(&line[sep + 1..].trim());
         if path.is_absolute() {
             map.insert(pid, path);
@@ -177,8 +233,7 @@ fn process_image_paths(names: &[&str]) -> HashMap<u32, PathBuf> {
 
 /// Дешёвая проверка: запущен ли хоть один exe движков (без WMI).
 pub fn any_winws_running() -> bool {
-    !list_processes(|n| ENGINE_EXES.iter().any(|e| n.eq_ignore_ascii_case(e)))
-    .is_empty()
+    !list_processes(|n| ENGINE_EXES.iter().any(|e| n.eq_ignore_ascii_case(e))).is_empty()
 }
 
 /// PID-ы ВСЕХ процессов-движков в системе — независимо от папки и прав:
@@ -186,11 +241,12 @@ pub fn any_winws_running() -> bool {
 /// WinDivert (два одновременно не работают). Решение владельца: гасим любой —
 /// наша копия, старая версия, соло-харнесс или чужая сборка.
 pub fn all_engine_pids(exclude: Option<u32>) -> Vec<u32> {
-    let mut pids: Vec<u32> = list_processes(|n| ENGINE_EXES.iter().any(|e| n.eq_ignore_ascii_case(e)))
-        .into_iter()
-        .map(|(_, pid)| pid)
-        .filter(|pid| Some(*pid) != exclude)
-        .collect();
+    let mut pids: Vec<u32> =
+        list_processes(|n| ENGINE_EXES.iter().any(|e| n.eq_ignore_ascii_case(e)))
+            .into_iter()
+            .map(|(_, pid)| pid)
+            .filter(|pid| Some(*pid) != exclude)
+            .collect();
     pids.sort_unstable();
     pids.dedup();
     pids
@@ -202,7 +258,9 @@ fn layout_engine_id(path: &str) -> Option<&'static str> {
     let p = path.to_lowercase().replace('/', "\\");
     let (_, tail) = p.split_once("\\data\\engines\\")?;
     let id = tail.split('\\').next()?;
-    crate::config::engine_ids().into_iter().find(|e| e.eq_ignore_ascii_case(id))
+    crate::config::engine_ids()
+        .into_iter()
+        .find(|e| e.eq_ignore_ascii_case(id))
 }
 
 /// Службы-драйверы WinDivert: (имя, состояние, путь образа).
@@ -241,7 +299,9 @@ pub(crate) fn kill_engines_script() -> String {
     let mut s = String::new();
     s.push_str(&format!("{}\n", crate::runner::PS_HEADER));
     s.push_str("$zguiStopped = @()\n");
-    s.push_str("foreach ($zguiName in @('winws.exe','winws2.exe','goodbyedpi.exe','dpibreak.exe')) {\n");
+    s.push_str(
+        "foreach ($zguiName in @('winws.exe','winws2.exe','goodbyedpi.exe','dpibreak.exe')) {\n",
+    );
     s.push_str("  try { taskkill /F /T /IM $zguiName 2>$null | Out-Null } catch {}\n");
     s.push_str("}\n");
     s.push_str("$zguiServices = @(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Services' -ErrorAction SilentlyContinue | ForEach-Object {\n");
@@ -262,11 +322,19 @@ pub(crate) fn kill_engines_script() -> String {
 /// найденных служб (для журнала).
 pub fn sweep_our_engines(data_dir: &Path) -> Result<Vec<String>, String> {
     let script = crate::runner::LockedScript::write(
-        data_dir.join("logs").join(format!("sweep_engines_{}.ps1", std::process::id())),
+        data_dir
+            .join("logs")
+            .join(format!("sweep_engines_{}.ps1", std::process::id())),
         &kill_engines_script(),
     )?;
     let out = hidden_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
         .arg(script.path())
         .output()
         .map_err(|e| e.to_string())?;
@@ -307,7 +375,11 @@ pub fn cleanup_own_stray_drivers() -> Vec<String> {
         let running = hidden_command("sc.exe")
             .args(["query", &name])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_uppercase().contains("RUNNING"))
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .to_uppercase()
+                    .contains("RUNNING")
+            })
             .unwrap_or(false);
         if running {
             // Смена состояния драйвера не мгновенна, а без админа sc stop вообще
@@ -325,7 +397,12 @@ pub fn cleanup_own_stray_drivers() -> Vec<String> {
                 &format!("зависший драйвер {name} не убран: {why}"),
             );
         } else {
-            crate::logger::log_code("warn", "windivert", "W-WIN-001", &format!("убран зависший драйвер: {name} ({path})"));
+            crate::logger::log_code(
+                "warn",
+                "windivert",
+                "W-WIN-001",
+                &format!("убран зависший драйвер: {name} ({path})"),
+            );
             cleaned.push(name);
         }
     }
@@ -345,7 +422,9 @@ pub fn start_service(data_dir: &Path) -> Result<(), String> {
         SERVICE_NAME
     );
     let script = crate::runner::LockedScript::write(
-        data_dir.join("logs").join(format!("svc_start_{}.ps1", std::process::id())),
+        data_dir
+            .join("logs")
+            .join(format!("svc_start_{}.ps1", std::process::id())),
         &body,
     )?;
     let code = run_script_privileged(script.path())?;
@@ -409,7 +488,12 @@ fn ps_single_quote(text: &str) -> String {
     text.replace('\'', "''")
 }
 
-pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir: &Path) -> Result<(), String> {
+pub fn install_service(
+    root: &Path,
+    profile: &Profile,
+    args: &[String],
+    data_dir: &Path,
+) -> Result<(), String> {
     let cmdline = build_service_cmdline(root, profile, args);
     // ВАЖНО (почему не sc.exe): `sc` в PowerShell — алиас Set-Content, а передать
     // binPath с кавычками через нативную командную строку PS 5.1 надёжно нельзя.
@@ -434,7 +518,9 @@ pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir
         ps_single_quote(&err_file.to_string_lossy()),
     );
     let script = crate::runner::LockedScript::write(
-        data_dir.join("logs").join(format!("svc_install_{}.ps1", std::process::id())),
+        data_dir
+            .join("logs")
+            .join(format!("svc_install_{}.ps1", std::process::id())),
         &body,
     )?;
     let code = run_script_privileged(script.path()).map_err(|e| e.to_string())?;
@@ -442,7 +528,12 @@ pub fn install_service(root: &Path, profile: &Profile, args: &[String], data_dir
         let detail = std::fs::read_to_string(&err_file)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        crate::logger::log_code("err", "service", "E-SVC-005", &format!("Start-Service не удался: {detail}"));
+        crate::logger::log_code(
+            "err",
+            "service",
+            "E-SVC-005",
+            &format!("Start-Service не удался: {detail}"),
+        );
         return Err(crate::texts::service_start_failed_detail(&detail));
     }
     if code != 0 {
@@ -510,7 +601,9 @@ pub fn remove_service(data_dir: &Path) -> Result<(), String> {
         SERVICE_NAME
     );
     let script = crate::runner::LockedScript::write(
-        data_dir.join("logs").join(format!("svc_remove_{}.ps1", std::process::id())),
+        data_dir
+            .join("logs")
+            .join(format!("svc_remove_{}.ps1", std::process::id())),
         &body,
     )?;
     let code = run_script_privileged(script.path())?;
@@ -625,7 +718,10 @@ mod tests {
             parse_strategy_value("    zgui-strategy    REG_SZ    x; Start-Process calc"),
             Some("x; Start-Process calc".into())
         );
-        assert_eq!(parse_strategy_value("    zgui-strategy    REG_SZ    "), None);
+        assert_eq!(
+            parse_strategy_value("    zgui-strategy    REG_SZ    "),
+            None
+        );
         assert_eq!(parse_strategy_value("нет такой строки"), None);
     }
 
@@ -717,8 +813,8 @@ mod tests {
 
     #[test]
     fn tasklist_csv_parses_names_with_commas() {
-        let (name, pid) =
-            tasklist_name_pid(r#""my,app.exe","1234","Console","1","12,345 К""#).expect("строка должна разобраться");
+        let (name, pid) = tasklist_name_pid(r#""my,app.exe","1234","Console","1","12,345 К""#)
+            .expect("строка должна разобраться");
         assert_eq!(name, "my,app.exe");
         assert_eq!(pid, 1234);
         assert!(tasklist_name_pid("ИНФО: нет задач для заданных критериев.").is_none());
@@ -757,8 +853,17 @@ mod tests {
             layout_engine_id(r"\??\E:\Z GUI\target\release\data\engines\flowseal\bin\winws.exe"),
             Some("flowseal")
         );
-        assert_eq!(layout_engine_id(r"D:\ZGUI 2\data\engines\ZAPRET2\winws2.exe"), Some("zapret2"));
-        assert_eq!(layout_engine_id(r"E:\mydata\engines\flowseal\winws.exe"), None);
-        assert_eq!(layout_engine_id(r"C:\Windows\System32\drivers\windivert.sys"), None);
+        assert_eq!(
+            layout_engine_id(r"D:\ZGUI 2\data\engines\ZAPRET2\winws2.exe"),
+            Some("zapret2")
+        );
+        assert_eq!(
+            layout_engine_id(r"E:\mydata\engines\flowseal\winws.exe"),
+            None
+        );
+        assert_eq!(
+            layout_engine_id(r"C:\Windows\System32\drivers\windivert.sys"),
+            None
+        );
     }
 }

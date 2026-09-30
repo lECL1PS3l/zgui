@@ -25,15 +25,27 @@ fn dir_size(p: &Path) -> u64 {
 /// Чистка кэша Discord: гасит клиенты (кнопка вызывается вручную — как у автора
 /// с подтверждением) и удаляет Cache/Code Cache/GPUCache у всех четырёх сборок.
 pub fn clear_discord_cache() -> Result<String, String> {
-    let exes = ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe", "DiscordDevelopment.exe"];
+    let exes = [
+        "Discord.exe",
+        "DiscordPTB.exe",
+        "DiscordCanary.exe",
+        "DiscordDevelopment.exe",
+    ];
     for exe in exes {
-        let _ = hidden_command("taskkill.exe").args(["/F", "/IM", exe]).output();
+        let _ = hidden_command("taskkill.exe")
+            .args(["/F", "/IM", exe])
+            .output();
     }
     let appdata = std::env::var_os("APPDATA").ok_or(crate::texts::APPDATA_MISSING)?;
     let appdata = PathBuf::from(appdata);
     let mut removed = 0usize;
     let mut freed = 0u64;
-    for v in ["discord", "discordptb", "discordcanary", "discorddevelopment"] {
+    for v in [
+        "discord",
+        "discordptb",
+        "discordcanary",
+        "discorddevelopment",
+    ] {
         for sub in ["Cache", "Code Cache", "GPUCache"] {
             let dir = appdata.join(v).join(sub);
             if !dir.exists() {
@@ -45,7 +57,10 @@ pub fn clear_discord_cache() -> Result<String, String> {
             }
         }
     }
-    Ok(crate::texts::discord_cache_cleared(removed, freed / (1024 * 1024)))
+    Ok(crate::texts::discord_cache_cleared(
+        removed,
+        freed / (1024 * 1024),
+    ))
 }
 
 #[derive(serde::Serialize, Clone, Debug, Default)]
@@ -96,8 +111,14 @@ pub fn fakes_view(root: &Path) -> FakesView {
     }
     files.sort();
     FakesView {
-        active_discord: name_of_hash(&bin, &crate::config::file_sha256(&bin.join(active_file("discord")))),
-        active_game: name_of_hash(&bin, &crate::config::file_sha256(&bin.join(active_file("game")))),
+        active_discord: name_of_hash(
+            &bin,
+            &crate::config::file_sha256(&bin.join(active_file("discord"))),
+        ),
+        active_game: name_of_hash(
+            &bin,
+            &crate::config::file_sha256(&bin.join(active_file("game"))),
+        ),
         files,
     }
 }
@@ -141,11 +162,15 @@ pub fn hosts_update(data: &Path) -> Result<String, String> {
         .get(HOSTS_URL)
         .header("Cache-Control", "no-cache")
         .send()
-        .map_err(|e| crate::human::with_context(crate::texts::HOSTS_DOWNLOAD_CONTEXT, &e.to_string()))?;
+        .map_err(|e| {
+            crate::human::with_context(crate::texts::HOSTS_DOWNLOAD_CONTEXT, &e.to_string())
+        })?;
     if !resp.status().is_success() {
         return Err(crate::texts::hosts_http_error(resp.status().as_u16()));
     }
-    let text = resp.text().map_err(|e| crate::texts::hosts_download_failed(&e.to_string()))?;
+    let text = resp
+        .text()
+        .map_err(|e| crate::texts::hosts_download_failed(&e.to_string()))?;
     if text.trim().is_empty() {
         return Err(crate::texts::HOSTS_EMPTY.into());
     }
@@ -178,7 +203,10 @@ mod tests {
     #[test]
     fn hosts_key_lines_ignore_comments_and_case() {
         let a = "# comment\n127.0.0.1 Example.COM\n\n127.0.0.1 example.com\n";
-        assert_eq!(hosts_key_lines(a), vec!["127.0.0.1 example.com", "127.0.0.1 example.com"]);
+        assert_eq!(
+            hosts_key_lines(a),
+            vec!["127.0.0.1 example.com", "127.0.0.1 example.com"]
+        );
         assert!(hosts_key_lines("# only\n\n").is_empty());
     }
 

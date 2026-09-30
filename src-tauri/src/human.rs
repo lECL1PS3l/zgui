@@ -51,7 +51,9 @@ pub fn humanize(raw: &str) -> String {
     let l = s.to_ascii_lowercase();
 
     // Уже человеческое сообщение (наше, на русском) — не трогаем.
-    let has_cyr = s.chars().any(|c| matches!(c, 'а'..='я' | 'ё' | 'А'..='Я' | 'Ё'));
+    let has_cyr = s
+        .chars()
+        .any(|c| matches!(c, 'а'..='я' | 'ё' | 'А'..='Я' | 'Ё'));
     if has_cyr && !looks_technical(s) {
         return s.to_string();
     }
@@ -65,9 +67,14 @@ pub fn humanize(raw: &str) -> String {
         Some(crate::texts::HUMAN_ADMIN)
     } else if l.contains("os error 32") || l.contains("being used by another process") {
         Some(crate::texts::HUMAN_FILE_BUSY)
-    } else if l.contains("os error 112") || l.contains("not enough space") || l.contains("no space left") {
+    } else if l.contains("os error 112")
+        || l.contains("not enough space")
+        || l.contains("no space left")
+    {
         Some(crate::texts::HUMAN_NO_SPACE)
-    } else if l.contains("os error 2") || l.contains("os error 3") || l.contains("cannot find")
+    } else if l.contains("os error 2")
+        || l.contains("os error 3")
+        || l.contains("cannot find")
         || l.contains("не удается найти")
     {
         Some(crate::texts::HUMAN_NOT_FOUND)
@@ -88,13 +95,17 @@ pub fn humanize(raw: &str) -> String {
         Some(crate::texts::HUMAN_HTTP_404)
     } else if l.contains("http 5") {
         Some(crate::texts::HUMAN_HTTP_5XX)
-    } else if l.contains("invalid args") || l.contains("expected u16") || l.contains("invalid type")
+    } else if l.contains("invalid args")
+        || l.contains("expected u16")
+        || l.contains("invalid type")
         || l.contains("invalid value")
     {
         Some(crate::texts::HUMAN_BAD_VALUE)
-    } else if l.contains("process exited immediately") || l.contains("сразу завершился") {
+    } else if l.contains("process exited immediately") || l.contains("сразу завершился")
+    {
         Some(crate::texts::HUMAN_ENGINE_DIED)
-    } else if l.contains("launch_error") || l.contains("не удалось запустить процесс") {
+    } else if l.contains("launch_error") || l.contains("не удалось запустить процесс")
+    {
         Some(crate::texts::HUMAN_LAUNCH)
     } else if l.contains("panic") || l.contains("panicked") {
         Some(crate::texts::HUMAN_PANIC)
@@ -127,14 +138,21 @@ mod tests {
 
     #[test]
     fn translates_common_os_and_http_errors() {
-        assert!(humanize("failed to remove file: Отказано в доступе (os error 5)")
-            .contains("права администратора"));
-        assert!(humanize("error sending request for url (https://api.github.com/…): error trying to connect")
-            .contains("Нет связи с сервером"));
+        assert!(
+            humanize("failed to remove file: Отказано в доступе (os error 5)")
+                .contains("администратора")
+        );
+        assert!(humanize(
+            "error sending request for url (https://api.github.com/…): error trying to connect"
+        )
+        .contains("Нет связи с сервером"));
         assert!(humanize("HTTP status client error (403 Forbidden)").contains("403"));
-        assert!(humanize("invalid args `port` for command `tg_start`: invalid type: integer 70000, expected u16")
-            .contains("Недопустимое значение поля"));
-        assert!(humanize("ADMIN_REQUIRED: winws needs administrator rights").contains("права администратора"));
+        assert!(humanize(
+            "invalid args `port` for command `tg_start`: invalid type: integer 70000, expected u16"
+        )
+        .contains("Недопустимое значение поля"));
+        assert!(humanize("ADMIN_REQUIRED: winws needs administrator rights")
+            .contains("администратора"));
     }
 
     #[test]
@@ -157,7 +175,9 @@ mod tests {
 
     #[test]
     fn context_prefix_is_added() {
-        assert!(with_context("скачивание движка", "os error 112: not enough space")
-            .starts_with("скачивание движка:"));
+        assert!(
+            with_context("скачивание движка", "os error 112: not enough space")
+                .starts_with("скачивание движка:")
+        );
     }
 }

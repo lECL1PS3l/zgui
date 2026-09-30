@@ -202,7 +202,11 @@ fn median(mut v: Vec<u64>) -> Option<u64> {
 fn probe_addr(server: &str) -> Option<u64> {
     let mut samples = Vec::new();
     for _ in 0..3 {
-        if let Some(ms) = query_once(server, "example.com", std::time::Duration::from_millis(1500)) {
+        if let Some(ms) = query_once(
+            server,
+            "example.com",
+            std::time::Duration::from_millis(1500),
+        ) {
             samples.push(ms);
         }
     }
@@ -214,7 +218,10 @@ fn probe_addr(server: &str) -> Option<u64> {
 /// UDP-DNS, параллельный укладывается в один таймаут пробы.
 pub fn benchmark(ids: Option<Vec<String>>) -> Vec<DnsPing> {
     let selected: Vec<&DnsProvider> = match &ids {
-        Some(list) if !list.is_empty() => PROVIDERS.iter().filter(|p| list.contains(&p.id.to_string())).collect(),
+        Some(list) if !list.is_empty() => PROVIDERS
+            .iter()
+            .filter(|p| list.contains(&p.id.to_string()))
+            .collect(),
         _ => PROVIDERS.iter().collect(),
     };
     std::thread::scope(|s| {
@@ -288,7 +295,8 @@ Write-Output ("DNS: {name}; adapter: " + $alias)
         name = p.name,
     );
     let script = crate::runner::LockedScript::write(
-        data.join("logs").join(format!("dns_apply_{}.ps1", std::process::id())),
+        data.join("logs")
+            .join(format!("dns_apply_{}.ps1", std::process::id())),
         &body,
     )?;
     let code = run_script_privileged(script.path())?;
@@ -315,7 +323,8 @@ Write-Output ("DNS reset: " + $alias)
         adapter = adapter_expr,
     );
     let script = crate::runner::LockedScript::write(
-        data.join("logs").join(format!("dns_reset_{}.ps1", std::process::id())),
+        data.join("logs")
+            .join(format!("dns_reset_{}.ps1", std::process::id())),
         &body,
     )?;
     let code = run_script_privileged(script.path())?;

@@ -955,6 +955,10 @@ function renderTestResults() {
   if (bestRes) {
     bestBox.classList.remove("hidden");
     bestBox.innerHTML = "";
+    const wins = document.createElement("div");
+    wins.className = "test-wins muted";
+    wins.textContent = T.wins_summary(tested.filter((x) => x.r.criticalOk).length, tested.length);
+    bestBox.appendChild(wins);
     const t = document.createElement("div");
     t.className = "test-best-title";
     t.textContent = T.test_best(bestRes.name);
@@ -1201,6 +1205,49 @@ async function doApply(ids) {
   }
 }
 
+// --- Плитка «Обновление программы» ---
+function renderAppUpdate(info) {
+  const ver = $("#appVer");
+  const stt = $("#appUpdState");
+  const dl = $("#btnAppUpdDownload");
+  if (!info) return;
+  ver.textContent = info.current ? "v" + info.current : "";
+  const avail = !!info.available;
+  dl.classList.toggle("hidden", !avail);
+  stt.textContent = info.error ? T.app_upd_err_short : avail ? T.app_upd_avail(info.latest) : T.app_upd_ok_short;
+}
+
+async function checkAppUpdate() {
+  const b = $("#btnAppUpdCheck");
+  btnBusy(b, true);
+  try {
+    const info = await invoke("app_update_info");
+    renderAppUpdate(info);
+    if (info.error) toast("err", T.app_upd_err(info.error));
+    else if (info.available) toast("info", T.app_upd_latest(info.latest));
+    else toast("ok", T.app_upd_ok);
+  } catch (e) {
+    toast("err", String(e));
+  } finally {
+    btnBusy(b, false);
+  }
+}
+
+async function downloadAppUpdate() {
+  const b = $("#btnAppUpdDownload");
+  btnBusy(b, true);
+  try {
+    const path = String(await invoke("app_update_download"));
+    const dir = path.replace(/[\\/][^\\/]*$/, "");
+    await invoke("open_path", { path: dir }).catch(() => {});
+    toast("ok", T.app_upd_saved(path));
+  } catch (e) {
+    toast("err", String(e));
+  } finally {
+    btnBusy(b, false);
+  }
+}
+
 function renderUpdates(mode) {
   const entries = (B.updates || {}).entries || [];
   const sig = JSON.stringify([mode, entries]);
@@ -1267,6 +1314,12 @@ function renderUpdates(mode) {
         er.textContent = e.error;
         label.appendChild(er);
       }
+      if (e.added || e.removed) {
+        const dl = document.createElement("span");
+        dl.className = "upd-delta muted";
+        dl.textContent = `+${e.added} −${e.removed}`;
+        label.appendChild(dl);
+      }
       row.appendChild(label);
 
       const sz = document.createElement("span");
@@ -1314,6 +1367,8 @@ function collectSettings() {
     game_filter_tcp: "1024-65535",
     game_filter_udp: "1024-65535",
     ipset_mode: $("#cfIpset").value,
+    filter_mode: $("#cfFilterMode").value,
+    anticheat_pause: $("#cfAnticheat") ? $("#cfAnticheat").checked : false,
     autostart_mode: $("#cfAutostart").value ? "profile" : "none",
     autostart_profile: $("#cfAutostart").value || null,
     tg_autostart: $("#tgAutostart")?.checked || false,
@@ -1334,6 +1389,8 @@ function renderSettings() {
   $("#cfInterval").value = s.update_interval_hours ?? 72;
   $("#cfGameFilter").value = s.game_filter || "off";
   $("#cfIpset").value = s.ipset_mode || "loaded";
+  $("#cfFilterMode").value = s.filter_mode || "auto";
+  if ($("#cfAnticheat")) $("#cfAnticheat").checked = !!s.anticheat_pause;
   if ($("#tgAutostart")) $("#tgAutostart").checked = !!s.tg_autostart;
   if ($("#tgOffer")) $("#tgOffer").checked = !!s.tg_offer;
   if ($("#tgPort")) $("#tgPort").value = s.tg_port || 1443;
@@ -1675,6 +1732,7 @@ let scanReport = null;
 let scanBound = false;
 let scanPhaseStart = 0;
 let scanPhaseBudget = 85000;
+let scanBarCap = 0; // прогресс шкалы TTL (%), от событий шагов
 let scanTimerId = null;
 
 const SCAN_VERDICT = {
@@ -1684,6 +1742,38 @@ const SCAN_VERDICT = {
   NotCovered: "scan_v_not_covered",
   Unrelated: "scan_v_unrelated",
 };
+
+// Общий таймер/шкала сканера и взаимная блокировка кнопок: «Начать проверку»,
+// «Подобрать TTL» и «Метод блокировки» не должны идти одновременно (иначе
+// теряется интервал и перезапускается движок под другой операцией).
+function scanBusy(on) {
+  for (const id of ["#btnScanRun", "#btnScanTtl", "#btnScanMethod"]) {
+    const b = $(id);
+    if (b) b.disabled = on;
+  }
+}
+function startScanBar(label, budget) {
+  if (scanTimerId) { clearInterval(scanTimerId); scanTimerId = null; }
+  scanPhaseStart = Date.now();
+  scanPhaseBudget = budget || 0;
+  scanBarCap = 0;
+  const ph = $("#scanPhase");
+  if (ph) { ph.className = "scan-phase"; ph.textContent = label; }
+  const f = $("#scanFill");
+  if (f) f.style.width = "0%";
+  $("#scanProgress").classList.remove("hidden");
+  const tick = () => {
+    const sec = Math.max(0, Math.floor((Date.now() - scanPhaseStart) / 1000));
+    $("#scanTimer").textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+    if (budget) $("#scanFill").style.width = Math.min(((Date.now() - scanPhaseStart) / budget) * 100, 100) + "%";
+  };
+  tick();
+  scanTimerId = setInterval(tick, 250);
+}
+function stopScanBar() {
+  if (scanTimerId) { clearInterval(scanTimerId); scanTimerId = null; }
+  $("#scanProgress").classList.add("hidden");
+}
 
 function bindScanner() {
   $$("#scanTabs .tab").forEach((t) =>
@@ -1697,21 +1787,33 @@ function bindScanner() {
       $("#scanProcAddr").classList.toggle("hidden", !proc);
       $("#btnScanRefresh").classList.toggle("hidden", !proc);
       $("#btnScanBrowse").classList.toggle("hidden", !proc);
+      $("#btnScanMethod").classList.toggle("hidden", proc);
+      $("#btnScanTtl").classList.toggle("hidden", proc);
     }),
   );
   $("#btnScanRefresh").addEventListener("click", refreshScannerList);
   $("#btnScanBrowse").addEventListener("click", browseScanner);
+  $("#btnScanMethod").addEventListener("click", runMethodDiagnosis);
+  $("#btnScanTtl").addEventListener("click", runTtlTune);
   $("#btnScanRun").addEventListener("click", runScanner);
   $("#btnScanCancel").addEventListener("click", cancelScanner);
   $("#btnScanSave").addEventListener("click", saveScannerReport);
   $("#btnScanApply").addEventListener("click", applyScannerReport);
   listen("zgui:scan", (e) => {
     const p = e.payload || {};
-    scanPhaseStart = Date.now();
     const ph = $("#scanPhase");
-    if (ph) {
-      ph.className = "scan-phase" + (p.phase ? " phase-" + p.phase : "");
-      if (p.msg) ph.textContent = p.msg;
+    if (p.phase === "ttl") {
+      if (ph && p.msg) ph.textContent = p.msg;
+      if (p.total) {
+        scanBarCap = Math.max(scanBarCap, Math.round(((p.done || 0) / p.total) * 100));
+        $("#scanFill").style.width = scanBarCap + "%";
+      }
+    } else {
+      scanPhaseStart = Date.now();
+      if (ph) {
+        ph.className = "scan-phase" + (p.phase ? " phase-" + p.phase : "");
+        if (p.msg) ph.textContent = p.msg;
+      }
     }
     const pr = $("#scanProgress");
     if (pr) pr.classList.remove("hidden");
@@ -1802,28 +1904,93 @@ async function cancelScanner() {
   } catch (e) { toast("err", String(e)); }
 }
 
+function renderMethod(m) {
+  const el = $("#scanResult");
+  el.textContent = "";
+  const head = document.createElement("div");
+  head.className = "scan-method";
+  head.textContent = `${T.scan_method}: ${m.verdict}`;
+  el.appendChild(head);
+  const facts = document.createElement("div");
+  facts.className = "muted";
+  const tcp = { ok: "открыт", timeout: "таймаут", reset: "сброс", refused: "отказ", error: "ошибка" }[m.tcp] || m.tcp;
+  facts.textContent = `IP: ${(m.ips || []).join(", ") || "—"} · TCP: ${tcp} · TLS: ${m.tls_ok ? "есть" : "нет"}`;
+  el.appendChild(facts);
+  const note = document.createElement("div");
+  note.textContent = m.note;
+  el.appendChild(note);
+}
+
+async function runMethodDiagnosis() {
+  const target = $("#scanTargetSite").value.trim();
+  if (!target) return toast("warn", T.scan_need_target);
+  if ($("#btnScanRun").disabled) return; // уже идёт другая проверка
+  const b = $("#btnScanMethod");
+  btnBusy(b, true);
+  scanBusy(true);
+  try {
+    const m = await invoke("scanner_method", { target });
+    renderMethod(m);
+  } catch (e) {
+    toast("err", String(e));
+  } finally {
+    btnBusy(b, false);
+    scanBusy(false);
+  }
+}
+
+function renderTtl(r) {
+  const el = $("#scanResult");
+  el.textContent = "";
+  const head = document.createElement("div");
+  head.className = "scan-method";
+  head.textContent = `${T.scan_ttl}: ${r.strategy}`;
+  el.appendChild(head);
+  for (const x of r.results || []) {
+    const line = document.createElement("div");
+    line.textContent = `TTL ${x.ttl}: ${x.ok ? `ok — ${x.ms} мс` : "не прошло"}`;
+    el.appendChild(line);
+  }
+  const best = document.createElement("div");
+  best.textContent = r.best != null ? `${T.scan_ttl_best}: ${r.best}` : T.scan_ttl_none;
+  el.appendChild(best);
+}
+
+async function runTtlTune() {
+  const target = $("#scanTargetSite").value.trim();
+  if (!target) return toast("warn", T.scan_need_target);
+  const sid = $("#scanStrategy").value;
+  if (!sid) return toast("warn", T.scan_need_strategy);
+  if ($("#btnScanRun").disabled) return; // уже идёт другая проверка
+  const b = $("#btnScanTtl");
+  btnBusy(b, true);
+  scanBusy(true);
+  startScanBar(T.scan_ttl, 0);
+  try {
+    const r = await invoke("scanner_ttl", { host: target, strategyId: sid });
+    renderTtl(r);
+  } catch (e) {
+    toast("err", String(e));
+  } finally {
+    btnBusy(b, false);
+    scanBusy(false);
+    stopScanBar();
+  }
+}
+
 async function runScanner() {
   const target = scanKind === "site" ? $("#scanTargetSite").value.trim() : (scanProcAddr() || scanProcName());
   if (!target) return toast("warn", scanKind === "site" ? T.scan_need_target : T.scan_need_proc);
   const html = scanKind === "process" ? T.scan_warn_proc : T.scan_warn;
   const go = await showConfirm({ title: T.scan_title, html, okLabel: T.scan_run, cancelLabel: T.btn_cancel });
   if (!go) return;
+  if ($("#btnScanRun").disabled) return; // уже идёт другая проверка
   const b = $("#btnScanRun"); btnBusy(b, true);
+  scanBusy(true);
   $("#btnScanCancel").classList.remove("hidden");
   $$(".nav-item").forEach((x) => { if (x.dataset.view !== "scanner") x.classList.add("disabled"); });
   $("#scanResult").textContent = T.scan_running;
-  scanPhaseStart = Date.now();
-  $("#scanPhase").className = "scan-phase";
-  $("#scanPhase").textContent = T.scan_searching;
-  $("#scanFill").style.width = "0%";
-  $("#scanProgress").classList.remove("hidden");
-  const tick = () => {
-    const sec = Math.max(0, Math.floor((Date.now() - scanPhaseStart) / 1000));
-    $("#scanTimer").textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
-    $("#scanFill").style.width = Math.min(((Date.now() - scanPhaseStart) / scanPhaseBudget) * 100, 100) + "%";
-  };
-  tick();
-  scanTimerId = setInterval(tick, 250);
+  startScanBar(T.scan_searching, 85000);
   try {
     scanReport = await invoke("scanner_run", { kind: scanKind, target, strategyId: $("#scanStrategy").value, focus: $("#scanFocus").checked });
     renderScanReport(scanReport);
@@ -1834,8 +2001,8 @@ async function runScanner() {
     $("#scanResult").textContent = "";
   } finally {
     btnBusy(b, false);
-    if (scanTimerId) { clearInterval(scanTimerId); scanTimerId = null; }
-    $("#scanProgress").classList.add("hidden");
+    scanBusy(false);
+    stopScanBar();
     $("#btnScanCancel").classList.add("hidden");
     $$(".nav-item").forEach((x) => x.classList.remove("disabled"));
   }
@@ -2103,6 +2270,12 @@ $("#btnReportSave").addEventListener("click", async () => {
     });
 
   $("#btnCheck").addEventListener("click", doCheck);
+  $("#btnAppUpdCheck").addEventListener("click", checkAppUpdate);
+  $("#btnAppUpdDownload").addEventListener("click", downloadAppUpdate);
+  $("#btnAppUpdOpen").addEventListener("click", () => {
+    const dir = (B && B.dataDir ? B.dataDir + "\\updates" : "");
+    if (dir) invoke("open_path", { path: dir }).catch(() => {});
+  });
   $("#btnApplyAll").addEventListener("click", () => doApply([]));
   $("#btnApplySel").addEventListener("click", () => {
     // Отключённые строки (уже «ок»/«skip-user») не отправляем: иначе повторное
@@ -2126,9 +2299,9 @@ $("#btnReportSave").addEventListener("click", async () => {
       invoke("set_settings", { settings: collectSettings() }).catch((e) => toast("err", String(e)));
     }, delay);
   };
-  for (const id of ["#cfGameFilter", "#cfIpset"]) {
-    $(id).addEventListener("change", () => saveSoon(0));
-  }
+    for (const id of ["#cfGameFilter", "#cfIpset", "#cfFilterMode", "#cfAnticheat"]) {
+      $(id).addEventListener("change", () => saveSoon(0));
+    }
   $("#cfInterval").addEventListener("input", () => saveSoon(700));
   $("#cfInterval").addEventListener("change", () => saveSoon(0));
 
@@ -2309,6 +2482,7 @@ async function showAdapters() {
 }
 
 async function wireEvents() {
+  if ($("#btnTourStart")) $("#btnTourStart").addEventListener("click", () => startTour());
   await listen("zgui:toast", (ev) => toast((ev.payload || {}).kind || "info", (ev.payload || {}).text || ""));
   await listen("zgui:log", (ev) => logPush(ev.payload));
   await listen("zgui:status", async () => {
@@ -2366,6 +2540,286 @@ document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
 });
 
+// ------------------------------------------------------------- обучение (coach marks)
+// Тур-оверлей поверх живого интерфейса: затемнение с «дыркой» на элементе и
+// рукописная обводка (SVG-фильтр). Показывается один раз за установку.
+const TOUR_NS = "http://www.w3.org/2000/svg";
+let tourIdx = 0;
+let tourActive = false;
+let tourOffered = false;
+
+function tourSteps() {
+  return [
+    { center: true, title: T.tour_welcome_title, text: T.tour_welcome_text },
+    { view: "tests", nav: "tests", sel: "#testCard .card-head", title: T.tour_tabs_title, text: T.tour_tabs_text },
+    {
+      sel: '#testTabs .tab[data-filter="flowseal"]',
+      title: T.tour_flow_title,
+      text: T.tour_flow_text,
+      onShow: () => {
+        const t = document.querySelector('#testTabs .tab[data-filter="flowseal"]');
+        if (t) t.click();
+      },
+    },
+    { sel: "#btnRunTest", title: T.tour_run_title, text: T.tour_run_text },
+    { view: "strategies", nav: "strategies", sel: "#profilesCard .card-head", title: T.tour_strat_title, text: T.tour_strat_text },
+    { sel: "#profileList .profile .profile-actions .btn.primary", title: T.tour_launch_title, text: T.tour_launch_text },
+    { sel: "#cfSvcBoot", title: T.tour_svc_title, text: T.tour_svc_text },
+    { sel: "#btnStop", title: T.tour_stop_title, text: T.tour_stop_text },
+  ];
+}
+
+function ensureTourLayer() {
+  let l = $("#tour");
+  if (!l) {
+    l = document.createElement("div");
+    l.id = "tour";
+    l.className = "tour hidden";
+    document.body.appendChild(l);
+  }
+  return l;
+}
+
+function tourFinish(markDone) {
+  tourActive = false;
+  const layer = $("#tour");
+  if (layer) {
+    layer.classList.add("hidden");
+    layer.innerHTML = "";
+  }
+  window.removeEventListener("resize", tourRender);
+  document.removeEventListener("keydown", tourKey);
+  if (markDone) {
+    invoke("tour_done_set").catch(() => {});
+    if (B && B.settings) B.settings.tour_done = true;
+  }
+}
+
+function tourKey(e) {
+  if (e.key === "Escape") tourFinish(true);
+}
+
+function tourNext() {
+  const steps = tourSteps();
+  if (tourIdx >= steps.length - 1) return tourFinish(true);
+  tourIdx += 1;
+  tourRender();
+}
+
+function tourBack() {
+  if (tourIdx > 0) {
+    tourIdx -= 1;
+    tourRender();
+  }
+}
+
+function tourRender() {
+  if (!tourActive) return;
+  const steps = tourSteps();
+  const step = steps[tourIdx];
+  const layer = $("#tour");
+  if (!layer || !step) return tourFinish(true);
+  // Открываем вкладку, где лежит цель: явная `view` шага ИЛИ страница самого
+  // элемента. Иначе при шаге «назад» цель оказывается на скрытой странице,
+  // rect нулевой — и шаг молча уходит вперёд.
+  let view = step.view;
+  if (!view && !step.center) {
+    const el0 = document.querySelector(step.sel);
+    const page = el0 && el0.closest(".page");
+    if (page && page.id.startsWith("view-")) view = page.id.slice(5);
+  }
+  if (view) {
+    const nav = document.querySelector(`.nav-item[data-view="${view}"]`);
+    if (nav && !nav.classList.contains("active")) nav.click();
+  }
+  if (step.onShow) {
+    try { step.onShow(); } catch (_) {}
+  }
+  layer.innerHTML = "";
+  layer.classList.remove("hidden");
+
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+
+  let rect = null;
+  if (!step.center) {
+    const el = document.querySelector(step.sel);
+    if (el) {
+      // Высокую цель подводим к верху окна (иначе «середина списка»), низкую — по центру.
+      const r0 = el.getBoundingClientRect();
+      el.scrollIntoView({ block: r0.height > H * 0.5 ? "start" : "center" });
+      rect = el.getBoundingClientRect();
+    }
+    // Скрытый/нулевой элемент — шаг пропускаем (не вешаем подсказку в углу).
+    if (!rect || rect.width < 2 || rect.height < 2) return tourNext();
+  }
+  // «Прожектор» и на пункте меню — когда шаг переводит на другую вкладку.
+  let navRect = null;
+  if (step.nav) {
+    const navEl = document.querySelector(`.nav-item[data-view="${step.nav}"]`);
+    if (navEl) navRect = navEl.getBoundingClientRect();
+  }
+
+  // Подсказка
+  const box = document.createElement("div");
+  box.className = "tour-box" + (step.center ? " center" : "");
+  const ttl = document.createElement("b");
+  ttl.textContent = step.title;
+  const txt = document.createElement("p");
+  txt.textContent = step.text;
+  const nav = document.createElement("div");
+  nav.className = "tour-actions";
+  const dots = document.createElement("span");
+  dots.className = "tour-dots";
+  dots.textContent = `${tourIdx + 1} / ${steps.length}`;
+  const mkBtn = (label, cls, fn) => {
+    const b = document.createElement("button");
+    b.className = "btn small " + cls;
+    b.textContent = label;
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    return b;
+  };
+  const back = mkBtn(T.tour_back, "ghost", tourBack);
+  back.disabled = tourIdx === 0;
+  const skip = mkBtn(T.tour_skip, "ghost", () => tourFinish(true));
+  const next = mkBtn(tourIdx === steps.length - 1 ? T.tour_done_btn : T.tour_next, "primary", tourNext);
+  nav.append(dots, back, skip, next);
+  box.append(ttl, txt, nav);
+  layer.appendChild(box);
+
+  const boxW = Math.min(360, W - 24);
+  box.style.width = boxW + "px";
+  const bh = box.offsetHeight;
+  let bx;
+  let by;
+  if (rect) {
+    const belowY = rect.bottom + 14;
+    by = belowY + bh < H - 10 ? belowY : Math.max(10, rect.top - bh - 14);
+    bx = Math.min(Math.max(12, rect.left + rect.width / 2 - boxW / 2), W - boxW - 12);
+  } else {
+    bx = (W - boxW) / 2;
+    by = (H - bh) / 2;
+  }
+  box.style.left = Math.round(bx) + "px";
+  box.style.top = Math.round(by) + "px";
+
+  // SVG: затемнение с «дыркой» + рукописная обводка и стрелка
+  const svg = document.createElementNS(TOUR_NS, "svg");
+  svg.setAttribute("class", "tour-svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("width", W);
+  svg.setAttribute("height", H);
+  const defs = document.createElementNS(TOUR_NS, "defs");
+
+  const arrow = document.createElementNS(TOUR_NS, "marker");
+  arrow.setAttribute("id", "tour-arrow");
+  arrow.setAttribute("markerWidth", "10");
+  arrow.setAttribute("markerHeight", "10");
+  arrow.setAttribute("refX", "7");
+  arrow.setAttribute("refY", "3");
+  arrow.setAttribute("orient", "auto");
+  const arrowHead = document.createElementNS(TOUR_NS, "path");
+  arrowHead.setAttribute("d", "M0,0 L7,3 L0,6");
+  arrowHead.style.fill = "none";
+  arrowHead.style.stroke = "var(--amber)";
+  arrowHead.setAttribute("stroke-width", "1.6");
+  arrow.append(arrowHead);
+  defs.appendChild(arrow);
+
+  const maskId = "tour-mask";
+  const mask = document.createElementNS(TOUR_NS, "mask");
+  mask.setAttribute("id", maskId);
+  const mWhite = document.createElementNS(TOUR_NS, "rect");
+  mWhite.setAttribute("width", W);
+  mWhite.setAttribute("height", H);
+  mWhite.setAttribute("fill", "#fff");
+  mask.appendChild(mWhite);
+  const holes = [];
+  if (rect) holes.push({ r: rect, pad: 8 });
+  if (navRect) holes.push({ r: navRect, pad: 6 });
+  for (const h of holes) {
+    const hole = document.createElementNS(TOUR_NS, "rect");
+    hole.setAttribute("x", h.r.left - h.pad);
+    hole.setAttribute("y", h.r.top - h.pad);
+    hole.setAttribute("width", h.r.width + h.pad * 2);
+    hole.setAttribute("height", h.r.height + h.pad * 2);
+    hole.setAttribute("rx", "10");
+    hole.setAttribute("fill", "#000");
+    mask.appendChild(hole);
+  }
+  defs.appendChild(mask);
+  svg.appendChild(defs);
+
+  const dim = document.createElementNS(TOUR_NS, "rect");
+  dim.setAttribute("width", W);
+  dim.setAttribute("height", H);
+  dim.style.fill = "rgba(6,7,10,0.55)";
+  dim.setAttribute("mask", `url(#${maskId})`);
+  svg.appendChild(dim);
+
+  for (const h of holes) {
+    const outline = document.createElementNS(TOUR_NS, "rect");
+    outline.setAttribute("x", h.r.left - h.pad);
+    outline.setAttribute("y", h.r.top - h.pad);
+    outline.setAttribute("width", h.r.width + h.pad * 2);
+    outline.setAttribute("height", h.r.height + h.pad * 2);
+    outline.setAttribute("rx", "12");
+    outline.style.fill = "none";
+    outline.style.stroke = "var(--amber)";
+    outline.setAttribute("stroke-width", "2.5");
+    outline.setAttribute("stroke-linecap", "round");
+    svg.appendChild(outline);
+  }
+
+  if (rect) {
+    const cx = bx + boxW / 2;
+    // Стрелка — строго прямая: от ближней стороны подсказки к ближнему краю цели.
+    const boxAbove = by + bh <= rect.top;
+    const cy = boxAbove ? by + bh : by;
+    const tx = Math.min(Math.max(cx, rect.left), rect.right);
+    const ty = Math.min(Math.max(cy, rect.top), rect.bottom);
+    const path = document.createElementNS(TOUR_NS, "path");
+    path.setAttribute("d", `M${cx},${cy} L${tx},${ty}`);
+    path.style.fill = "none";
+    path.style.stroke = "var(--amber)";
+    path.setAttribute("stroke-width", "2");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("marker-end", "url(#tour-arrow)");
+    svg.appendChild(path);
+  }
+
+  layer.insertBefore(svg, box);
+}
+
+function startTour() {
+  tourIdx = 0;
+  tourActive = true;
+  ensureTourLayer();
+  window.addEventListener("resize", tourRender);
+  document.addEventListener("keydown", tourKey);
+  const nav = document.querySelector('.nav-item[data-view="strategies"]');
+  if (nav) nav.click();
+  tourRender();
+}
+
+async function maybeOfferTour() {
+  if (tourOffered) return;
+  if (!B || !B.settings || B.settings.tour_done) return;
+  tourOffered = true;
+  const go = await showConfirm({
+    title: T.tour_offer_title,
+    html: T.tour_offer_text,
+    okLabel: T.tour_offer_yes,
+    cancelLabel: T.tour_offer_no,
+  });
+  if (go) {
+    startTour();
+  } else {
+    invoke("tour_done_set").catch(() => {});
+    if (B.settings) B.settings.tour_done = true;
+  }
+}
+
 (async function init() {
   try {
     await wireEvents();
@@ -2378,6 +2832,7 @@ document.addEventListener("contextmenu", (e) => {
     } catch (_) {}
     await refreshAll();
     loadDnsProviders();
+    setTimeout(maybeOfferTour, 800);
     loadTestCache();
     if (ts && ts.running) {
       testState = ts;
@@ -2390,6 +2845,10 @@ document.addEventListener("contextmenu", (e) => {
       .then((i) => {
         // В подвале сайдбара — только версия (просьба владельца).
         $("#appMeta").innerHTML = `<span class="ver">v${i.version}</span>`;
+        const av = $("#appVer");
+        if (av) av.textContent = "v" + i.version;
+        const ap = $("#appUpdPath");
+        if (ap && B && B.dataDir) ap.textContent = B.dataDir + "\\updates";
       })
       .catch(() => {});
     // Никаких таймеров: состояние окна обновляется событиями (zgui:status/

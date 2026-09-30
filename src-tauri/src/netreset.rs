@@ -52,15 +52,18 @@ pub fn reset(data: &Path) -> Result<NetResetResult, String> {
     // Шаги пишутся скриптом: раньше список возвращался жёстко зашитым, и UI
     // рапортовал «VPN-службы остановлены», даже если таких служб не было.
     let steps_file = crate::runner::TempFile::new(
-        data.join("logs").join(format!("net_reset_{}.steps.txt", std::process::id())),
+        data.join("logs")
+            .join(format!("net_reset_{}.steps.txt", std::process::id())),
     );
 
     let body = reset_script(steps_file.path());
     let script = crate::runner::LockedScript::write(
-        data.join("logs").join(format!("net_reset_{}.ps1", std::process::id())),
+        data.join("logs")
+            .join(format!("net_reset_{}.ps1", std::process::id())),
         &body,
     )?;
-    let code = run_script_privileged(script.path()).map_err(|e| crate::texts::restore_launch_failed(&e.to_string()))?;
+    let code = run_script_privileged(script.path())
+        .map_err(|e| crate::texts::restore_launch_failed(&e.to_string()))?;
     // Ненулевой код скрипта — честная ошибка: раньше он игнорировался и UI
     // показывал «выполнено» даже при провалившемся сбросе.
     if code != 0 {
@@ -68,10 +71,20 @@ pub fn reset(data: &Path) -> Result<NetResetResult, String> {
     }
 
     let steps: Vec<String> = crate::config::read_text_auto(steps_file.path())
-        .map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .map(|t| {
+            t.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     if steps.is_empty() {
-        crate::logger::log_code("warn", "netreset", "E-NET-001", "скрипт сброса завершился без единого шага — проверьте журнал");
+        crate::logger::log_code(
+            "warn",
+            "netreset",
+            "E-NET-001",
+            "скрипт сброса завершился без единого шага — проверьте журнал",
+        );
     }
     let virtual_adapters = list_virtual_adapters();
     Ok(NetResetResult {
@@ -215,11 +228,21 @@ mod tests {
     fn reset_script_is_valid_powershell_and_reports_steps() {
         let steps = std::env::temp_dir().join(format!("zgui-netreset-{}.txt", std::process::id()));
         let body = reset_script(&steps);
-        assert!(body.contains("$zguiSteps += "), "шаг должен попасть в список: {body}");
-        assert!(body.contains(crate::texts::STEP_DNS), "текст шага должен быть в скрипте");
-        assert!(body.contains("Set-Content -LiteralPath"), "список шагов должен писаться в файл");
         assert!(
-            body.contains(crate::texts::STEP_DONE_SUFFIX) && body.contains(crate::texts::STEP_FAILED_SUFFIX),
+            body.contains("$zguiSteps += "),
+            "шаг должен попасть в список: {body}"
+        );
+        assert!(
+            body.contains(crate::texts::STEP_DNS),
+            "текст шага должен быть в скрипте"
+        );
+        assert!(
+            body.contains("Set-Content -LiteralPath"),
+            "список шагов должен писаться в файл"
+        );
+        assert!(
+            body.contains(crate::texts::STEP_DONE_SUFFIX)
+                && body.contains(crate::texts::STEP_FAILED_SUFFIX),
             "шаги должны иметь честный статус выполнено/ошибка: {body}"
         );
 

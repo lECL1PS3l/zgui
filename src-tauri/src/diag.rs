@@ -8,6 +8,9 @@ use crate::runner::hidden_command;
 /// Без прав команда молча не сработает.
 pub fn ensure_tcp_timestamps() {
     let _ = hidden_command("cmd.exe")
-        .args(["/c", "chcp 437 >nul & netsh interface tcp set global timestamps=enabled"])
+        .args([
+            "/c",
+            "chcp 437 >nul & netsh interface tcp set global timestamps=enabled",
+        ])
         .output();
 }

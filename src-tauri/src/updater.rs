@@ -85,7 +85,8 @@ pub struct CatEntry {
 /// Обёртка GitHub (`repo-main/`) срезается; Dirs пропускаются.
 fn read_repo_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     use std::io::Read;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     if archive.len() > MAX_ZIP_ENTRIES {
         return Err(format!("слишком много файлов в архиве: {}", archive.len()));
     }
@@ -98,16 +99,22 @@ fn read_repo_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         }
         let raw = entry.name().to_string();
         // Срезаем каталог-обёртку GitHub («repo-main/...»).
-        let rel = raw.split_once('/').map(|(_, r)| r.to_string()).unwrap_or(raw);
-        if rel.is_empty()
-            || rel.contains('\\')
-            || rel.split('/').any(|p| p == ".." || p.is_empty())
+        let rel = raw
+            .split_once('/')
+            .map(|(_, r)| r.to_string())
+            .unwrap_or(raw);
+        if rel.is_empty() || rel.contains('\\') || rel.split('/').any(|p| p == ".." || p.is_empty())
         {
             continue;
         }
         let size = entry.size();
         if size > MAX_ZIP_ENTRY || total.saturating_add(size) > MAX_FETCH {
-            crate::logger::log_code("warn", "updater", "W-UPD-004", &format!("пропускаю крупную запись архива: {rel}"));
+            crate::logger::log_code(
+                "warn",
+                "updater",
+                "W-UPD-004",
+                &format!("пропускаю крупную запись архива: {rel}"),
+            );
             continue;
         }
         let mut buf = Vec::with_capacity(size as usize);
@@ -130,23 +137,32 @@ fn read_repo_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
 /// - `*.bat` (корень репо) → `data/catalog/flowseal/raw` (стратегии-профили);
 /// - `lists/*` → `lists/` живого движка flowseal (кроме заглушки ipset-all.txt);
 /// - `.service/ipset-service.txt` → реальный `ipset-all.txt` движка + копия в каталог.
-fn collect_entries(
-    files: Vec<(String, Vec<u8>)>,
-    data: &Path,
-    roots: &Roots,
-) -> Vec<CatEntry> {
+fn collect_entries(files: Vec<(String, Vec<u8>)>, data: &Path, roots: &Roots) -> Vec<CatEntry> {
     let mut out: Vec<CatEntry> = Vec::new();
     let root = roots.path("flowseal");
     let mut push = |group: &str, label: &str, dest: PathBuf, catalog_only: bool, bytes: Vec<u8>| {
         let id = format!("{}:{}", group, label.replace(['/', '\\'], "__"));
-        out.push(CatEntry { id, group: group.to_string(), label: label.to_string(), dest, catalog_only, bytes });
+        out.push(CatEntry {
+            id,
+            group: group.to_string(),
+            label: label.to_string(),
+            dest,
+            catalog_only,
+            bytes,
+        });
     };
 
     for (rel, bytes) in files {
         if !rel.contains('/') {
             // Стратегии автора — только простые *.bat имена.
             if bat_name_ok(&rel) {
-                push("flowseal strategies", &rel, data.join("catalog/flowseal/raw").join(&rel), true, bytes);
+                push(
+                    "flowseal strategies",
+                    &rel,
+                    data.join("catalog/flowseal/raw").join(&rel),
+                    true,
+                    bytes,
+                );
             }
             continue;
         }
@@ -159,12 +175,24 @@ fn collect_entries(
                 // Списки — в живой движок (если он есть). Заглушку ipset-all.txt
                 // из репозитория не берём: реальный список — в .service.
                 if let Some(root) = &root {
-                    push("flowseal lists", name, root.join("lists").join(name), false, bytes);
+                    push(
+                        "flowseal lists",
+                        name,
+                        root.join("lists").join(name),
+                        false,
+                        bytes,
+                    );
                 }
             }
             ".service" if name == "ipset-service.txt" => {
                 if let Some(root) = &root {
-                    push("flowseal lists", "ipset-all.txt", root.join("lists/ipset-all.txt"), false, bytes.clone());
+                    push(
+                        "flowseal lists",
+                        "ipset-all.txt",
+                        root.join("lists/ipset-all.txt"),
+                        false,
+                        bytes.clone(),
+                    );
                 }
                 let dest = data.join("catalog/flowseal/.service").join(name);
                 push("flowseal service", name, dest, true, bytes);
@@ -188,7 +216,31 @@ fn entry_base(e: &CatEntry) -> UpdEntry {
         local_hash: None,
         size: e.bytes.len() as u64,
         error: None,
+        added: 0,
+        removed: 0,
     }
+}
+
+/// Уникальные непустые строки (для сравнения списков).
+fn norm_lines(s: &str) -> std::collections::HashSet<&str> {
+    s.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Дельта строк текстового списка: (добавлено, удалено) по уникальным
+/// непустым строкам. Для бинарных/не-UTF8 файлов вернёт (0, 0).
+fn line_delta(old: &[u8], new: &[u8]) -> (u64, u64) {
+    let (Ok(o), Ok(n)) = (std::str::from_utf8(old), std::str::from_utf8(new)) else {
+        return (0, 0);
+    };
+    let so = norm_lines(o);
+    let sn = norm_lines(n);
+    (
+        sn.difference(&so).count() as u64,
+        so.difference(&sn).count() as u64,
+    )
 }
 
 /// ipset-all: уважаем ручной режим none/any — файл ведёт пользователь.
@@ -209,7 +261,11 @@ fn classify_entry(e: &CatEntry, settings: &Settings) -> UpdEntry {
         Ok(local) => {
             u.exists = true;
             u.local_hash = Some(crate::config::sha256_hex(&local));
-            u.status = if local == e.bytes { "ok".into() } else { "modified".into() };
+            u.status = if local == e.bytes {
+                "ok".into()
+            } else {
+                "modified".into()
+            };
         }
         Err(_) => u.status = "new".into(),
     }
@@ -243,7 +299,12 @@ pub fn check_all(data: &Path, roots: &Roots, settings: &Settings) -> Result<Vec<
 /// Применяет выбранные обновления (ид-ы или все доступные: new/modified).
 /// Перед перезаписью существующего файла создаётся копия в `.backups/<ts>`;
 /// если копию сделать не удалось — файл не трогаем.
-pub fn apply_updates(data: &Path, roots: &Roots, settings: &Settings, ids: Vec<String>) -> Result<Vec<UpdEntry>, String> {
+pub fn apply_updates(
+    data: &Path,
+    roots: &Roots,
+    settings: &Settings,
+    ids: Vec<String>,
+) -> Result<Vec<UpdEntry>, String> {
     let cli = client()?;
     let files = fetch_repo_zip(&cli)?;
     let entries = collect_entries(files, data, roots);
@@ -251,7 +312,13 @@ pub fn apply_updates(data: &Path, roots: &Roots, settings: &Settings, ids: Vec<S
 }
 
 /// Применение без сети (отделено для тестов).
-fn apply_entries(entries: &[CatEntry], data: &Path, roots: &Roots, settings: &Settings, ids: Vec<String>) -> Vec<UpdEntry> {
+fn apply_entries(
+    entries: &[CatEntry],
+    data: &Path,
+    roots: &Roots,
+    settings: &Settings,
+    ids: Vec<String>,
+) -> Vec<UpdEntry> {
     let ts = crate::profiles::now_str();
     let mut out: Vec<UpdEntry> = Vec::new();
     let mut applied_lists = false;
@@ -267,6 +334,11 @@ fn apply_entries(entries: &[CatEntry], data: &Path, roots: &Roots, settings: &Se
             out.push(u0);
             continue;
         }
+        // Дельта строк (для текстовых списков) до подмены файла.
+        let (d_added, d_removed) = match fs::read(&e.dest) {
+            Ok(old) => line_delta(&old, &e.bytes),
+            Err(_) => (0, 0),
+        };
         if e.dest.exists() && !backup(&e.dest, &ts, data, e.catalog_only) {
             let mut u = u0;
             u.status = "err".into();
@@ -292,6 +364,8 @@ fn apply_entries(entries: &[CatEntry], data: &Path, roots: &Roots, settings: &Se
         u.exists = true;
         u.local_hash = Some(crate::config::sha256_hex(&e.bytes));
         u.error = None;
+        u.added = d_added;
+        u.removed = d_removed;
         out.push(u);
     }
 
@@ -370,7 +444,12 @@ pub fn parse_preset_set(bytes: &[u8]) -> Result<RemotePresetSet, String> {
             continue;
         }
         let name = if name.is_empty() { id.clone() } else { name };
-        presets.push(RemotePreset { id, engine, name, args });
+        presets.push(RemotePreset {
+            id,
+            engine,
+            name,
+            args,
+        });
     }
     if presets.is_empty() {
         return Err("presets.json: нет валидных пресетов".into());
@@ -384,7 +463,10 @@ pub fn parse_preset_set(bytes: &[u8]) -> Result<RemotePresetSet, String> {
 pub fn fetch_preset_set() -> Result<Option<RemotePresetSet>, String> {
     let cli = client()?;
     let resp = cli
-        .get(format!("https://api.github.com/repos/{}/releases/latest", SELF_REPO))
+        .get(format!(
+            "https://api.github.com/repos/{}/releases/latest",
+            SELF_REPO
+        ))
         .header("Accept", "application/vnd.github+json")
         .send()
         .map_err(|e| e.to_string())?;
@@ -394,7 +476,10 @@ pub fn fetch_preset_set() -> Result<Option<RemotePresetSet>, String> {
     let rel: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
     let url = rel["assets"]
         .as_array()
-        .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some("presets.json")))
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x["name"].as_str() == Some("presets.json"))
+        })
         .and_then(|x| x["browser_download_url"].as_str())
         .unwrap_or("")
         .to_string();
@@ -421,6 +506,141 @@ fn save_preset_stamp(data: &Path, version: &str) {
     let _ = crate::config::atomic_write(&p, version.as_bytes());
 }
 
+// ------------------------------------------------- обновление самой программы
+
+/// Сведения о свежем релизе самой программы (SELF_REPO).
+#[derive(serde::Serialize, Clone, Debug, Default)]
+pub struct AppUpdate {
+    pub current: String,
+    pub latest: Option<String>,
+    pub available: bool,
+    pub asset: Option<String>,
+    pub url: Option<String>,
+    pub size: Option<u64>,
+    pub notes: Option<String>,
+    pub error: Option<String>,
+}
+
+fn latest_release(cli: &reqwest::blocking::Client) -> Result<serde_json::Value, String> {
+    let resp = cli
+        .get(api(SELF_REPO, "releases/latest"))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API: HTTP {}", resp.status()));
+    }
+    resp.json().map_err(|e| e.to_string())
+}
+
+/// Выбирает из ассетов релиза портативный архив программы (zip; приоритет — `0-*.zip`).
+fn pick_zip_asset(rel: &serde_json::Value) -> Option<(String, String, u64)> {
+    let arr = rel["assets"].as_array()?;
+    let a = arr
+        .iter()
+        .find(|a| {
+            a["name"]
+                .as_str()
+                .map(|n| n.to_lowercase().ends_with(".zip") && n.starts_with("0-"))
+                .unwrap_or(false)
+        })
+        .or_else(|| {
+            arr.iter().find(|a| {
+                a["name"]
+                    .as_str()
+                    .map(|n| n.to_lowercase().ends_with(".zip"))
+                    .unwrap_or(false)
+            })
+        })?;
+    Some((
+        a["name"].as_str()?.to_string(),
+        a["browser_download_url"].as_str()?.to_string(),
+        a["size"].as_u64().unwrap_or(0),
+    ))
+}
+
+/// Сравнение версий вида `1.2.3` (покомпонентно, числа). true, если `a` новее `b`.
+fn version_gt(a: &str, b: &str) -> bool {
+    let pa: Vec<u32> = a.split('.').map(|x| x.parse().unwrap_or(0)).collect();
+    let pb: Vec<u32> = b.split('.').map(|x| x.parse().unwrap_or(0)).collect();
+    for i in 0..pa.len().max(pb.len()) {
+        let x = pa.get(i).copied().unwrap_or(0);
+        let y = pb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Проверяет свежий релиз программы. Ошибки не пробрасываем — кладём в поле `error`.
+pub fn app_update_info() -> AppUpdate {
+    let mut info = AppUpdate {
+        current: env!("CARGO_PKG_VERSION").to_string(),
+        ..Default::default()
+    };
+    let cli = match client() {
+        Ok(c) => c,
+        Err(e) => {
+            info.error = Some(e);
+            return info;
+        }
+    };
+    let rel = match latest_release(&cli) {
+        Ok(r) => r,
+        Err(e) => {
+            info.error = Some(e);
+            return info;
+        }
+    };
+    let tag = rel["tag_name"]
+        .as_str()
+        .unwrap_or("")
+        .trim_start_matches('v')
+        .to_string();
+    if let Some((name, url, size)) = pick_zip_asset(&rel) {
+        info.asset = Some(name);
+        info.url = Some(url);
+        info.size = Some(size);
+    }
+    info.notes = rel["body"].as_str().map(|s| s.to_string());
+    info.available = version_gt(&tag, &info.current) && info.url.is_some();
+    info.latest = if tag.is_empty() { None } else { Some(tag) };
+    info
+}
+
+/// Скачивает архив последнего релиза в `<data>/updates/`, возвращает путь к файлу.
+pub fn app_update_download(data: &Path) -> Result<String, String> {
+    let info = app_update_info();
+    if let Some(e) = info.error {
+        return Err(e);
+    }
+    let (name, url) = match (info.asset, info.url) {
+        (Some(n), Some(u)) => (n, u),
+        _ => return Err("в последнем релизе не найден архив программы".into()),
+    };
+    // Имя ассета — внешние данные: берём только базовое имя без разделителей пути.
+    let safe = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    if safe.is_empty() || safe.contains("..") || safe.len() > 120 {
+        return Err("в релизе некорректное имя архива".into());
+    }
+    let cli = client()?;
+    let bytes = fetch_bytes(&cli, &url)?;
+    if let Some(want) = info.size {
+        if want > 0 && bytes.len() as u64 != want {
+            return Err(format!(
+                "размер архива не совпал (ожидалось {want} б, получено {} б)",
+                bytes.len()
+            ));
+        }
+    }
+    let dir = data.join("updates");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(safe);
+    crate::config::atomic_write(&dest, &bytes).map_err(|e| e.to_string())?;
+    Ok(dest.display().to_string())
+}
+
 /// Сводная запись набора пресетов для каталога обновлений.
 pub fn check_preset_entry(data: &Path) -> UpdEntry {
     let mut u = UpdEntry {
@@ -435,6 +655,8 @@ pub fn check_preset_entry(data: &Path) -> UpdEntry {
         local_hash: None,
         size: 0,
         error: None,
+        added: 0,
+        removed: 0,
     };
     match fetch_preset_set() {
         // Ассета в релизе ещё нет — не ошибка: работают встроенные пресеты.
@@ -463,7 +685,10 @@ pub fn check_preset_entry(data: &Path) -> UpdEntry {
 /// Применяет набор пресетов к профилям: обновляет builtin-пресеты
 /// (id `preset:<id>`) и добавляет недостающие. Кастомные профили не трогаются.
 /// Возвращает (обновлено, добавлено).
-pub fn apply_preset_set(profiles: &mut Vec<crate::config::Profile>, set: &RemotePresetSet) -> (usize, usize) {
+pub fn apply_preset_set(
+    profiles: &mut Vec<crate::config::Profile>,
+    set: &RemotePresetSet,
+) -> (usize, usize) {
     let (mut updated, mut added) = (0usize, 0usize);
     for rp in &set.presets {
         let p = crate::presets::preset_profile(&rp.id, &rp.engine, &rp.name, rp.args.clone());
@@ -488,7 +713,11 @@ pub fn apply_preset_set(profiles: &mut Vec<crate::config::Profile>, set: &Remote
 
 /// Применяет уже скачанный набор пресетов и фиксирует его версию.
 /// Сеть здесь НЕ используется — вызывающая сторона качает набор заранее.
-pub fn apply_presets(data: &Path, profiles: &mut Vec<crate::config::Profile>, set: &RemotePresetSet) -> (usize, usize) {
+pub fn apply_presets(
+    data: &Path,
+    profiles: &mut Vec<crate::config::Profile>,
+    set: &RemotePresetSet,
+) -> (usize, usize) {
     let (updated, added) = apply_preset_set(profiles, set);
     save_preset_stamp(data, &set.version);
     (updated, added)
@@ -518,7 +747,8 @@ pub fn sync_ipset(root: &Path, data: &Path, settings: &Settings) {
     // Пользовательские подсети доклеиваем только в «loaded»: режимы none/any
     // намеренно отключают ipset-правила, include там не нужен.
     if settings.ipset_mode == "loaded" {
-        let user = crate::scanner::read_user_include(&root.join("lists").join("ipset-all-user.txt"));
+        let user =
+            crate::scanner::read_user_include(&root.join("lists").join("ipset-all-user.txt"));
         if !user.is_empty() {
             bytes.push(b'\n');
             for line in &user {
@@ -534,7 +764,11 @@ pub fn sync_ipset(root: &Path, data: &Path, settings: &Settings) {
         crate::logger::log(
             "err",
             "updater",
-            &format!("ipset-all.txt: запись не удалась ({}) — {}", dest.display(), err),
+            &format!(
+                "ipset-all.txt: запись не удалась ({}) — {}",
+                dest.display(),
+                err
+            ),
         );
     }
 }
@@ -542,11 +776,17 @@ pub fn sync_ipset(root: &Path, data: &Path, settings: &Settings) {
 /// Возвращает `false`, если копия не создана (нет прав/места/каталога):
 /// вызывающий тогда НЕ перезаписывает файл. Имя копии не затирает прежние.
 fn backup(src: &Path, ts: &str, data: &Path, catalog_only: bool) -> bool {
-    let name = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let name = src
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     let dir = if catalog_only {
         data.join("catalog/.backups").join(ts)
     } else {
-        let Some(parent) = src.parent() else { return false };
+        let Some(parent) = src.parent() else {
+            return false;
+        };
         parent.join(".backups").join(ts)
     };
     if fs::create_dir_all(&dir).is_err() {
@@ -637,8 +877,17 @@ pub fn check_tg_bridge() -> TgBridgeInfo {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(arr) = v.as_array() {
                 if let Some(first) = arr.first() {
-                    let date = first["commit"]["committer"]["date"].as_str().unwrap_or("").to_string();
-                    let msg = first["commit"]["message"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string();
+                    let date = first["commit"]["committer"]["date"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    let msg = first["commit"]["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
                     if !date.is_empty() {
                         info.upstream_commit = Some(format!("{} — {}", date, msg));
                     }
@@ -657,8 +906,16 @@ fn version_is_newer(candidate: &str, current: &str) -> bool {
         let mut it = s.splitn(2, '-');
         let base = it.next().unwrap_or("");
         let suffix = it.next().unwrap_or("");
-        let nums = base.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect();
-        let sn = suffix.rsplit('.').next().unwrap_or("").parse::<u64>().unwrap_or(0);
+        let nums = base
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect();
+        let sn = suffix
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .parse::<u64>()
+            .unwrap_or(0);
         (nums, sn)
     }
     let (a, asuf) = split(candidate);
@@ -677,6 +934,24 @@ mod tests {
     fn roots_with(root: &Path) -> Roots {
         serde_json::from_value(serde_json::json!({"flowseal": root.to_string_lossy()}))
             .expect("roots из json")
+    }
+
+    #[test]
+    fn version_gt_compares_numerically() {
+        assert!(version_gt("1.6.0", "1.5.0"));
+        assert!(version_gt("1.10.0", "1.9.9"));
+        assert!(!version_gt("1.5.0", "1.5.0"));
+        assert!(!version_gt("1.5.0", "1.6.0"));
+        assert!(version_gt("2.0", "1.9.9"));
+    }
+
+    #[test]
+    fn line_delta_counts_added_and_removed() {
+        assert_eq!(line_delta(b"a\nb\n", b"a\nb\nc\n"), (1, 0));
+        assert_eq!(line_delta(b"a\nb\nc\n", b"a\n"), (0, 2));
+        assert_eq!(line_delta(b"# x\na\n", b"\na\nb\n"), (1, 1));
+        // Не-UTF8 → без дельты.
+        assert_eq!(line_delta(b"\xff\xfe", b"a\n"), (0, 0));
     }
 
     #[test]
@@ -734,20 +1009,46 @@ mod tests {
         assert!(!labels.contains(&"service.bat"), "service.bat не берём");
         assert!(!labels.contains(&"readme.txt"), "не .bat не берём");
 
-        let settings = Settings { ipset_mode: "loaded".into(), ..Default::default() };
+        let settings = Settings {
+            ipset_mode: "loaded".into(),
+            ..Default::default()
+        };
         let by_label = |l: &str| entries.iter().find(|e| e.label == l).unwrap();
-        assert_eq!(classify_entry(by_label("general.bat"), &settings).status, "new");
+        assert_eq!(
+            classify_entry(by_label("general.bat"), &settings).status,
+            "new"
+        );
 
         // Совпадающий файл → ok; изменённый → modified.
         fs::create_dir_all(data.join("catalog/flowseal/raw")).unwrap();
-        fs::write(data.join("catalog/flowseal/raw/general.bat"), b"@echo off\nwinws --wf-tcp=80").unwrap();
-        assert_eq!(classify_entry(by_label("general.bat"), &settings).status, "ok");
-        fs::write(data.join("catalog/flowseal/raw/general.bat"), b"@echo off\nwinws --wf-tcp=443").unwrap();
-        assert_eq!(classify_entry(by_label("general.bat"), &settings).status, "modified");
+        fs::write(
+            data.join("catalog/flowseal/raw/general.bat"),
+            b"@echo off\nwinws --wf-tcp=80",
+        )
+        .unwrap();
+        assert_eq!(
+            classify_entry(by_label("general.bat"), &settings).status,
+            "ok"
+        );
+        fs::write(
+            data.join("catalog/flowseal/raw/general.bat"),
+            b"@echo off\nwinws --wf-tcp=443",
+        )
+        .unwrap();
+        assert_eq!(
+            classify_entry(by_label("general.bat"), &settings).status,
+            "modified"
+        );
 
         // Режим none — ipset не трогаем.
-        let mut s2 = Settings { ipset_mode: "none".into(), ..Default::default() };
-        assert_eq!(classify_entry(by_label("ipset-all.txt"), &s2).status, "skip-user");
+        let mut s2 = Settings {
+            ipset_mode: "none".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_entry(by_label("ipset-all.txt"), &s2).status,
+            "skip-user"
+        );
         s2.ipset_mode = "loaded".into();
         assert_eq!(classify_entry(by_label("ipset-all.txt"), &s2).status, "new");
 
@@ -768,7 +1069,10 @@ mod tests {
         ]);
         let files = read_repo_zip(&zip).unwrap();
         let entries = collect_entries(files, &data, &roots);
-        let settings = Settings { ipset_mode: "loaded".into(), ..Default::default() };
+        let settings = Settings {
+            ipset_mode: "loaded".into(),
+            ..Default::default()
+        };
 
         // Старое содержимое — должно попасть в бэкап.
         fs::create_dir_all(data.join("catalog/flowseal/raw")).unwrap();
@@ -777,22 +1081,43 @@ mod tests {
 
         let out = apply_entries(&entries, &data, &roots, &settings, Vec::new());
         assert_eq!(out.len(), 2);
-        assert!(out.iter().all(|u| u.status == "ok"), "оба файла должны записаться");
-        assert_eq!(fs::read(data.join("catalog/flowseal/raw/general.bat")).unwrap(), b"new-bat");
-        assert_eq!(fs::read(root.join("lists/list-general.txt")).unwrap(), b"new-list\n");
+        assert!(
+            out.iter().all(|u| u.status == "ok"),
+            "оба файла должны записаться"
+        );
+        assert_eq!(
+            fs::read(data.join("catalog/flowseal/raw/general.bat")).unwrap(),
+            b"new-bat"
+        );
+        assert_eq!(
+            fs::read(root.join("lists/list-general.txt")).unwrap(),
+            b"new-list\n"
+        );
 
         // Бэкапы старых версий на месте.
-        let catalog_baks: Vec<_> = fs::read_dir(data.join("catalog/.backups")).unwrap().flatten().collect();
+        let catalog_baks: Vec<_> = fs::read_dir(data.join("catalog/.backups"))
+            .unwrap()
+            .flatten()
+            .collect();
         assert_eq!(catalog_baks.len(), 1, "один ts-каталог бэкапов каталога");
         let ts_dir = catalog_baks[0].path();
         assert_eq!(fs::read(ts_dir.join("general.bat")).unwrap(), b"old-bat");
-        let list_baks: Vec<_> = fs::read_dir(root.join("lists/.backups")).unwrap().flatten().collect();
+        let list_baks: Vec<_> = fs::read_dir(root.join("lists/.backups"))
+            .unwrap()
+            .flatten()
+            .collect();
         assert_eq!(list_baks.len(), 1, "один ts-каталог бэкапов движка");
-        assert_eq!(fs::read(list_baks[0].path().join("list-general.txt")).unwrap(), b"old-list\n");
+        assert_eq!(
+            fs::read(list_baks[0].path().join("list-general.txt")).unwrap(),
+            b"old-list\n"
+        );
 
         // Повторное применение — уже нечего обновлять (new/modified не осталось).
         let again = apply_entries(&entries, &data, &roots, &settings, Vec::new());
-        assert!(again.iter().all(|u| u.status == "ok"), "статусы ok после записи");
+        assert!(
+            again.iter().all(|u| u.status == "ok"),
+            "статусы ok после записи"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -807,7 +1132,11 @@ mod tests {
         ]}"#;
         let set = parse_preset_set(body.as_bytes()).unwrap();
         assert_eq!(set.version, "2026.09.24");
-        assert_eq!(set.presets.len(), 1, "пропуск неизвестного движка/пустых args");
+        assert_eq!(
+            set.presets.len(),
+            1,
+            "пропуск неизвестного движка/пустых args"
+        );
         assert_eq!(set.presets[0].id, "z2-x");
 
         // Голый массив без версии.
@@ -822,7 +1151,10 @@ mod tests {
 
         // Нестроковый элемент в args — битый пресет целиком (не усекаем команду).
         let mixed = r#"[{"id":"z","engine":"goodbyedpi","args":["-9",5]}]"#;
-        assert!(parse_preset_set(mixed.as_bytes()).is_err(), "args с числом должен отвергнуться");
+        assert!(
+            parse_preset_set(mixed.as_bytes()).is_err(),
+            "args с числом должен отвергнуться"
+        );
     }
 
     #[test]
@@ -880,7 +1212,14 @@ mod tests {
         let (upd2, add2) = apply_preset_set(&mut profiles2, &set);
         assert_eq!(upd2, 0);
         assert_eq!(add2, 1);
-        assert_eq!(profiles2.iter().find(|p| p.id == "preset:z2-x").unwrap().args, vec!["keep".to_string()]);
+        assert_eq!(
+            profiles2
+                .iter()
+                .find(|p| p.id == "preset:z2-x")
+                .unwrap()
+                .args,
+            vec!["keep".to_string()]
+        );
     }
 
     #[test]
@@ -900,8 +1239,14 @@ mod tests {
         let t = "[package]\nname = \"x\"\nversion = \"2.3.4-zui.2\"\nedition = \"2024\"\n";
         assert_eq!(parse_toml_version(t).as_deref(), Some("2.3.4-zui.2"));
         // Наследование из workspace — не версия пакета.
-        assert_eq!(parse_toml_version("[package]\nversion.workspace = true\n"), None);
-        assert_eq!(parse_toml_version("dependencies\nversion = \"1\"\n"), Some("1".into()));
+        assert_eq!(
+            parse_toml_version("[package]\nversion.workspace = true\n"),
+            None
+        );
+        assert_eq!(
+            parse_toml_version("dependencies\nversion = \"1\"\n"),
+            Some("1".into())
+        );
     }
 
     #[test]
@@ -924,12 +1269,23 @@ mod tests {
         fs::create_dir_all(data.join("catalog/flowseal/.service")).unwrap();
         fs::create_dir_all(root.join("lists")).unwrap();
         let real = vec![b'1'; 4096];
-        fs::write(data.join("catalog/flowseal/.service/ipset-service.txt"), &real).unwrap();
+        fs::write(
+            data.join("catalog/flowseal/.service/ipset-service.txt"),
+            &real,
+        )
+        .unwrap();
         fs::write(root.join("lists/ipset-all.txt"), IPSET_PLACEHOLDER).unwrap();
 
-        let mut settings = Settings { ipset_mode: "loaded".into(), ..Default::default() };
+        let mut settings = Settings {
+            ipset_mode: "loaded".into(),
+            ..Default::default()
+        };
         sync_ipset(&root, &data, &settings);
-        assert_eq!(fs::read(root.join("lists/ipset-all.txt")).unwrap(), real, "loaded: должен быть реальный список");
+        assert_eq!(
+            fs::read(root.join("lists/ipset-all.txt")).unwrap(),
+            real,
+            "loaded: должен быть реальный список"
+        );
 
         // loaded без источника — файл не трогаем.
         fs::remove_file(data.join("catalog/flowseal/.service/ipset-service.txt")).unwrap();
@@ -945,7 +1301,12 @@ mod tests {
 
         settings.ipset_mode = "any".into();
         sync_ipset(&root, &data, &settings);
-        assert!(fs::read(root.join("lists/ipset-all.txt")).unwrap().is_empty(), "any: пустой файл");
+        assert!(
+            fs::read(root.join("lists/ipset-all.txt"))
+                .unwrap()
+                .is_empty(),
+            "any: пустой файл"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -965,13 +1326,27 @@ mod tests {
         .unwrap();
 
         let listed = crate::scanner::read_user_include(&root.join("lists/ipset-all-user.txt"));
-        assert_eq!(listed, vec!["80.93.214.0/24".to_string(), "193.169.239.0/24".to_string()]);
+        assert_eq!(
+            listed,
+            vec!["80.93.214.0/24".to_string(), "193.169.239.0/24".to_string()]
+        );
 
-        let mut settings = Settings { ipset_mode: "loaded".into(), ..Default::default() };
-        fs::write(data.join("catalog/flowseal/.service/ipset-service.txt"), b"1.2.3.0/24\n").unwrap();
+        let mut settings = Settings {
+            ipset_mode: "loaded".into(),
+            ..Default::default()
+        };
+        fs::write(
+            data.join("catalog/flowseal/.service/ipset-service.txt"),
+            b"1.2.3.0/24\n",
+        )
+        .unwrap();
         sync_ipset(&root, &data, &settings);
         let got = fs::read_to_string(root.join("lists/ipset-all.txt")).unwrap();
-        assert!(got.contains("1.2.3.0/24") && got.contains("80.93.214.0/24") && got.contains("193.169.239.0/24"));
+        assert!(
+            got.contains("1.2.3.0/24")
+                && got.contains("80.93.214.0/24")
+                && got.contains("193.169.239.0/24")
+        );
 
         // none/any include НЕ подмешивают.
         settings.ipset_mode = "none".into();

@@ -12,13 +12,48 @@ pub struct DomainGroup {
     pub priority: u8,
 }
 
-pub const GROUP_YOUTUBE: DomainGroup = DomainGroup { id: "youtube", label: crate::texts::GROUP_LABEL_YOUTUBE, critical: true, priority: 1 };
-pub const GROUP_YOUTUBE_MUSIC: DomainGroup = DomainGroup { id: "youtube-music", label: crate::texts::GROUP_LABEL_YOUTUBE_MUSIC, critical: true, priority: 1 };
-pub const GROUP_DISCORD: DomainGroup = DomainGroup { id: "discord", label: crate::texts::GROUP_LABEL_DISCORD, critical: true, priority: 1 };
-pub const GROUP_MICROSOFT_XBOX: DomainGroup = DomainGroup { id: "microsoft-xbox", label: crate::texts::GROUP_LABEL_MICROSOFT_XBOX, critical: false, priority: 2 };
-pub const GROUP_GOOGLE: DomainGroup = DomainGroup { id: "google", label: crate::texts::GROUP_LABEL_GOOGLE, critical: false, priority: 2 };
-pub const GROUP_CLOUDFLARE: DomainGroup = DomainGroup { id: "cloudflare", label: crate::texts::GROUP_LABEL_CLOUDFLARE, critical: false, priority: 2 };
-pub const GROUP_OTHER: DomainGroup = DomainGroup { id: "other", label: crate::texts::GROUP_LABEL_OTHER, critical: false, priority: 3 };
+pub const GROUP_YOUTUBE: DomainGroup = DomainGroup {
+    id: "youtube",
+    label: crate::texts::GROUP_LABEL_YOUTUBE,
+    critical: true,
+    priority: 1,
+};
+pub const GROUP_YOUTUBE_MUSIC: DomainGroup = DomainGroup {
+    id: "youtube-music",
+    label: crate::texts::GROUP_LABEL_YOUTUBE_MUSIC,
+    critical: true,
+    priority: 1,
+};
+pub const GROUP_DISCORD: DomainGroup = DomainGroup {
+    id: "discord",
+    label: crate::texts::GROUP_LABEL_DISCORD,
+    critical: true,
+    priority: 1,
+};
+pub const GROUP_MICROSOFT_XBOX: DomainGroup = DomainGroup {
+    id: "microsoft-xbox",
+    label: crate::texts::GROUP_LABEL_MICROSOFT_XBOX,
+    critical: false,
+    priority: 2,
+};
+pub const GROUP_GOOGLE: DomainGroup = DomainGroup {
+    id: "google",
+    label: crate::texts::GROUP_LABEL_GOOGLE,
+    critical: false,
+    priority: 2,
+};
+pub const GROUP_CLOUDFLARE: DomainGroup = DomainGroup {
+    id: "cloudflare",
+    label: crate::texts::GROUP_LABEL_CLOUDFLARE,
+    critical: false,
+    priority: 2,
+};
+pub const GROUP_OTHER: DomainGroup = DomainGroup {
+    id: "other",
+    label: crate::texts::GROUP_LABEL_OTHER,
+    critical: false,
+    priority: 3,
+};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -37,27 +72,87 @@ pub fn classify_domain(host: &str) -> DomainGroup {
     if h == "music.youtube.com" {
         return GROUP_YOUTUBE_MUSIC;
     }
-    if ["youtube.com", "www.youtube.com", "youtu.be", "youtube-nocookie.com", "youtube.googleapis.com", "youtubei.googleapis.com", "googlevideo.com", "ytimg.com", "ytimg.l.google.com", "yt3.googleusercontent.com"].contains(&h.as_str())
+    if [
+        "youtube.com",
+        "www.youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "youtube.googleapis.com",
+        "youtubei.googleapis.com",
+        "googlevideo.com",
+        "ytimg.com",
+        "ytimg.l.google.com",
+        "yt3.googleusercontent.com",
+    ]
+    .contains(&h.as_str())
         || h.ends_with(".youtube.com")
         || h.ends_with(".ytimg.com")
         || h.ends_with(".googlevideo.com")
     {
         return GROUP_YOUTUBE;
     }
-    if ["discord.com", "discord.gg", "discord.media", "discordapp.com", "discordapp.net", "discordapp.io", "discordapp.org", "discordstatus.com", "discord.status", "gateway.discord.gg", "dl.discordapp.net", "images.discordapp.net", "status.discordapp.com"].contains(&h.as_str()) || h.ends_with(".discord.com") || h.ends_with(".discordapp.com") {
+    if [
+        "discord.com",
+        "discord.gg",
+        "discord.media",
+        "discordapp.com",
+        "discordapp.net",
+        "discordapp.io",
+        "discordapp.org",
+        "discordstatus.com",
+        "discord.status",
+        "gateway.discord.gg",
+        "dl.discordapp.net",
+        "images.discordapp.net",
+        "status.discordapp.com",
+    ]
+    .contains(&h.as_str())
+        || h.ends_with(".discord.com")
+        || h.ends_with(".discordapp.com")
+    {
         return GROUP_DISCORD;
     }
-    if ["login.live.com", "account.live.com", "microsoft.com", "www.microsoft.com", "xbox.com", "www.xbox.com", "xboxlive.com", "xboxservices.com"].contains(&h.as_str()) || h.ends_with(".xbox.com") || h.ends_with(".xboxlive.com") || h.ends_with(".xboxservices.com") {
+    if [
+        "login.live.com",
+        "account.live.com",
+        "microsoft.com",
+        "www.microsoft.com",
+        "xbox.com",
+        "www.xbox.com",
+        "xboxlive.com",
+        "xboxservices.com",
+    ]
+    .contains(&h.as_str())
+        || h.ends_with(".xbox.com")
+        || h.ends_with(".xboxlive.com")
+        || h.ends_with(".xboxservices.com")
+    {
         return GROUP_MICROSOFT_XBOX;
     }
     // Google AI projects are intentionally not part of the Google secondary group.
-    if h.contains("gemini") || h.contains("aistudio") || h.contains("notebooklm") || h.ends_with(".ai.google") || h.contains("labs.google") {
+    if h.contains("gemini")
+        || h.contains("aistudio")
+        || h.contains("notebooklm")
+        || h.ends_with(".ai.google")
+        || h.contains("labs.google")
+    {
         return GROUP_OTHER;
     }
-    if h == "google.com" || h.ends_with(".google.com") || h.ends_with(".googleusercontent.com") || h.ends_with(".googleapis.com") || h == "gstatic.com" || h.ends_with(".gstatic.com") {
+    if h == "google.com"
+        || h.ends_with(".google.com")
+        || h.ends_with(".googleusercontent.com")
+        || h.ends_with(".googleapis.com")
+        || h == "gstatic.com"
+        || h.ends_with(".gstatic.com")
+    {
         return GROUP_GOOGLE;
     }
-    if h == "cloudflare.com" || h.ends_with(".cloudflare.com") || h.ends_with(".cloudflare.net") || h == "cloudflare-dns.com" || h == "one.one.one.one" {
+    if h == "cloudflare.com"
+        || h.ends_with(".cloudflare.com")
+        || h.ends_with(".cloudflare.net")
+        || h == "cloudflare-dns.com"
+        || h == "one.one.one.one"
+    {
         return GROUP_CLOUDFLARE;
     }
     GROUP_OTHER
@@ -197,7 +292,11 @@ pub fn main_domains(limit: usize) -> Vec<(String, String)> {
 /// Без curl проба не работает — тест обязан честно отказаться, а не «всё fail».
 pub fn curl_available() -> bool {
     if let Some(root) = std::env::var_os("SystemRoot") {
-        if std::path::Path::new(&root).join("System32").join("curl.exe").is_file() {
+        if std::path::Path::new(&root)
+            .join("System32")
+            .join("curl.exe")
+            .is_file()
+        {
             return true;
         }
     }
@@ -208,7 +307,9 @@ pub fn curl_available() -> bool {
 
 fn curl_exe() -> String {
     if let Some(root) = std::env::var_os("SystemRoot") {
-        let p = std::path::Path::new(&root).join("System32").join("curl.exe");
+        let p = std::path::Path::new(&root)
+            .join("System32")
+            .join("curl.exe");
         if p.is_file() {
             return p.to_string_lossy().into_owned();
         }
@@ -256,7 +357,9 @@ pub fn activate_ipset_any(paths: &[std::path::PathBuf]) -> IpsetAnyGuard {
                 continue; // вернуть нечего — live не трогаем
             }
         }
-        let Ok(content) = std::fs::read(live) else { continue };
+        let Ok(content) = std::fs::read(live) else {
+            continue;
+        };
         if content.iter().all(|b| b.is_ascii_whitespace()) {
             continue; // уже «any» — трогать нечего
         }
@@ -390,7 +493,11 @@ pub struct ProgressState {
 
 /// Пишет план теста и чистит маркеры прошлого прогона. Возвращает
 /// (путь к плану, путь к файлу прогресса).
-pub fn write_plan(data: &Path, steps: &[TestStep], domains: &[(String, String)]) -> Result<(PathBuf, PathBuf), String> {
+pub fn write_plan(
+    data: &Path,
+    steps: &[TestStep],
+    domains: &[(String, String)],
+) -> Result<(PathBuf, PathBuf), String> {
     let logs = data.join("logs");
     std::fs::create_dir_all(&logs).map_err(|e| format!("logs: {e}"))?;
     let plan_path = logs.join("test-plan.json");
@@ -439,7 +546,9 @@ pub fn read_progress(out_path: &Path) -> Option<ProgressState> {
 
 /// Частичные результаты из файла прогресса — для сохранения при отмене теста.
 pub fn salvage_progress(out_path: &Path) -> Vec<StrategyResult> {
-    read_progress(out_path).map(|st| st.results).unwrap_or_default()
+    read_progress(out_path)
+        .map(|st| st.results)
+        .unwrap_or_default()
 }
 
 /// Спит `ms`, но просыпается раньше, если появился стоп-флаг.
@@ -459,8 +568,12 @@ fn sleep_or_stop(flag: &Path, ms: u64) -> bool {
 
 /// Точка входа режима `--test-runner` (вызывается из main до старта Tauri).
 pub fn run_test_runner(plan_path: &Path) -> i32 {
-    let Ok(text) = std::fs::read_to_string(plan_path) else { return 2 };
-    let Ok(plan) = serde_json::from_str::<TestPlan>(&text) else { return 2 };
+    let Ok(text) = std::fs::read_to_string(plan_path) else {
+        return 2;
+    };
+    let Ok(plan) = serde_json::from_str::<TestPlan>(&text) else {
+        return 2;
+    };
     let _ = std::fs::write(&plan.pid, std::process::id().to_string());
     let flag = PathBuf::from(&plan.flag);
     let out = PathBuf::from(&plan.out);
@@ -502,7 +615,14 @@ pub fn run_test_runner(plan_path: &Path) -> i32 {
     0
 }
 
-fn write_progress(out: &Path, index: usize, total: usize, cur: Option<&TestStep>, results: &[StrategyResult], done: bool) {
+fn write_progress(
+    out: &Path,
+    index: usize,
+    total: usize,
+    cur: Option<&TestStep>,
+    results: &[StrategyResult],
+    done: bool,
+) {
     let state = ProgressState {
         index,
         total,
@@ -528,7 +648,8 @@ fn spawn_engine(step: &TestStep, err_file: &Path, out_file: &Path) -> Result<Chi
         .args(&step.args)
         .stdout(out)
         .stderr(err);
-    cmd.spawn().map_err(|e| format!("не удалось запустить движок: {e}"))
+    cmd.spawn()
+        .map_err(|e| format!("не удалось запустить движок: {e}"))
 }
 
 fn child_alive(child: &mut Child) -> bool {
@@ -584,12 +705,22 @@ fn curl_probe(exe: &str, host: &str, label: &'static str, proto_args: &[&str]) -
     args.push("%{http_code} %{time_total}".into());
     args.push(format!("https://{host}/"));
     let out = crate::runner::hidden_command(exe).args(&args).output();
-    let fail = Probe { label, ok: false, code: "000".into(), ms: 0 };
+    let fail = Probe {
+        label,
+        ok: false,
+        code: "000".into(),
+        ms: 0,
+    };
     match out {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             match parse_curl_out(&stdout) {
-                Some((code, ms)) => Probe { label, ok: code != "000", code, ms },
+                Some((code, ms)) => Probe {
+                    label,
+                    ok: code != "000",
+                    code,
+                    ms,
+                },
                 None => fail,
             }
         }
@@ -613,11 +744,16 @@ fn curl_matrix(hosts: &[String], flag: &Path) -> HashMap<String, Vec<Probe>> {
     let mut queue: Vec<Q> = Vec::new();
     for h in hosts {
         for (label, args) in &protos {
-            queue.push(Q { host: h.clone(), label, args: args.clone() });
+            queue.push(Q {
+                host: h.clone(),
+                label,
+                args: args.clone(),
+            });
         }
     }
     let exe = curl_exe();
-    let mut res: HashMap<String, Vec<Probe>> = hosts.iter().map(|h| (h.clone(), Vec::new())).collect();
+    let mut res: HashMap<String, Vec<Probe>> =
+        hosts.iter().map(|h| (h.clone(), Vec::new())).collect();
     let mut i = 0usize;
     while i < queue.len() {
         if flag.exists() {
@@ -636,7 +772,17 @@ fn curl_matrix(hosts: &[String], flag: &Path) -> HashMap<String, Vec<Probe>> {
                 .collect();
             handles
                 .into_iter()
-                .map(|h| h.join().unwrap_or((usize::MAX, Probe { label: "?", ok: false, code: "000".into(), ms: 0 })))
+                .map(|h| {
+                    h.join().unwrap_or((
+                        usize::MAX,
+                        Probe {
+                            label: "?",
+                            ok: false,
+                            code: "000".into(),
+                            ms: 0,
+                        },
+                    ))
+                })
                 .collect()
         });
         for (j, p) in got {
@@ -649,6 +795,22 @@ fn curl_matrix(hosts: &[String], flag: &Path) -> HashMap<String, Vec<Probe>> {
         i = end;
     }
     res
+}
+
+/// TLS 1.3 проба: (прошло?, мс).
+pub(crate) fn tls13_measure(host: &str) -> (bool, u64) {
+    let p = curl_probe(&curl_exe(), host, "probe", &["--tlsv1.3", "--tls-max=1.3"]);
+    (p.ok, p.ms)
+}
+
+/// Проходит ли TLS 1.3 к хосту (для диагностики метода блокировки).
+pub(crate) fn tls13_ok(host: &str) -> bool {
+    curl_probe(&curl_exe(), host, "probe", &["--tlsv1.3", "--tls-max=1.3"]).ok
+}
+
+/// Проходит ли TLS 1.2 (фоллбэк: хост может не поддерживать 1.3).
+pub(crate) fn tls12_ok(host: &str) -> bool {
+    curl_probe(&curl_exe(), host, "probe", &["--tlsv1.2", "--tls-max=1.2"]).ok
 }
 
 /// Замер сайта для сканера диагностики: ok = хоть один протокол ответил,
@@ -671,7 +833,11 @@ pub(crate) fn site_measure(host: &str) -> crate::scanner::PhaseMeasure {
     crate::scanner::PhaseMeasure {
         ok,
         ms: best.unwrap_or(0),
-        detail: if ok { "есть ответ".into() } else { "нет ответа".into() },
+        detail: if ok {
+            "есть ответ".into()
+        } else {
+            "нет ответа".into()
+        },
     }
 }
 
@@ -701,7 +867,12 @@ fn rows_from_matrix(hosts: &[String], m: &HashMap<String, Vec<Probe>>) -> Vec<Ro
                     }
                 }
             }
-            Row { host: h.clone(), ok, ms: best, detail: parts.join("; ") }
+            Row {
+                host: h.clone(),
+                ok,
+                ms: best,
+                detail: parts.join("; "),
+            }
         })
         .collect()
 }
@@ -724,9 +895,97 @@ fn ping_pass(hosts: &[String]) -> HashMap<String, bool> {
                 })
             })
             .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+}
+
+/// QUIC long-header датаграмма с «греированным» (неподдерживаемым) version.
+/// На такой пакет QUIC-сервер отвечает Version Negotiation — без расшифровки,
+/// значит проверка доступности UDP/443 не требует крипты (RFC 9000 §6.1).
+fn quic_probe_datagram(dcid: &[u8; 8], scid: &[u8; 8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(1200);
+    p.push(0xC0 | 0x0a); // long header + fixed bit
+    p.extend_from_slice(&[0x0a, 0x0a, 0x0a, 0x0a]); // greased version ?a?a?a?a
+    p.push(dcid.len() as u8);
+    p.extend_from_slice(dcid);
+    p.push(scid.len() as u8);
+    p.extend_from_slice(scid);
+    p.resize(1200, 0); // Initial ≥ 1200 байт — иначе серверы молчат
+    p
+}
+
+/// 8 «случайных» байт (xorshift от времени+pid; криптостойкость не нужна).
+fn rand8() -> [u8; 8] {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9e37_79b9_7f4a_7c15)
+        ^ (std::process::id() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
+    let mut x = seed | 1;
+    let mut out = [0u8; 8];
+    for b in out.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b = (x & 0xff) as u8;
+    }
+    out
+}
+
+/// Проба QUIC: отправляет Initial-форму и ждёт любой ответ (VN/Retry/Initial).
+fn quic_probe(host: &str, timeout: Duration) -> (bool, u64, String) {
+    use std::net::{ToSocketAddrs, UdpSocket};
+    let t0 = std::time::Instant::now();
+    let addr = match (host, 443u16).to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None => return (false, 0, "QUIC: нет адреса".into()),
+        },
+        Err(_) => return (false, 0, "QUIC: DNS".into()),
+    };
+    let sock = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(_) => return (false, 0, "QUIC: сокет".into()),
+    };
+    let _ = sock.set_read_timeout(Some(timeout));
+    let dgram = quic_probe_datagram(&rand8(), &rand8());
+    if sock.send_to(&dgram, addr).is_err() {
+        return (
+            false,
+            t0.elapsed().as_millis() as u64,
+            "QUIC: отправка".into(),
+        );
+    }
+    let mut buf = [0u8; 1500];
+    match sock.recv(&mut buf) {
+        Ok(n) if n >= 5 => {
+            let ver = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+            let what = if ver == 0 { "VN" } else { "ответ" };
+            (
+                true,
+                t0.elapsed().as_millis() as u64,
+                format!("QUIC ok ({what})"),
+            )
+        }
+        Ok(_) => (true, t0.elapsed().as_millis() as u64, "QUIC ok".into()),
+        Err(_) => (false, t0.elapsed().as_millis() as u64, "QUIC блок".into()),
+    }
+}
+
+/// QUIC-проба всех хостов параллельно (информационно, в detail строки).
+fn quic_pass(hosts: &[String]) -> HashMap<String, (bool, String)> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = hosts
+            .iter()
+            .map(|h| {
+                let h2 = h.clone();
+                s.spawn(move || (h2.clone(), quic_probe(&h2, Duration::from_millis(1500))))
+            })
+            .collect();
         handles
             .into_iter()
             .filter_map(|h| h.join().ok())
+            .map(|(h, (ok, _, d))| (h, (ok, d)))
             .collect()
     })
 }
@@ -735,8 +994,21 @@ fn ping_pass(hosts: &[String]) -> HashMap<String, bool> {
 /// матрица проб + повтор упавших, ICMP-пинг, сборка групп. Движок гасится.
 fn measure_step(plan: &TestPlan, step: &TestStep) -> StrategyResult {
     let out_path = PathBuf::from(&plan.out);
-    let dir = out_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-    let safe: String = step.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' }).collect();
+    let dir = out_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let safe: String = step
+        .id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let err_file = dir.join(format!("run-{safe}.err.txt"));
     let out_file = dir.join(format!("run-{safe}.out.txt"));
     let flag_path = PathBuf::from(&plan.flag);
@@ -814,7 +1086,11 @@ fn measure_step(plan: &TestPlan, step: &TestStep) -> StrategyResult {
         let matrix = curl_matrix(&hosts, flag);
         let mut rows = rows_from_matrix(&hosts, &matrix);
         // Повтор для упавших хостов: одна оборванная сессия не приговор.
-        let failed: Vec<String> = rows.iter().filter(|r| !r.ok).map(|r| r.host.clone()).collect();
+        let failed: Vec<String> = rows
+            .iter()
+            .filter(|r| !r.ok)
+            .map(|r| r.host.clone())
+            .collect();
         if !failed.is_empty() && !flag.exists() {
             let m2 = curl_matrix(&failed, flag);
             let rows2 = rows_from_matrix(&failed, &m2);
@@ -828,7 +1104,16 @@ fn measure_step(plan: &TestPlan, step: &TestStep) -> StrategyResult {
                 }
             }
         }
-        let ping = if flag.exists() { HashMap::new() } else { ping_pass(&hosts) };
+        let ping = if flag.exists() {
+            HashMap::new()
+        } else {
+            ping_pass(&hosts)
+        };
+        let quic = if flag.exists() {
+            HashMap::new()
+        } else {
+            quic_pass(&hosts)
+        };
         let mut doms: Vec<DomainResult> = Vec::new();
         for d in &plan.domains {
             let (ok, ms, detail) = rows
@@ -836,7 +1121,15 @@ fn measure_step(plan: &TestPlan, step: &TestStep) -> StrategyResult {
                 .find(|r| r.host == d.host)
                 .map(|r| (r.ok, r.ms, r.detail.clone()))
                 .unwrap_or((false, 0, String::new()));
-            let pingmark = if ping.get(&d.host).copied().unwrap_or(false) { "ping ok" } else { "ping fail" };
+            let pingmark = if ping.get(&d.host).copied().unwrap_or(false) {
+                "ping ok"
+            } else {
+                "ping fail"
+            };
+            let quicmark = quic
+                .get(&d.host)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| "QUIC н/д".to_string());
             doms.push(DomainResult {
                 key: d.key.clone(),
                 host: d.host.clone(),
@@ -844,7 +1137,7 @@ fn measure_step(plan: &TestPlan, step: &TestStep) -> StrategyResult {
                 group_label: Some(d.group_label.clone()),
                 ok,
                 ms,
-                detail: format!("{detail}; {pingmark}"),
+                detail: format!("{detail}; {pingmark}; {quicmark}"),
             });
         }
         res.score = doms.iter().filter(|d| d.ok).count() as u32;
@@ -864,7 +1157,11 @@ fn measure_step(plan: &TestPlan, step: &TestStep) -> StrategyResult {
                 .filter(|d| d.group.as_deref() == Some(gid.as_str()) && d.ok)
                 .count() as u32;
             let is_music = gid == GROUP_YOUTUBE_MUSIC.id;
-            let ok = if is_music { passed > 0 } else { passed > 0 && passed * 2 >= total };
+            let ok = if is_music {
+                passed > 0
+            } else {
+                passed > 0 && passed * 2 >= total
+            };
             res.groups.push(GroupResult {
                 id: gid,
                 label: first.group_label.clone(),
@@ -887,12 +1184,21 @@ fn measure_step(plan: &TestPlan, step: &TestStep) -> StrategyResult {
 
 /// Группирует профили по типу стратегии для UI.
 pub fn group_of(p: &Profile) -> String {
-    let kind = if p.source.as_deref().is_some_and(|s| s.starts_with("preset:")) {
+    let kind = if p
+        .source
+        .as_deref()
+        .is_some_and(|s| s.starts_with("preset:"))
+    {
         "preset"
     } else {
         "bat"
     };
-    format!("{kind} · {}", crate::config::engine_def(&p.engine).map(|d| d.label).unwrap_or(p.engine.as_str()))
+    format!(
+        "{kind} · {}",
+        crate::config::engine_def(&p.engine)
+            .map(|d| d.label)
+            .unwrap_or(p.engine.as_str())
+    )
 }
 
 /// Текстовая сводка результатов теста для журнала/отчёта: таблица стратегий
@@ -923,7 +1229,11 @@ pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String
     out.push_str(&format!("{best}\r\n\r\n"));
     for r in &sorted {
         let state = if !r.started {
-            let err: String = r.error.clone().unwrap_or_default().replace(['\r', '\n'], " ");
+            let err: String = r
+                .error
+                .clone()
+                .unwrap_or_default()
+                .replace(['\r', '\n'], " ");
             let err: String = err.chars().take(120).collect();
             crate::texts::result_not_started(&crate::human::humanize(&err))
         } else if r.critical_ok {
@@ -965,7 +1275,11 @@ pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String
         }
         let total = hosts.len();
         hosts.truncate(12);
-        let more = if total > 12 { format!(" … ещё {}", total - 12) } else { String::new() };
+        let more = if total > 12 {
+            format!(" … ещё {}", total - 12)
+        } else {
+            String::new()
+        };
         bad.push(format!(
             "  {} ({}/{}): {}{}",
             r.name,
@@ -989,8 +1303,13 @@ pub fn results_text(results: &[StrategyResult], best_id: Option<&str>) -> String
 pub fn summarize(results: &[StrategyResult]) -> (Vec<StrategyResult>, Option<String>) {
     let mut v = results.to_vec();
     // Не стартовавшая стратегия не может считаться прошедшей критические группы.
-    let critical_passed =
-        |r: &StrategyResult| if r.started { r.groups.iter().filter(|g| g.critical && g.ok).count() } else { 0 };
+    let critical_passed = |r: &StrategyResult| {
+        if r.started {
+            r.groups.iter().filter(|g| g.critical && g.ok).count()
+        } else {
+            0
+        }
+    };
     let avg_ms = |r: &StrategyResult| -> u64 {
         if r.domains.is_empty() {
             u64::MAX
@@ -1006,13 +1325,28 @@ pub fn summarize(results: &[StrategyResult]) -> (Vec<StrategyResult>, Option<Str
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     // первая в отсортированном списке, прошедшая критические группы — лучшая
-    let best = v.iter().find(|r| r.started && r.critical_ok).map(|r| r.id.clone());
+    let best = v
+        .iter()
+        .find(|r| r.started && r.critical_ok)
+        .map(|r| r.id.clone());
     (v, best)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quic_probe_datagram_is_wellformed() {
+        let d = quic_probe_datagram(&[1, 2, 3, 4, 5, 6, 7, 8], &[9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(d.len(), 1200);
+        assert_eq!(d[0] & 0x80, 0x80, "fixed bit");
+        assert_eq!(&d[1..5], &[0x0a, 0x0a, 0x0a, 0x0a], "greased version");
+        assert_eq!(d[5], 8);
+        assert_eq!(&d[6..14], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(d[14], 8);
+        assert_eq!(&d[15..23], &[9, 10, 11, 12, 13, 14, 15, 16]);
+    }
 
     #[test]
     fn ipset_heal_restores_backup_when_live_empty() {
@@ -1095,7 +1429,11 @@ mod tests {
             mk("fast", true, 100),
             mk("no-critical", false, 10),
         ]);
-        assert_eq!(best.as_deref(), Some("fast"), "при равных очках выигрывает быстрая");
+        assert_eq!(
+            best.as_deref(),
+            Some("fast"),
+            "при равных очках выигрывает быстрая"
+        );
         assert_eq!(v[0].id, "fast");
         assert_eq!(v[2].id, "no-critical", "без критических групп — в конце");
     }
@@ -1130,7 +1468,11 @@ mod tests {
                     detail: "timeout".into(),
                 },
             ],
-            error: if started { None } else { Some("process exited immediately".into()) },
+            error: if started {
+                None
+            } else {
+                Some("process exited immediately".into())
+            },
             groups: vec![
                 GroupResult {
                     id: "youtube".into(),
@@ -1162,12 +1504,21 @@ mod tests {
             ],
             Some("a"),
         );
-        assert!(text.contains("Лучшая стратегия: general · ALT11 (84/115)"), "{text}");
+        assert!(
+            text.contains("Лучшая стратегия: general · ALT11 (84/115)"),
+            "{text}"
+        );
         assert!(text.contains(crate::texts::RESULT_CRIT_OK), "{text}");
         assert!(text.contains(crate::texts::RESULT_CRIT_FAIL), "{text}");
-        assert!(text.contains("не запустилась: Движок сразу завершился"), "{text}");
         assert!(
-            text.contains(&format!("{} (3/115): youtube.com, discord.com", "general · ALT2")),
+            text.contains("не запустилась: Движок сразу завершился"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "{} (3/115): youtube.com, discord.com",
+                "general · ALT2"
+            )),
             "упавшие критические хосты должны быть перечислены: {text}"
         );
         // Порядок строк — по очкам (лучший выше), не стартовавшая в конце.
@@ -1213,7 +1564,11 @@ mod tests {
         assert_eq!(d.len(), REQUIRED_DOMAINS.len());
         assert!(d.iter().any(|(_, h)| h == "cdn.discordapp.com"));
         assert!(d.iter().any(|(_, h)| h == "cdnjs.cloudflare.com"));
-        assert!(!d.iter().any(|(_, h)| h.chars().all(|c| c.is_ascii_digit() || c == '.')), "IP-целей в тесте быть не должно");
+        assert!(
+            !d.iter()
+                .any(|(_, h)| h.chars().all(|c| c.is_ascii_digit() || c == '.')),
+            "IP-целей в тесте быть не должно"
+        );
         // Ключи уникальны (ключ — полный слаг хоста).
         let keys: std::collections::HashSet<&String> = d.iter().map(|(k, _)| k).collect();
         assert_eq!(keys.len(), d.len(), "ключи целей должны быть уникальны");
@@ -1294,10 +1649,14 @@ mod tests {
             ("d".to_string(), "discord.com".to_string()),
         ];
         let (plan_path, out) = write_plan(&base, &steps, &domains).unwrap();
-        let plan: TestPlan = serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
+        let plan: TestPlan =
+            serde_json::from_str(&std::fs::read_to_string(&plan_path).unwrap()).unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.domains.len(), 2);
-        assert!(plan.domains.iter().all(|d| d.critical), "обе цели критические");
+        assert!(
+            plan.domains.iter().all(|d| d.critical),
+            "обе цели критические"
+        );
         assert!(plan.out.ends_with("test-out.json"));
         // План пишется без маркеров прошлого прогона.
         assert!(!base.join("logs/test-stop.flag").exists());
@@ -1373,7 +1732,10 @@ mod tests {
         assert!(write_retry(&live, b"1.2.3.0/24\n5.6.7.0/24\n"));
         {
             let _g = activate_ipset_any(std::slice::from_ref(&live));
-            assert!(read_retry(&live).is_empty(), "на время теста ipset пуст (any)");
+            assert!(
+                read_retry(&live).is_empty(),
+                "на время теста ipset пуст (any)"
+            );
             assert!(backup.is_file(), "оригинал сохранён в .test-backup");
         }
         assert_eq!(
@@ -1400,7 +1762,11 @@ mod tests {
             );
             assert!(read_retry(&live).is_empty(), "live снова в «any»");
         }
-        assert_eq!(read_retry(&live), b"9.9.9.0/24\n", "после Drop — снова валидный список");
+        assert_eq!(
+            read_retry(&live),
+            b"9.9.9.0/24\n",
+            "после Drop — снова валидный список"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

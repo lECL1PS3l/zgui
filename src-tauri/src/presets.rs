@@ -73,8 +73,12 @@ pub const BUILTIN_PRESETS_VERSION: &str = "2026.09.25";
 /// в оригинальном репо такой отдельной стратегии нет).
 /// Чистим ТОЛЬКО этот явный список: пресеты, доставленные по воздуху (OTA),
 /// могут иметь id, которых нет во вшитой таблице, и удалять их нельзя.
-pub const REMOVED_PRESET_IDS: [&str; 4] =
-    ["flowseal-general", "goodbyedpi-7", "goodbyedpi-8", "goodbyedpi-9"];
+pub const REMOVED_PRESET_IDS: [&str; 4] = [
+    "flowseal-general",
+    "goodbyedpi-7",
+    "goodbyedpi-8",
+    "goodbyedpi-9",
+];
 
 pub fn builtin_presets() -> Vec<PresetDef> {
     vec![
@@ -244,9 +248,41 @@ pub fn apply_engine_root(args: &[String], root: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Полная подготовка аргументов профиля к запуску: игровой фильтр, затем корень движка.
-pub fn prepare_args(args: &[String], root: &Path, tcp: &str, udp: &str) -> Vec<String> {
-    apply_engine_root(&crate::profiles::apply_game_filter(args, tcp, udp), root)
+/// Полная подготовка аргументов профиля к запуску: игровой фильтр, режим
+/// фильтра (домены/IP), затем корень движка.
+pub fn prepare_args(
+    args: &[String],
+    root: &Path,
+    tcp: &str,
+    udp: &str,
+    filter_mode: &str,
+) -> Vec<String> {
+    let gf = crate::profiles::apply_game_filter(args, tcp, udp);
+    apply_engine_root(&apply_filter_mode(&gf, root, filter_mode), root)
+}
+
+/// Переключает тип фильтра стратегии: «по доменам» (`--hostlist`) или «по IP»
+/// (`--ipset`). `auto` (или иной режим) — аргументы не трогаем. Подмена идёт
+/// только если соответствующий файл списка существует (иначе оставляем как есть).
+pub fn apply_filter_mode(args: &[String], root: &Path, mode: &str) -> Vec<String> {
+    if mode != "hostlist" && mode != "ipset" {
+        return args.to_vec();
+    }
+    let lists = root.join("lists");
+    let host = lists.join("list-general.txt");
+    let ipset = lists.join("ipset-all.txt");
+    args.iter()
+        .map(|a| {
+            let lower = a.to_ascii_lowercase();
+            if mode == "hostlist" && lower.starts_with("--ipset=") && host.is_file() {
+                format!("--hostlist={}", host.display())
+            } else if mode == "ipset" && lower.starts_with("--hostlist=") && ipset.is_file() {
+                format!("--ipset={}", ipset.display())
+            } else {
+                a.clone()
+            }
+        })
+        .collect()
 }
 
 /// JSON-набор вшитых пресетов для ассета релиза `presets.json`. Формат читает
@@ -286,20 +322,36 @@ mod tests {
         let ps = builtin_presets();
         // Пресеты flowseal мы вырезали: стратегии там — .bat-файлы движка,
         // а наш старый `flowseal-general` был дубликатом general.bat.
-        assert!(!ps.iter().any(|p| p.id == "flowseal-general"), "дубликат general.bat не должен вернуться");
-        assert!(ps.iter().any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
-        assert!(ps.iter().any(|p| p.engine == "goodbyedpi" && p.args.contains(&"-5")));
-        assert!(ps.iter().any(|p| p.engine == "dpibreak" && p.args.iter().any(|a| a.starts_with("-o"))));
+        assert!(
+            !ps.iter().any(|p| p.id == "flowseal-general"),
+            "дубликат general.bat не должен вернуться"
+        );
+        assert!(ps
+            .iter()
+            .any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
+        assert!(ps
+            .iter()
+            .any(|p| p.engine == "goodbyedpi" && p.args.contains(&"-5")));
+        assert!(ps
+            .iter()
+            .any(|p| p.engine == "dpibreak" && p.args.iter().any(|a| a.starts_with("-o"))));
 
         // Движки пресетов зарегистрированы, идентификаторы уникальны.
         for p in &ps {
-            assert!(crate::config::engine_def(p.engine).is_some(), "незарегистрированный движок: {}", p.engine);
+            assert!(
+                crate::config::engine_def(p.engine).is_some(),
+                "незарегистрированный движок: {}",
+                p.engine
+            );
         }
         let ids: std::collections::HashSet<&str> = ps.iter().map(|p| p.id).collect();
         assert_eq!(ids.len(), ps.len(), "дубликаты id пресетов");
 
         let out = apply_engine_root(
-            &["--lua-init=@%ENGINE_ROOT%lua/zapret-lib.lua".into(), "plain".into()],
+            &[
+                "--lua-init=@%ENGINE_ROOT%lua/zapret-lib.lua".into(),
+                "plain".into(),
+            ],
             Path::new(r"D:\e2"),
         );
         assert!(out[0].contains(r"D:\e2\lua\zapret-lib.lua") && !out[0].contains('%'));
@@ -313,8 +365,15 @@ mod tests {
         let json = preset_set_json("2026.09.24");
         let set = crate::updater::parse_preset_set(json.as_bytes()).unwrap();
         assert_eq!(set.version, "2026.09.24");
-        assert_eq!(set.presets.len(), builtin_presets().len(), "все пресеты должны пережить round-trip");
-        assert!(set.presets.iter().any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
+        assert_eq!(
+            set.presets.len(),
+            builtin_presets().len(),
+            "все пресеты должны пережить round-trip"
+        );
+        assert!(set
+            .presets
+            .iter()
+            .any(|p| p.engine == "zapret2" && p.args.iter().any(|a| a.contains("--lua-desync"))));
     }
 
     #[test]
@@ -327,6 +386,27 @@ mod tests {
         assert!(!valid_preset_id("a\\b"));
         assert!(!valid_preset_id("имя"));
         assert!(!valid_preset_id(&"x".repeat(PRESET_ID_MAX + 1)));
+    }
+
+    #[test]
+    fn filter_mode_swaps_ipset_and_hostlist() {
+        let root = std::env::temp_dir().join(format!("zgui-fm-{}", std::process::id()));
+        let lists = root.join("lists");
+        std::fs::create_dir_all(&lists).unwrap();
+        std::fs::write(lists.join("list-general.txt"), b"x").unwrap();
+        std::fs::write(lists.join("ipset-all.txt"), b"x").unwrap();
+        let args = vec![
+            "--ipset=%ENGINE_ROOT%lists/ipset-all.txt".to_string(),
+            "--new".to_string(),
+        ];
+        let got = apply_filter_mode(&args, &root, "hostlist");
+        assert!(got[0].starts_with("--hostlist=") && got[0].ends_with("list-general.txt"));
+        assert_eq!(got[1], "--new");
+        let got2 = apply_filter_mode(&["--hostlist=foo".to_string()], &root, "ipset");
+        assert!(got2[0].starts_with("--ipset=") && got2[0].ends_with("ipset-all.txt"));
+        // auto — аргументы не меняются.
+        assert_eq!(apply_filter_mode(&args, &root, "auto")[0], args[0]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

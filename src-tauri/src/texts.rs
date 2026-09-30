@@ -59,7 +59,11 @@ pub const STRATEGY_DIED_NO_ADMIN: &str =
     "Стратегия сразу завершилась. Похоже, нет прав администратора — включите «Всегда запускать программу от администратора» в «Настройках».";
 
 pub fn strategy_died(admin: bool, tail: &str) -> String {
-    let hint = if admin { STRATEGY_DIED } else { STRATEGY_DIED_NO_ADMIN };
+    let hint = if admin {
+        STRATEGY_DIED
+    } else {
+        STRATEGY_DIED_NO_ADMIN
+    };
     if tail.is_empty() {
         format!("{hint} Движок не выдал ни строки")
     } else {
@@ -101,7 +105,7 @@ pub fn service_remove_failed_code(code: i32) -> String {
 }
 
 pub fn process_stop_failed(code: i32) -> String {
-    format!("Процесс не закрылся (код {code}) — нужны права администратора")
+    format!("Процесс не закрылся (код {code}) — попробуйте остановить ещё раз")
 }
 
 pub const SERVICE_INSTALL_CONTEXT: &str = "Не удалось установить службу";
@@ -150,7 +154,8 @@ pub const TEST_ALREADY: &str = "Тест уже идёт";
 
 pub const TEST_NO_STRATEGIES: &str = "Нет стратегий для теста";
 
-pub const CURL_MISSING: &str = "Тест не работает без curl.exe. Обновите Windows или установите curl";
+pub const CURL_MISSING: &str =
+    "Тест не работает без curl.exe. Обновите Windows или установите curl";
 
 pub const TEST_NO_DOMAINS: &str = "Нет сайтов для проверки";
 
@@ -174,7 +179,8 @@ pub const TEST_STOPPED: &str = "Тест остановлен";
 
 pub const TEST_REUSED: &str = "Использованы прежние результаты — повторять тест не нужно";
 
-pub const WINWS_RUNNING: &str = "Оптимизация уже запущена в другом месте. Остановите её и повторите тест";
+pub const WINWS_RUNNING: &str =
+    "Оптимизация уже запущена в другом месте. Остановите её и повторите тест";
 
 pub fn best_strategy(name: &str) -> String {
     format!("Лучшая стратегия: «{name}»")
@@ -222,7 +228,7 @@ pub const RESULTS_FAILED_HEADER: &str = "Не открылись:";
 
 pub fn test_report_body(time: &str, count: usize, data: &str, tests: &str) -> String {
     format!(
-        "Zapret GUI — результаты теста стратегий\r\n\
+        "Z-GUI — результаты теста стратегий\r\n\
          Время         : {time}\r\n\
          Проверено     : {count} стратегий\r\n\
          Папка данных  : {data}\r\n\
@@ -304,9 +310,7 @@ pub fn hosts_up_to_date(path: &str) -> String {
 }
 
 pub fn hosts_downloaded(path: &str) -> String {
-    format!(
-        "Свежий hosts скачан: {path}. Скопируйте его в системный файл hosts (нужны права администратора)"
-    )
+    format!("Свежий hosts скачан: {path}. Замените системный файл hosts вручную")
 }
 
 // ---------------------------------------------------------------- обновления
@@ -395,9 +399,6 @@ pub const LOG_NOT_READY: &str = "Журнал ещё не готов";
 
 // ------------------------------------------------------------- автозапуск
 
-pub const SECOND_COPY: &str =
-    "Программа уже запущена. Закройте лишнюю копию — иначе настройки могут конфликтовать";
-
 pub const ENGINE_STOPPED: &str = "Движок остановился — смотрите «Журнал»";
 
 // ------------------------------------- перевод системных ошибок (human.rs)
@@ -405,7 +406,7 @@ pub const ENGINE_STOPPED: &str = "Движок остановился — смо
 pub const HUMAN_EMPTY: &str = "Неизвестная ошибка. Подробности — в «Журнале»";
 
 pub const HUMAN_ADMIN: &str =
-    "Windows попросит права администратора для запуска оптимизации. Включите «Всегда запускать программу от администратора» в «Настройках»";
+    "Для операции не хватает прав администратора. Подробности — в «Журнале»";
 
 pub const HUMAN_FILE_BUSY: &str = "Файл занят другой программой. Закройте её и повторите";
 
@@ -431,7 +432,7 @@ pub const HUMAN_BAD_VALUE: &str = "Недопустимое значение п�
 pub const HUMAN_ENGINE_DIED: &str = "Движок сразу завершился. Подробности — в «Журнале»";
 
 pub const HUMAN_LAUNCH: &str =
-    "Не удалось запустить процесс. Возможно, вы отклонили запрос прав администратора";
+    "Не удалось запустить процесс. Подробности — в «Журнале»";
 
 pub const HUMAN_PANIC: &str = "Внутренняя ошибка программы. Подробности — в «Журнале»";
 
@@ -439,4 +440,9 @@ pub const HUMAN_FILE_MISSING: &str = "Файл не найден. Проверь
 
 pub fn human_unexpected(raw: &str) -> String {
     format!("Непредвиденная ошибка: {raw} (подробности в «Журнале»)")
+}
+
+/// Тост античит-паузы: обнаружен античит — оптимизация приостановлена.
+pub fn anticheat_paused(name: &str) -> String {
+    format!("Обнаружен античит ({name}) — оптимизация приостановлена")
 }

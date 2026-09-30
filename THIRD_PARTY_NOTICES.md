@@ -66,8 +66,6 @@ Without you this project would not exist.
 ## tg-ws-proxy-rs
 
 - Source: https://github.com/AmantesNihilo/zapret-universal-interface (`crates/tg-ws-proxy-rs`)
-- Original upstream crate: https://github.com/valnesfjord/tg-ws-proxy-rs (the bundled
-  `crates/tg-ws-proxy-rs/LICENSE` names valnesfjord as the copyright holder)
 - License: **MIT**
 - Copyright: AmantesNihilo and contributors
 - Used as: Telegram MTProto → WebSocket bridge library (crypto, faketls, splitter, pool,

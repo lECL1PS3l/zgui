@@ -89,7 +89,13 @@ pub fn relaunch_as_admin() -> Result<bool, String> {
         ps_quote(&exe.to_string_lossy()),
     );
     let out = hidden_command("powershell.exe")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
         .output()
         .map_err(|e| e.to_string())?;
     Ok(out.status.code().unwrap_or(1) == 0)
@@ -269,7 +275,10 @@ impl LockedScript {
             ro.share_mode(1);
         }
         let file = ro.open(&path).map_err(|e| e.to_string())?;
-        Ok(Self { path, file: Some(file) })
+        Ok(Self {
+            path,
+            file: Some(file),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -323,12 +332,20 @@ pub fn spawn_direct(
 /// а обёртка через `cmd /c` ломается на разборе кавычек. Поэтому здесь — простой
 /// запуск без редиректов; логи в этом пути не собираются (для elevated GUI
 /// используется `spawn_direct`, который их пишет).
-pub fn write_launcher(exe: &Path, wd: &Path, args: &[String], pid_file: &Path) -> Result<LockedScript, String> {
+pub fn write_launcher(
+    exe: &Path,
+    wd: &Path,
+    args: &[String],
+    pid_file: &Path,
+) -> Result<LockedScript, String> {
     let script_path = pid_file.with_extension("ps1");
     let mut s = String::new();
     s.push_str(PS_HEADER);
     s.push('\n');
-    s.push_str(&format!("$pidFile = {}\n", ps_quote(&pid_file.to_string_lossy())));
+    s.push_str(&format!(
+        "$pidFile = {}\n",
+        ps_quote(&pid_file.to_string_lossy())
+    ));
     // Квотирование по правилам MS: кавычка внутри — `\"`, бэкслеши перед
     // кавычкой (включая хвостовые, `C:\dir\`) удваиваются. Простой
     // `.Replace('"','\"')` ломал путь с хвостовым бэкслешем.
@@ -338,7 +355,9 @@ pub fn write_launcher(exe: &Path, wd: &Path, args: &[String], pid_file: &Path) -
     s.push_str("  $bs = 0\n");
     s.push_str("  foreach ($ch in $a.ToCharArray()) {\n");
     s.push_str("    if ($ch -eq '\\') { $bs++; continue }\n");
-    s.push_str("    if ($ch -eq '\"') { $out += '\\' * ($bs * 2 + 1) + '\"'; $bs = 0; continue }\n");
+    s.push_str(
+        "    if ($ch -eq '\"') { $out += '\\' * ($bs * 2 + 1) + '\"'; $bs = 0; continue }\n",
+    );
     s.push_str("    if ($bs -gt 0) { $out += '\\' * $bs; $bs = 0 }\n");
     s.push_str("    $out += $ch\n");
     s.push_str("  }\n");
@@ -355,7 +374,11 @@ pub fn write_launcher(exe: &Path, wd: &Path, args: &[String], pid_file: &Path) -
 }
 
 /// Запускает лаунчер и ждёт появления pid-файла.
-pub fn spawn_and_wait_pid(script: &Path, pid_file: &Path, timeout: Duration) -> Result<u32, String> {
+pub fn spawn_and_wait_pid(
+    script: &Path,
+    pid_file: &Path,
+    timeout: Duration,
+) -> Result<u32, String> {
     let _ = fs::remove_file(pid_file);
     let _ = run_powershell(&["-File".into(), script.to_string_lossy().into_owned()]);
     let start = Instant::now();
@@ -391,7 +414,9 @@ pub fn pid_alive(pid: u32) -> bool {
     // вызов; проверок много: watcher-цикл 2 c, bootstrap, current_owner).
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if handle.is_null() {
             return false;
@@ -404,16 +429,16 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(windows))]
     {
-    let out = hidden_command("tasklist.exe")
-        .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
-        .output();
-    match out {
-        Ok(o) => {
-            let txt = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            txt.contains(&format!("\"{}\"", pid))
+        let out = hidden_command("tasklist.exe")
+            .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+            .output();
+        match out {
+            Ok(o) => {
+                let txt = String::from_utf8_lossy(&o.stdout).to_lowercase();
+                txt.contains(&format!("\"{}\"", pid))
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
-    }
     }
 }
 
@@ -475,8 +500,13 @@ pub fn stop_pid(pid: u32, data_dir: &Path) -> Result<(), String> {
         taskkill_direct(pid).unwrap_or(-1)
     } else {
         let script = LockedScript::write(
-            data_dir.join("logs").join(format!("kill_{}_{}.ps1", std::process::id(), pid)),
-            &format!("{}\ntry {{ taskkill /F /T /PID {} 2>$null | Out-Null }} catch {{}}\nexit 0", PS_HEADER, pid),
+            data_dir
+                .join("logs")
+                .join(format!("kill_{}_{}.ps1", std::process::id(), pid)),
+            &format!(
+                "{}\ntry {{ taskkill /F /T /PID {} 2>$null | Out-Null }} catch {{}}\nexit 0",
+                PS_HEADER, pid
+            ),
         )?;
         run_script_privileged(script.path())?
     };
@@ -490,7 +520,11 @@ pub fn stop_pid(pid: u32, data_dir: &Path) -> Result<(), String> {
     if wait_dead(pid, 4) {
         return Ok(());
     }
-    Err(crate::texts::process_stop_failed(if code == 0 { 1 } else { code }))
+    Err(crate::texts::process_stop_failed(if code == 0 {
+        1
+    } else {
+        code
+    }))
 }
 
 /// Прибивает несколько процессов и их деревья через один UAC.
@@ -508,11 +542,16 @@ pub fn stop_pids(pids: &[u32], data_dir: &Path) -> Result<(), String> {
         body.push_str(PS_HEADER);
         body.push('\n');
         for id in &alive {
-            body.push_str(&format!("try {{ taskkill /F /T /PID {} 2>$null | Out-Null }} catch {{}}\n", id));
+            body.push_str(&format!(
+                "try {{ taskkill /F /T /PID {} 2>$null | Out-Null }} catch {{}}\n",
+                id
+            ));
         }
         body.push_str("exit 0\n");
         let script = LockedScript::write(
-            data_dir.join("logs").join(format!("kill_multi_{}.ps1", std::process::id())),
+            data_dir
+                .join("logs")
+                .join(format!("kill_multi_{}.ps1", std::process::id())),
             &body,
         )?;
         run_script_privileged(script.path())?;
@@ -580,7 +619,10 @@ mod tests {
         let path = dir.join("s.ps1");
         let script = LockedScript::write(path.clone(), "Write-Host 1").unwrap();
         // Пока handle открыт, перезапись (подмена) файла запрещена.
-        assert!(fs::write(&path, "Write-Host 2").is_err(), "файл удалось перезаписать");
+        assert!(
+            fs::write(&path, "Write-Host 2").is_err(),
+            "файл удалось перезаписать"
+        );
         // Файл читается (PowerShell -File): защита не мешает запуску.
         assert!(fs::read(&path).is_ok());
         drop(script);
@@ -600,13 +642,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("probe.ps1");
-        let script = LockedScript::write(path.clone(), "Write-Output 'ZGUI_LOCKED_OK'\nexit 0\n").unwrap();
+        let script =
+            LockedScript::write(path.clone(), "Write-Output 'ZGUI_LOCKED_OK'\nexit 0\n").unwrap();
 
         let out = run_powershell(&["-File".into(), script.path().to_string_lossy().into_owned()]);
         assert!(out.is_ok(), "PowerShell не смог прочитать скрипт: {out:?}");
         assert!(out.unwrap().contains("ZGUI_LOCKED_OK"));
 
-        assert!(fs::write(&path, "Write-Host x").is_err(), "перезапись под защитой должна блокироваться");
+        assert!(
+            fs::write(&path, "Write-Host x").is_err(),
+            "перезапись под защитой должна блокироваться"
+        );
         drop(script);
         assert!(!path.exists());
         let _ = fs::remove_dir_all(&dir);

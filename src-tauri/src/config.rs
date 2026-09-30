@@ -99,8 +99,7 @@ impl<'de> Deserialize<'de> for Roots {
 
 impl Roots {
     pub fn path(&self, engine: &str) -> Option<PathBuf> {
-        engine_def(engine)
-            .and_then(|_| self.map.get(engine).map(PathBuf::from))
+        engine_def(engine).and_then(|_| self.map.get(engine).map(PathBuf::from))
     }
     pub fn set(&mut self, engine: &str, p: Option<String>) {
         if engine_def(engine).is_none() {
@@ -128,6 +127,9 @@ pub struct Settings {
     #[serde(default = "default_port_range")]
     pub game_filter_udp: String,
     pub ipset_mode: String,
+    /// Режим фильтра при запуске: "auto" (как в стратегии), "hostlist" (по доменам) или "ipset" (по IP).
+    #[serde(default = "default_filter_mode")]
+    pub filter_mode: String,
     pub autostart_mode: String,
     pub autostart_profile: Option<String>,
     #[serde(default)]
@@ -156,6 +158,12 @@ pub struct Settings {
     /// Первый запуск: предложение «Всегда запускать от администратора» уже показано.
     #[serde(default)]
     pub admin_onboarded: bool,
+    /// Античит-пауза: гасить оптимизацию, когда обнаружен клиент античита (EAC/BE/Vanguard).
+    #[serde(default)]
+    pub anticheat_pause: bool,
+    /// Обучение-тур (coach marks) пройден — предлагаем один раз за установку.
+    #[serde(default)]
+    pub tour_done: bool,
 }
 
 fn default_tg_port() -> u16 {
@@ -170,6 +178,10 @@ fn default_port_range() -> String {
     "1024-65535".into()
 }
 
+fn default_filter_mode() -> String {
+    "auto".into()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -178,6 +190,7 @@ impl Default for Settings {
             game_filter_tcp: default_port_range(),
             game_filter_udp: default_port_range(),
             ipset_mode: "loaded".into(),
+            filter_mode: default_filter_mode(),
             autostart_mode: "none".into(),
             autostart_profile: None,
             always_admin: false,
@@ -189,6 +202,8 @@ impl Default for Settings {
             theme: default_theme(),
             boot_app: false,
             admin_onboarded: false,
+            anticheat_pause: false,
+            tour_done: false,
         }
     }
 }
@@ -207,7 +222,9 @@ pub struct Profile {
 
 impl Profile {
     pub fn exe_name(&self) -> &'static str {
-        engine_def(&self.engine).map(|d| d.exe).unwrap_or("winws.exe")
+        engine_def(&self.engine)
+            .map(|d| d.exe)
+            .unwrap_or("winws.exe")
     }
 }
 
@@ -235,6 +252,11 @@ pub struct UpdEntry {
     pub local_hash: Option<String>,
     pub size: u64,
     pub error: Option<String>,
+    /// Дельта строк текстового списка при обновлении (для показа «+N −M»).
+    #[serde(default)]
+    pub added: u64,
+    #[serde(default)]
+    pub removed: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -283,7 +305,9 @@ impl AppState {
     pub fn load(data: PathBuf) -> Self {
         let path = data.join("state.json");
         let raw = fs::read_to_string(&path).ok();
-        let parsed = raw.as_ref().and_then(|s| serde_json::from_str::<AppState>(s).ok());
+        let parsed = raw
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<AppState>(s).ok());
         // Битый state.json не должен молча превращаться в «программу без настроек»:
         // сохраняем копию рядом, чтобы пользователь мог показать её разработчику.
         if parsed.is_none() {
@@ -295,22 +319,25 @@ impl AppState {
                     crate::logger::log(
                         "warn",
                         "config",
-                        &format!("state.json повреждён — копия сохранена как {}", bad.display()),
+                        &format!(
+                            "state.json повреждён — копия сохранена как {}",
+                            bad.display()
+                        ),
                     );
                 }
             }
         }
         let mut st: AppState = parsed.unwrap_or_else(|| AppState {
-                data: data.clone(),
-                roots: Roots::default(),
-                settings: Settings::default(),
-                profiles: Vec::new(),
-                runtime: None,
-                updater: UpdaterCache::default(),
-                service_checked_at: 0,
-                service_running: None,
-                service_strategy: None,
-            });
+            data: data.clone(),
+            roots: Roots::default(),
+            settings: Settings::default(),
+            profiles: Vec::new(),
+            runtime: None,
+            updater: UpdaterCache::default(),
+            service_checked_at: 0,
+            service_running: None,
+            service_strategy: None,
+        });
         st.data = data;
         // Одноразовая миграция: старый дефолт автопроверки 6 ч → новый 72 ч.
         // Пользовательские значения, отличные от 6, не трогаются.
@@ -334,7 +361,12 @@ impl AppState {
         let json = match serde_json::to_string_pretty(self) {
             Ok(s) => s,
             Err(e) => {
-                crate::logger::log_code("err", "state", "E-SYS-001", &format!("сериализация настроек: {e}"));
+                crate::logger::log_code(
+                    "err",
+                    "state",
+                    "E-SYS-001",
+                    &format!("сериализация настроек: {e}"),
+                );
                 SAVE_FAILED.store(true, Ordering::SeqCst);
                 return false;
             }
@@ -350,7 +382,12 @@ impl AppState {
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
         }
-        crate::logger::log_code("err", "state", "E-SYS-002", "state.json не сохранён (файл занят или нет прав)");
+        crate::logger::log_code(
+            "err",
+            "state",
+            "E-SYS-002",
+            "state.json не сохранён (файл занят или нет прав)",
+        );
         SAVE_FAILED.store(true, Ordering::SeqCst);
         false
     }
@@ -428,14 +465,18 @@ pub fn file_sha256(path: &Path) -> Option<String> {
 pub fn decode_text(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let u16s: Vec<u16> = bytes[2..]
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let u16s: Vec<u16> = bytes[2..]
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect();
         return String::from_utf16_lossy(&u16s);
@@ -448,7 +489,9 @@ pub fn decode_text(bytes: &[u8]) -> String {
         let zeros = bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
         if zeros * 2 >= bytes.len() / 2 {
             let u16s: Vec<u16> = bytes
-                .as_chunks::<2>().0.iter()
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             return String::from_utf16_lossy(&u16s);
@@ -471,12 +514,26 @@ fn decode_oem(bytes: &[u8]) -> String {
     use windows_sys::Win32::Globalization::MultiByteToWideChar;
     const CP_OEMCP: u32 = 1;
     unsafe {
-        let len = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), bytes.len() as i32, std::ptr::null_mut(), 0);
+        let len = MultiByteToWideChar(
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            std::ptr::null_mut(),
+            0,
+        );
         if len <= 0 {
             return String::from_utf8_lossy(bytes).into_owned();
         }
         let mut buf = vec![0u16; len as usize];
-        let n = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), bytes.len() as i32, buf.as_mut_ptr(), len);
+        let n = MultiByteToWideChar(
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            buf.as_mut_ptr(),
+            len,
+        );
         if n <= 0 {
             return String::from_utf8_lossy(bytes).into_owned();
         }
@@ -532,7 +589,11 @@ pub fn find_exe(root: &Path, name: &str) -> Option<String> {
             let p = e.path();
             let ftype = e.file_type().ok();
             if ftype.map(|t| t.is_file()).unwrap_or(false) {
-                if p.file_name().and_then(|n| n.to_str()).map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false) {
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+                {
                     return Some(p);
                 }
             } else if ftype.map(|t| t.is_dir()).unwrap_or(false) {
@@ -559,9 +620,15 @@ mod tests {
         // Реестр: все четыре движка, exe-имена корректны.
         let all = engines();
         assert_eq!(all.len(), 4);
-        assert!(engine_def("zapret2").map(|d| d.exe == "winws2.exe").unwrap_or(false));
-        assert!(engine_def("goodbyedpi").map(|d| d.exe == "goodbyedpi.exe").unwrap_or(false));
-        assert!(engine_def("dpibreak").map(|d| d.exe == "dpibreak.exe").unwrap_or(false));
+        assert!(engine_def("zapret2")
+            .map(|d| d.exe == "winws2.exe")
+            .unwrap_or(false));
+        assert!(engine_def("goodbyedpi")
+            .map(|d| d.exe == "goodbyedpi.exe")
+            .unwrap_or(false));
+        assert!(engine_def("dpibreak")
+            .map(|d| d.exe == "dpibreak.exe")
+            .unwrap_or(false));
         assert!(engine_def("unknown").is_none());
 
         // Старый state.json: roots {"flowseal": "C:\\z"} → новая map.
@@ -644,8 +711,14 @@ mod tests {
         };
         let js = serde_json::to_string(&state).unwrap();
         let back: AppState = serde_json::from_str(&js).expect("state.json должен читаться обратно");
-        assert_eq!(back.roots.path(ENGINE_FLOWSEAL).unwrap(), PathBuf::from("C:\\z"));
-        assert!(back.settings.admin_onboarded, "admin_onboarded должен сохраниться");
+        assert_eq!(
+            back.roots.path(ENGINE_FLOWSEAL).unwrap(),
+            PathBuf::from("C:\\z")
+        );
+        assert!(
+            back.settings.admin_onboarded,
+            "admin_onboarded должен сохраниться"
+        );
         assert!(back.settings.always_admin);
         assert_eq!(back.settings.update_interval_hours, 5);
     }

@@ -8,7 +8,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn log_file_component(id: &str) -> String {
     let cleaned: String = id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if cleaned.is_empty() || cleaned.contains("..") {
         "profile".into()
@@ -55,22 +61,34 @@ pub fn decode_strategy_bytes(bytes: &[u8]) -> String {
     }
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let u16s: Vec<u16> = bytes[2..]
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let u16s: Vec<u16> = bytes[2..]
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
     if let Some(big_endian) = looks_like_utf16(bytes) {
         let u16s: Vec<u16> = bytes
-            .as_chunks::<2>().0.iter()
-            .map(|c| if big_endian { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) })
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| {
+                if big_endian {
+                    u16::from_be_bytes([c[0], c[1]])
+                } else {
+                    u16::from_le_bytes([c[0], c[1]])
+                }
+            })
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
@@ -212,11 +230,17 @@ pub fn validate_port_range(raw: &str) -> Option<String> {
             .split_once('-')
             .map(|(a, b)| (a.trim(), b.trim()))
             .unwrap_or((item, item));
-        let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) else { return None };
+        let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) else {
+            return None;
+        };
         if a == 0 || b == 0 || a > 65535 || b > 65535 || a > b {
             return None;
         }
-        parts.push(if a == b { a.to_string() } else { format!("{a}-{b}") });
+        parts.push(if a == b {
+            a.to_string()
+        } else {
+            format!("{a}-{b}")
+        });
     }
     if parts.is_empty() {
         None
@@ -295,7 +319,11 @@ mod tests {
         let bat = "@echo off\r\n%SystemRoot%\\System32\\... \r\n\"%~dp0bin\\winws.exe\" --wf-tcp-out=80,443 ^\r\n --filter-tcp=80 --new\r\n";
         let args = parse_flowseal_bat(bat, Path::new("C:\\zapret"));
         assert!(args.iter().any(|a| a.contains("--wf-tcp-out=80,443")));
-        assert!(args.len() >= 3, "ожидалось ≥3 аргумента, получено {:?}", args);
+        assert!(
+            args.len() >= 3,
+            "ожидалось ≥3 аргумента, получено {:?}",
+            args
+        );
     }
 
     #[test]
@@ -313,7 +341,12 @@ mod tests {
             .collect();
         let le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         let be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
-        for (label, bytes) in [("le+bom", le_bom), ("be+bom", be_bom), ("le", le), ("be", be)] {
+        for (label, bytes) in [
+            ("le+bom", le_bom),
+            ("be+bom", be_bom),
+            ("le", le),
+            ("be", be),
+        ] {
             assert_eq!(decode_strategy_bytes(&bytes), text, "кодировка {label}");
         }
         assert_eq!(decode_strategy_bytes(text.as_bytes()), text);
@@ -322,13 +355,19 @@ mod tests {
     #[test]
     fn caret_escapes_any_char_outside_quotes() {
         // `^ ` — литеральный пробел (не разделитель); в кавычках `^` обычный.
-        assert_eq!(tokenize_cmd("a^ b \"c^d\""), vec!["a b".to_string(), "c^d".to_string()]);
+        assert_eq!(
+            tokenize_cmd("a^ b \"c^d\""),
+            vec!["a b".to_string(), "c^d".to_string()]
+        );
     }
 
     #[test]
     fn log_component_neutralizes_path_traversal() {
         assert_eq!(log_file_component("general (ALT)"), "general__ALT_");
-        assert_eq!(log_file_component("preset:zapret2-youtube"), "preset_zapret2-youtube");
+        assert_eq!(
+            log_file_component("preset:zapret2-youtube"),
+            "preset_zapret2-youtube"
+        );
         assert_eq!(log_file_component(r"..\..\evil"), "profile");
         assert_eq!(log_file_component(""), "profile");
     }
@@ -336,17 +375,32 @@ mod tests {
     #[test]
     fn game_filter_ports_off() {
         assert_eq!(game_filter_ports("off", "", ""), ("12".into(), "12".into()));
-        assert_eq!(game_filter_ports("all", "", ""), ("1024-65535".into(), "1024-65535".into()));
-        assert_eq!(game_filter_ports("tcp", "1000-2000", ""), ("1000-2000".into(), "12".into()));
-        assert_eq!(game_filter_ports("udp", "мусор", "500-600"), ("12".into(), "500-600".into()));
+        assert_eq!(
+            game_filter_ports("all", "", ""),
+            ("1024-65535".into(), "1024-65535".into())
+        );
+        assert_eq!(
+            game_filter_ports("tcp", "1000-2000", ""),
+            ("1000-2000".into(), "12".into())
+        );
+        assert_eq!(
+            game_filter_ports("udp", "мусор", "500-600"),
+            ("12".into(), "500-600".into())
+        );
     }
 
     #[test]
     fn port_range_validation_matches_author_rules() {
         // Пример самого автора (исключение RTMP).
-        assert_eq!(validate_port_range("1024-1934,1936-65535").as_deref(), Some("1024-1934,1936-65535"));
+        assert_eq!(
+            validate_port_range("1024-1934,1936-65535").as_deref(),
+            Some("1024-1934,1936-65535")
+        );
         assert_eq!(validate_port_range("443").as_deref(), Some("443"));
-        assert_eq!(validate_port_range(" 12 , 14-20 ").as_deref(), Some("12,14-20"));
+        assert_eq!(
+            validate_port_range(" 12 , 14-20 ").as_deref(),
+            Some("12,14-20")
+        );
         assert_eq!(validate_port_range("0"), None);
         assert_eq!(validate_port_range("65536"), None);
         assert_eq!(validate_port_range("100-50"), None);

@@ -1,6 +1,5 @@
 use crate::config::{
-    AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL,
-    SERVICE_NAME,
+    AppState, Profile, Roots, Runtime, Settings, UpdaterCache, ENGINE_FLOWSEAL, SERVICE_NAME,
 };
 use crate::profiles as pf;
 use crate::runner as rn;
@@ -17,11 +16,15 @@ use std::sync::{Mutex, MutexGuard};
 /// Правило порядка: всегда берётся ДО `Global::state` (иначе дедлок).
 static OPS: Mutex<()> = Mutex::new(());
 
+/// Трей (экспериментальная фича): закрытие окна прячет его в трей, реальный
+/// выход — только через пункт «Выход» в меню трея (флаг ниже).
+static QUIT: AtomicBool = AtomicBool::new(false);
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-pub mod config;
 mod codes;
+pub mod config;
 mod diag;
 mod dns;
 mod human;
@@ -100,16 +103,31 @@ impl OpGuard {
         // Диагностика «зависло идёт операция…»: в журнале видно начало/конец
         // каждой операции — застрявшая останется без строки «завершилась».
         logger::log("info", "op", &format!("операция началась: {kind}"));
-        emit(app, "zgui:op", serde_json::json!({"running": true, "kind": kind}));
-        Self { app: app.clone(), kind }
+        emit(
+            app,
+            "zgui:op",
+            serde_json::json!({"running": true, "kind": kind}),
+        );
+        Self {
+            app: app.clone(),
+            kind,
+        }
     }
 }
 
 impl Drop for OpGuard {
     fn drop(&mut self) {
         self.app.state::<Global>().set_op_running(false);
-        logger::log("info", "op", &format!("операция завершилась: {}", self.kind));
-        emit(&self.app, "zgui:op", serde_json::json!({"running": false, "kind": self.kind}));
+        logger::log(
+            "info",
+            "op",
+            &format!("операция завершилась: {}", self.kind),
+        );
+        emit(
+            &self.app,
+            "zgui:op",
+            serde_json::json!({"running": false, "kind": self.kind}),
+        );
     }
 }
 
@@ -122,7 +140,10 @@ struct BusyGuard(AppHandle);
 impl BusyGuard {
     fn try_new(app: &AppHandle, busy_msg: &str) -> Result<Self, String> {
         let g = app.state::<Global>();
-        if g.busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if g.busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err(busy_msg.to_string());
         }
         Ok(Self(app.clone()))
@@ -149,7 +170,11 @@ fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
 fn log_updates(data: &std::path::Path, msg: &str) {
     use std::io::Write;
     let p = data.join("logs").join("updates.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+    {
         let _ = writeln!(f, "[{}] {}", crate::profiles::now_str(), msg);
     }
 }
@@ -176,7 +201,11 @@ fn root_info(roots: &Roots, engine: &str, exe_name: &str) -> RootInfo {
                 ready,
             }
         }
-        None => RootInfo { path: None, exe: None, ready: false },
+        None => RootInfo {
+            path: None,
+            exe: None,
+            ready: false,
+        },
     }
 }
 
@@ -292,7 +321,9 @@ fn bootstrap_impl(g: &Global) -> Bootstrap {
         flowseal: root_info(
             &s.roots,
             ENGINE_FLOWSEAL,
-            crate::config::engine_def(ENGINE_FLOWSEAL).map(|d| d.exe).unwrap_or("winws.exe"),
+            crate::config::engine_def(ENGINE_FLOWSEAL)
+                .map(|d| d.exe)
+                .unwrap_or("winws.exe"),
         ),
         engines,
         settings: s.settings.clone(),
@@ -352,7 +383,9 @@ pub fn heal_orphan_proxy() -> Option<String> {
             .and_then(|l| l.split_whitespace().nth(2))
             .map(|v| v.to_string())
     };
-    let enabled = read("ProxyEnable").map(|v| v.trim() == "0x1" || v.trim() == "1").unwrap_or(false);
+    let enabled = read("ProxyEnable")
+        .map(|v| v.trim() == "0x1" || v.trim() == "1")
+        .unwrap_or(false);
     if !enabled {
         return None;
     }
@@ -393,7 +426,9 @@ pub fn heal_orphan_proxy() -> Option<String> {
 
 /// Копирует отсутствующие файлы дерева (существующие не трогает).
 fn copy_tree_missing(from: &std::path::Path, to: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(from) else { return };
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return;
+    };
     for e in entries.flatten() {
         let src = e.path();
         let dst = to.join(e.file_name());
@@ -412,7 +447,11 @@ fn copy_tree_missing(from: &std::path::Path, to: &std::path::Path) {
 fn neutralize_author_autoupdate(root: &std::path::Path) {
     let flag = root.join("utils").join("check_updates.enabled");
     if flag.exists() {
-        let _ = std::fs::rename(&flag, root.join("utils").join("check_updates.enabled.zgui_disabled"));
+        let _ = std::fs::rename(
+            &flag,
+            root.join("utils")
+                .join("check_updates.enabled.zgui_disabled"),
+        );
         if flag.exists() {
             let _ = std::fs::remove_file(&flag);
         }
@@ -442,9 +481,18 @@ fn seed_flowseal_configs(root: &std::path::Path, data: &std::path::Path, setting
     copy_tree_missing(&data.join("catalog/flowseal/lists"), &lists);
     let seeds: [(&str, &str); 4] = [
         ("ipset-exclude-user.txt", "203.0.113.113/32\n"),
-        ("list-general-user.txt", "# Never leave this file empty\ndomain.example.abc\n"),
-        ("list-exclude-user.txt", "domain.example.abc\nsteamstatic.com\nsteamcontent.com\nsteamcdn-a.akamaihd.net\n"),
-        ("ipset-all-user.txt", "# Ваши подсети для оптимизации (по одной в строке)\n"),
+        (
+            "list-general-user.txt",
+            "# Never leave this file empty\ndomain.example.abc\n",
+        ),
+        (
+            "list-exclude-user.txt",
+            "domain.example.abc\nsteamstatic.com\nsteamcontent.com\nsteamcdn-a.akamaihd.net\n",
+        ),
+        (
+            "ipset-all-user.txt",
+            "# Ваши подсети для оптимизации (по одной в строке)\n",
+        ),
     ];
     for (f, content) in seeds {
         let p = lists.join(f);
@@ -458,7 +506,12 @@ fn seed_flowseal_configs(root: &std::path::Path, data: &std::path::Path, setting
 }
 
 #[tauri::command(async)]
-fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String) -> Result<RootInfo, String> {
+fn set_root(
+    app: AppHandle,
+    ga: State<'_, Global>,
+    engine: String,
+    path: String,
+) -> Result<RootInfo, String> {
     let g = ga.inner();
     let def = crate::config::engine_def(&engine).ok_or_else(|| texts::unknown_engine(&engine))?;
     let selected = PathBuf::from(&path);
@@ -474,7 +527,9 @@ fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String)
         let s = st(g);
         (s.data.clone(), s.settings.clone())
     };
-    st(g).roots.set(&engine, Some(root.to_string_lossy().into_owned()));
+    st(g)
+        .roots
+        .set(&engine, Some(root.to_string_lossy().into_owned()));
     if engine == ENGINE_FLOWSEAL {
         neutralize_author_autoupdate(&root);
         seed_flowseal_configs(&root, &data, &settings);
@@ -483,8 +538,16 @@ fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String)
     reload_bats_from_disk(&mut s);
     s.save();
     let info = root_info(&s.roots, &engine, exe_name);
-    logger::log("ok", "engine", &format!("корень {engine} задан: {}", root.display()));
-    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::engine_root_set(&engine, &root.display().to_string())}));
+    logger::log(
+        "ok",
+        "engine",
+        &format!("корень {engine} задан: {}", root.display()),
+    );
+    emit(
+        &app,
+        "zgui:toast",
+        serde_json::json!({"kind":"ok","text": texts::engine_root_set(&engine, &root.display().to_string())}),
+    );
     Ok(info)
 }
 
@@ -495,7 +558,9 @@ fn set_root(app: AppHandle, ga: State<'_, Global>, engine: String, path: String)
 fn provision_engines(s: &mut AppState) {
     let data = s.data.clone();
     for id in config::engine_ids() {
-        let Some(def) = crate::config::engine_def(id) else { continue };
+        let Some(def) = crate::config::engine_def(id) else {
+            continue;
+        };
         // Уже заданный корень: для flowseal нормализуем (мог быть записан как
         // каталог-обёртка) и обновляем списки/профили.
         if let Some(p) = s.roots.path(id) {
@@ -522,7 +587,9 @@ fn provision_engines(s: &mut AppState) {
         } else {
             crate::config::find_exe(&base, def.exe).map(|rel| {
                 let p = base.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-                p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.clone())
+                p.parent()
+                    .map(|d| d.to_path_buf())
+                    .unwrap_or_else(|| base.clone())
             })
         };
         let Some(root) = root else { continue };
@@ -532,7 +599,11 @@ fn provision_engines(s: &mut AppState) {
             seed_flowseal_configs(&root, &data, &s.settings);
             reload_bats_from_disk(s);
         }
-        logger::log("ok", "engine", &format!("движок {id} подхвачен: {}", root.display()));
+        logger::log(
+            "ok",
+            "engine",
+            &format!("движок {id} подхвачен: {}", root.display()),
+        );
     }
 }
 
@@ -552,7 +623,9 @@ fn ensure_presets(s: &mut AppState) {
         if removed.contains(&p.id) {
             return false;
         }
-        !p.source.as_deref().is_some_and(|src| src.starts_with("auto:"))
+        !p.source
+            .as_deref()
+            .is_some_and(|src| src.starts_with("auto:"))
     });
     if s.profiles.len() != before {
         logger::log(
@@ -583,7 +656,10 @@ fn ensure_presets(s: &mut AppState) {
                     continue;
                 }
                 let args = def.args_vec();
-                if existing.args != args || existing.name != def.name || existing.engine != def.engine {
+                if existing.args != args
+                    || existing.name != def.name
+                    || existing.engine != def.engine
+                {
                     existing.args = args;
                     existing.name = def.name.into();
                     existing.engine = def.engine.into();
@@ -606,12 +682,17 @@ fn ensure_presets(s: &mut AppState) {
     // иначе висят в списке как «битые» стратегии.
     let mut cache = tester::TestCache::load(&s.data);
     let before = cache.results.len();
-    cache.results.retain(|r| s.profiles.iter().any(|p| p.id == r.id));
+    cache
+        .results
+        .retain(|r| s.profiles.iter().any(|p| p.id == r.id));
     if cache.results.len() != before {
         logger::log(
             "info",
             "test",
-            &format!("удалены устаревшие результаты тестов: {}", before - cache.results.len()),
+            &format!(
+                "удалены устаревшие результаты тестов: {}",
+                before - cache.results.len()
+            ),
         );
         cache.save(&s.data);
     }
@@ -624,7 +705,6 @@ fn ensure_presets(s: &mut AppState) {
     }
 }
 
-
 /// Пользовательские профили больше не поддерживаются (программа работает
 /// только с авторскими конфигами). Удаляем ТОЛЬКО реально кастомные
 /// (`source` пустой): профили из авторских `.bat` (`builtin: false`,
@@ -636,7 +716,11 @@ fn drop_custom_profiles(s: &mut AppState) {
     s.profiles.retain(|p| p.builtin || p.source.is_some());
     let removed = before - s.profiles.len();
     if removed > 0 {
-        logger::log("info", "profiles", &format!("удалено пользовательских профилей: {removed}"));
+        logger::log(
+            "info",
+            "profiles",
+            &format!("удалено пользовательских профилей: {removed}"),
+        );
     }
 }
 
@@ -650,11 +734,14 @@ fn locate_exe(root: &std::path::Path, exe_name: &str) -> Result<PathBuf, String>
 
 fn stop_service(data: &std::path::Path) -> Result<(), String> {
     let script = rn::LockedScript::write(
-        data.join("logs").join(format!("svc_stop_{}.ps1", std::process::id())),
+        data.join("logs")
+            .join(format!("svc_stop_{}.ps1", std::process::id())),
         &format!(
             "{}\nnet stop {} 2>$null | Out-Null\n\
              if ((& sc.exe query {} | Out-String) -match 'RUNNING') {{ exit 1 }} else {{ exit 0 }}",
-            rn::PS_HEADER, SERVICE_NAME, SERVICE_NAME
+            rn::PS_HEADER,
+            SERVICE_NAME,
+            SERVICE_NAME
         ),
     )?;
     let code = rn::run_script_privileged(script.path())?;
@@ -697,15 +784,70 @@ fn do_stop(app: &AppHandle, g: &Global, silent: bool) -> Result<(), String> {
             }
         });
         if let Err(e) = stop_res {
-            logger::log_code("err", "stop", "E-STOP-001", &format!("остановка «{}» не удалась: {e}", rt.profile_id));
+            logger::log_code(
+                "err",
+                "stop",
+                "E-STOP-001",
+                &format!("остановка «{}» не удалась: {e}", rt.profile_id),
+            );
             return Err(texts::STOP_FAILED.into());
         }
         st(g).runtime = None;
         st(g).save();
-        logger::log("info", "stop", &format!("остановлено: {} (pid {}, через {})", rt.profile_id, rt.pid, rt.via));
-        emit(app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
+        // Секционный лог: вывод движка + итог по времени работы.
+        if rt.via != "service" {
+            let logs = data.join("logs");
+            let log_id = pf::log_file_component(&rt.profile_id);
+            let out = rn::tail(&logs.join(format!("stdout-{log_id}.txt")), 800);
+            let err = rn::tail(&logs.join(format!("stderr-{log_id}.txt")), 800);
+            let uptime = now_ts().saturating_sub(rt.started_at);
+            let started = out.contains("capture is started") || err.contains("capture is started");
+            logger::log("info", "launch", "=== ВЫВОД ДВИЖКА ===");
+            let cap = if started {
+                "перехват: запущен (capture is started)".to_string()
+            } else if uptime < 3 && out.trim().is_empty() && err.trim().is_empty() {
+                "перехват: движок остановлен слишком быстро — вывод не успел появиться".to_string()
+            } else {
+                "перехват: строка «capture is started» не найдена".to_string()
+            };
+            logger::log("info", "launch", &cap);
+            for (tag, txt) in [("stdout", out), ("stderr", err)] {
+                let t = one_line(&txt, 400);
+                if !t.is_empty() {
+                    logger::log("info", "launch", &format!("{tag}: {t}"));
+                }
+            }
+            logger::log("info", "launch", "=== СТОП ===");
+        }
+        logger::log(
+            "info",
+            "launch",
+            &format!(
+                "стоп: профиль=«{}»; работал ~{} с; способ={}",
+                rt.profile_id,
+                now_ts().saturating_sub(rt.started_at),
+                rt.via
+            ),
+        );
+        logger::log(
+            "info",
+            "stop",
+            &format!(
+                "остановлено: {} (pid {}, через {})",
+                rt.profile_id, rt.pid, rt.via
+            ),
+        );
+        emit(
+            app,
+            "zgui:status",
+            serde_json::json!({"running": false, "pid": null, "profileId": null}),
+        );
         if !silent {
-            emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::STOPPED_ONE}));
+            emit(
+                app,
+                "zgui:toast",
+                serde_json::json!({"kind":"ok","text": texts::STOPPED_ONE}),
+            );
         }
         Ok(())
     } else {
@@ -716,7 +858,12 @@ fn do_stop(app: &AppHandle, g: &Global, silent: bool) -> Result<(), String> {
         };
         if running == Some(true) {
             if let Err(e) = stop_service(&data) {
-                logger::log_code("err", "stop", "E-STOP-002", &format!("остановка службы не удалась: {e}"));
+                logger::log_code(
+                    "err",
+                    "stop",
+                    "E-STOP-002",
+                    &format!("остановка службы не удалась: {e}"),
+                );
                 return Err(texts::STOP_FAILED.into());
             }
             // Служба осталась установленной, но остановлена — фиксируем сразу,
@@ -724,10 +871,18 @@ fn do_stop(app: &AppHandle, g: &Global, silent: bool) -> Result<(), String> {
             let mut s = st(g);
             s.service_running = Some(false);
             s.save();
-            emit(app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
+            emit(
+                app,
+                "zgui:status",
+                serde_json::json!({"running": false, "pid": null, "profileId": null}),
+            );
         }
         if !silent {
-            emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::ALL_STOPPED}));
+            emit(
+                app,
+                "zgui:toast",
+                serde_json::json!({"kind":"ok","text": texts::ALL_STOPPED}),
+            );
         }
         Ok(())
     }
@@ -744,7 +899,12 @@ fn stop_all_own(app: &AppHandle, g: &Global) -> Result<(), String> {
     let (installed, running) = svc::service_state();
     if installed && running {
         if let Err(e) = stop_service(&data) {
-            logger::log_code("err", "stop", "E-STOP-003", &format!("служба не остановилась: {e}"));
+            logger::log_code(
+                "err",
+                "stop",
+                "E-STOP-003",
+                &format!("служба не остановилась: {e}"),
+            );
         }
     }
     let any_left = svc::any_winws_running();
@@ -753,9 +913,19 @@ fn stop_all_own(app: &AppHandle, g: &Global) -> Result<(), String> {
         // два фильтра WinDivert одновременно не работают, поэтому это всегда
         // конфликт — неважно, наша копия, старая версия или чужой запуск.
         let pids = svc::all_engine_pids(None);
-        logger::log_code("warn", "stop", "W-STOP-004", &format!("останавливаю движки: {:?}", pids));
+        logger::log_code(
+            "warn",
+            "stop",
+            "W-STOP-004",
+            &format!("останавливаю движки: {:?}", pids),
+        );
         if let Err(e) = rn::stop_pids(&pids, &data) {
-            logger::log_code("err", "stop", "E-STOP-005", &format!("движки не остановились: {e}"));
+            logger::log_code(
+                "err",
+                "stop",
+                "E-STOP-005",
+                &format!("движки не остановились: {e}"),
+            );
         }
     }
     // Под админом — тотальное добивание скриптом (имена + службы из реестра):
@@ -764,16 +934,30 @@ fn stop_all_own(app: &AppHandle, g: &Global) -> Result<(), String> {
     if rn::is_elevated() && (any_left || installed) {
         match svc::sweep_our_engines(&data) {
             Ok(services) if !services.is_empty() => {
-                logger::log_code("warn", "stop", "W-STOP-006", &format!("остановлены службы-движки: {:?}", services));
+                logger::log_code(
+                    "warn",
+                    "stop",
+                    "W-STOP-006",
+                    &format!("остановлены службы-движки: {:?}", services),
+                );
             }
             Ok(_) => {}
             Err(e) => {
                 // taskkill шумит на «процесс не найден» (PS 5.1 EAP=Stop даже при
                 // 2>$null); если движков в итоге нет — это не ошибка остановки.
                 if svc::any_winws_running() {
-                    logger::log_code("err", "stop", "E-STOP-005", &format!("тотальное добивание движков не удалось: {e}"));
+                    logger::log_code(
+                        "err",
+                        "stop",
+                        "E-STOP-005",
+                        &format!("тотальное добивание движков не удалось: {e}"),
+                    );
                 } else {
-                    logger::log("info", "stop", &format!("sweep завершился с шумом, движков нет: {e}"));
+                    logger::log(
+                        "info",
+                        "stop",
+                        &format!("sweep завершился с шумом, движков нет: {e}"),
+                    );
                 }
             }
         }
@@ -786,7 +970,12 @@ fn stop_all_own(app: &AppHandle, g: &Global) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     } else if svc::any_winws_running() {
-        logger::log_code("warn", "stop", "W-STOP-009", "движки не удалось остановить полностью — нужны права администратора");
+        logger::log_code(
+            "warn",
+            "stop",
+            "W-STOP-009",
+            "движки не удалось остановить полностью — нужны права администратора",
+        );
     }
     r
 }
@@ -800,7 +989,11 @@ fn maintenance_sweep() {
     // процессы, ни драйвер. Раньше состояние START_PENDING считалось
     // «остановлена», и sweep убивал только что поднятый winws службы.
     if svc::service_active() {
-        logger::log("info", "sweep", "служба владеет движком (запущена/запускается) — не трогаем");
+        logger::log(
+            "info",
+            "sweep",
+            "служба владеет движком (запущена/запускается) — не трогаем",
+        );
         return;
     }
     let pids = svc::all_engine_pids(None);
@@ -808,12 +1001,21 @@ fn maintenance_sweep() {
         if rn::kill_pid_direct(*pid) {
             logger::log("info", "sweep", &format!("движок остановлен (pid {pid})"));
         } else {
-            logger::log_code("warn", "sweep", "W-STOP-009", &format!("движок (pid {pid}) не остановлен — нужны права администратора"));
+            logger::log_code(
+                "warn",
+                "sweep",
+                "W-STOP-009",
+                &format!("движок (pid {pid}) не остановлен — нужны права администратора"),
+            );
         }
     }
     let cleaned = svc::cleanup_own_stray_drivers();
     if !cleaned.is_empty() {
-        logger::log("info", "windivert", &format!("сняты зависшие драйверы: {}", cleaned.join(", ")));
+        logger::log(
+            "info",
+            "windivert",
+            &format!("сняты зависшие драйверы: {}", cleaned.join(", ")),
+        );
     }
 }
 
@@ -836,7 +1038,11 @@ fn stop_running(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
     // Движок остановлен — единый sweep (добить остатки, снять драйверы).
     // При старте стратегии sweep не делаем: драйвер понадобится через секунду.
     maintenance_sweep();
-    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::ALL_STOPPED}));
+    emit(
+        &app,
+        "zgui:toast",
+        serde_json::json!({"kind":"ok","text": texts::ALL_STOPPED}),
+    );
     Ok(())
 }
 
@@ -847,15 +1053,49 @@ fn game_filter_ports_from(s: &Settings) -> (String, String) {
     pf::game_filter_ports(&s.game_filter, &s.game_filter_tcp, &s.game_filter_udp)
 }
 
+/// Сжимает многострочный вывод движка в одну строку (для журнала).
+fn one_line(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut prev_space = false;
+    let mut n = 0usize;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_space = true;
+            continue;
+        }
+        if n >= max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        n += 1;
+        prev_space = false;
+    }
+    out.trim_end().to_string()
+}
+
 fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     let (profile, root_path, settings, data) = {
         let s = st(g);
         let p = s.profile(id).cloned().ok_or_else(|| {
-            logger::log_code("err", "start", "E-START-001", &format!("профиль {id} не найден"));
+            logger::log_code(
+                "err",
+                "start",
+                "E-START-001",
+                &format!("профиль {id} не найден"),
+            );
             texts::PROFILE_NOT_FOUND.to_string()
         })?;
         let root = s.roots.path(&p.engine).ok_or_else(|| {
-            logger::log_code("warn", "start", "W-START-002", &format!("корень движка «{}» не задан", p.engine));
+            logger::log_code(
+                "warn",
+                "start",
+                "W-START-002",
+                &format!("корень движка «{}» не задан", p.engine),
+            );
             texts::engine_root_missing(&p.engine)
         })?;
         (p, root, s.settings.clone(), s.data.clone())
@@ -864,11 +1104,16 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     stop_all_own(app, g)?;
 
     let exe = locate_exe(&root_path, profile.exe_name()).map_err(|e| {
-        logger::log_code("err", "start", "E-START-003", &format!("{}: {e}", profile.name));
+        logger::log_code(
+            "err",
+            "start",
+            "E-START-003",
+            &format!("{}: {e}", profile.name),
+        );
         human::humanize(&e)
     })?;
     let (tcp, udp) = game_filter_ports_from(&settings);
-    let args = presets::prepare_args(&profile.args, &root_path, &tcp, &udp);
+    let args = presets::prepare_args(&profile.args, &root_path, &tcp, &udp, &settings.filter_mode);
 
     let logs = data.join("logs");
     let _ = std::fs::create_dir_all(&logs);
@@ -881,13 +1126,38 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     // Несуществующий wd ломает spawn (Windows «неверно задано имя папки»).
     let wd = {
         let bin = root_path.join("bin");
-        if bin.is_dir() { bin } else { exe.parent().map(|p| p.to_path_buf()).unwrap_or(root_path.clone()) }
+        if bin.is_dir() {
+            bin
+        } else {
+            exe.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(root_path.clone())
+        }
     };
 
     // Чистим старые логи: иначе при мгновенном выходе процесса в ошибку попадёт
     // содержимое прошлого запуска (в т.ч. в другой кодировке).
     let _ = std::fs::remove_file(&out_log);
     let _ = std::fs::remove_file(&err_log);
+
+    // Секционный лог запуска: понятный разбор «почему стартовало / не стартовало».
+    logger::log("info", "launch", "=== ЗАПУСК СТРАТЕГИИ ===");
+    logger::log(
+        "info",
+        "launch",
+        &format!(
+            "система: права администратора={}; движок={}; папка движка={}",
+            if rn::is_elevated() { "да" } else { "нет" },
+            profile.engine,
+            root_path.display()
+        ),
+    );
+    logger::log(
+        "info",
+        "launch",
+        &format!("конфиг: профиль=«{}» ({})", profile.name, profile.id),
+    );
+    logger::log("info", "launch", &format!("аргументы: {}", args.join(" ")));
 
     // Если GUI уже запущен от администратора — стартуем winws НАПРЯМУЮ:
     // мгновенно, с логами и корректным квотингом, без UAC и launcher-скриптов.
@@ -931,10 +1201,21 @@ fn do_start(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, String> {
     logger::log(
         "ok",
         "start",
-        &format!("запущена стратегия «{}» ({}, pid {})", profile.name, profile.engine, pid),
+        &format!(
+            "запущена стратегия «{}» ({}, pid {})",
+            profile.name, profile.engine, pid
+        ),
     );
-    emit(app, "zgui:status", serde_json::json!({"running": true, "pid": pid, "profileId": profile.id}));
-    emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::strategy_started(&profile.name)}));
+    emit(
+        app,
+        "zgui:status",
+        serde_json::json!({"running": true, "pid": pid, "profileId": profile.id}),
+    );
+    emit(
+        app,
+        "zgui:toast",
+        serde_json::json!({"kind":"ok","text": texts::strategy_started(&profile.name)}),
+    );
     Ok(runtime)
 }
 
@@ -957,18 +1238,31 @@ fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, Str
     } else {
         let (profile, root, args, data) = {
             let s = st(g);
-            let p = s.profile(id).cloned().ok_or_else(|| texts::PROFILE_NOT_FOUND.to_string())?;
+            let p = s
+                .profile(id)
+                .cloned()
+                .ok_or_else(|| texts::PROFILE_NOT_FOUND.to_string())?;
             let root = s
                 .roots
                 .path(&p.engine)
                 .ok_or_else(|| texts::engine_root_missing(&p.engine))?;
             let (tcp, udp) = game_filter_ports_from(&s.settings);
-            (p.clone(), root.clone(), presets::prepare_args(&p.args, &root, &tcp, &udp), s.data.clone())
+            (
+                p.clone(),
+                root.clone(),
+                presets::prepare_args(&p.args, &root, &tcp, &udp, &s.settings.filter_mode),
+                s.data.clone(),
+            )
         };
         // Один живой winws: снимаем процесс программы и старую службу перед пересозданием.
         stop_all_own(app, g)?;
         svc::install_service(&root, &profile, &args, &data).map_err(|e| {
-            logger::log_code("err", "service", "E-SVC-001", &format!("переключение службы не удалось: {e}"));
+            logger::log_code(
+                "err",
+                "service",
+                "E-SVC-001",
+                &format!("переключение службы не удалось: {e}"),
+            );
             human::with_context(texts::SERVICE_SWITCH_CONTEXT, &e)
         })?;
         logger::log(
@@ -983,8 +1277,16 @@ fn start_or_switch(app: &AppHandle, g: &Global, id: &str) -> Result<Runtime, Str
             s.runtime = None;
             s.save();
         }
-        emit(app, "zgui:status", serde_json::json!({"running": true, "pid": null, "profileId": profile.id}));
-        emit(app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::service_switched(&profile.name)}));
+        emit(
+            app,
+            "zgui:status",
+            serde_json::json!({"running": true, "pid": null, "profileId": profile.id}),
+        );
+        emit(
+            app,
+            "zgui:toast",
+            serde_json::json!({"kind":"ok","text": texts::service_switched(&profile.name)}),
+        );
         Ok(Runtime {
             profile_id: profile.id,
             pid: 0,
@@ -1066,7 +1368,12 @@ fn stop_test_runner(data: &std::path::Path, allow_uac: bool) {
             if rn::pid_alive(pid) && allow_uac {
                 match rn::stop_pids(&[pid], data) {
                     Ok(()) => {}
-                    Err(e) => logger::log_code("warn", "test", "W-TEST-001", &format!("раннер теста {pid}: {e}")),
+                    Err(e) => logger::log_code(
+                        "warn",
+                        "test",
+                        "W-TEST-001",
+                        &format!("раннер теста {pid}: {e}"),
+                    ),
                 }
             }
             // Даём процессу исчезнуть, чтобы маркеры не «ожили» следом.
@@ -1084,7 +1391,11 @@ fn stop_test_runner(data: &std::path::Path, allow_uac: bool) {
                     &format!("раннер теста {pid} ещё жив — остановится по стоп-флагу"),
                 );
             } else {
-                logger::log("info", "test", &format!("раннер теста остановлен (pid {pid})"));
+                logger::log(
+                    "info",
+                    "test",
+                    &format!("раннер теста остановлен (pid {pid})"),
+                );
             }
         }
     }
@@ -1182,7 +1493,10 @@ fn test_strategies(
                 .cloned()
                 .collect()
         } else {
-            all.iter().filter(|p| ids.contains(&p.id)).cloned().collect()
+            all.iter()
+                .filter(|p| ids.contains(&p.id))
+                .cloned()
+                .collect()
         };
         // Явный выбор с недоступным движком отсеивается ниже ЧЕСТНОЙ ошибкой
         // (engine_root_missing): молчаливая фильтрация прятала причину.
@@ -1218,9 +1532,10 @@ fn test_strategies(
     // Готовим шаги: exe, рабочий каталог, аргументы с game-filter.
     // Один лок state на все поля: несколько st(g) в одном выражении — дедлок
     // (std::sync::Mutex не реентерабельный).
-    let (tcp, udp) = {
+    let (tcp, udp, filter_mode) = {
         let s = st(g);
-        game_filter_ports_from(&s.settings)
+        let (t, u) = game_filter_ports_from(&s.settings);
+        (t, u, s.settings.filter_mode.clone())
     };
 
     // Мост «тест ⇄ автоподбор»: при `reuse` не гоняем повторно стратегии, которые
@@ -1253,7 +1568,10 @@ fn test_strategies(
                 logger::log(
                     "info",
                     "test",
-                    &format!("переиспользую прежние результаты: {} стратегий", reused.len()),
+                    &format!(
+                        "переиспользую прежние результаты: {} стратегий",
+                        reused.len()
+                    ),
                 );
             }
             (reused, to_run)
@@ -1266,14 +1584,21 @@ fn test_strategies(
 
     let mut steps: Vec<tester::TestStep> = Vec::new();
     for p in &profiles {
-        let root = st(g).roots.path(&p.engine).ok_or_else(|| {
-            texts::engine_root_missing(&p.name)
-        })?;
+        let root = st(g)
+            .roots
+            .path(&p.engine)
+            .ok_or_else(|| texts::engine_root_missing(&p.name))?;
         let exe = locate_exe(&root, p.exe_name())?;
-        let args = presets::prepare_args(&p.args, &root, &tcp, &udp);
+        let args = presets::prepare_args(&p.args, &root, &tcp, &udp, &filter_mode);
         let wd = {
             let bin = root.join("bin");
-            if bin.is_dir() { bin } else { exe.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| PathBuf::from(root.to_string_lossy().into_owned())) }
+            if bin.is_dir() {
+                bin
+            } else {
+                exe.parent()
+                    .map(|x| x.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from(root.to_string_lossy().into_owned()))
+            }
         };
         steps.push(tester::TestStep {
             id: p.id.clone(),
@@ -1293,7 +1618,11 @@ fn test_strategies(
             .as_ref()
             .and_then(|id| reused.iter().find(|r| &r.id == id))
             .map(|r| r.name.clone());
-        logger::log("info", "test", "повторный прогон не нужен — используем прежние результаты");
+        logger::log(
+            "info",
+            "test",
+            "повторный прогон не нужен — используем прежние результаты",
+        );
         set_test(
             &app,
             g,
@@ -1318,14 +1647,23 @@ fn test_strategies(
 
     let (plan_path, out_path) = tester::write_plan(&data, &steps, &custom)?;
     let plan_arg = plan_path.to_string_lossy().into_owned();
-    logger::log("info", "test", &format!("тест: план готов ({total_hint} шагов)", total_hint = steps.len()));
+    logger::log(
+        "info",
+        "test",
+        &format!(
+            "тест: план готов ({total_hint} шагов)",
+            total_hint = steps.len()
+        ),
+    );
     // Паритет с автором: на время прогона `ipset-all.txt` переводится в «any»
     // (пустой), после — возврат; Drop гарантирует восстановление при отмене.
     let ipset_paths: Vec<std::path::PathBuf> = {
         let mut seen = std::collections::HashSet::new();
         let mut v = Vec::new();
         for p in &profiles {
-            let Some(root) = roots_ok.path(&p.engine) else { continue };
+            let Some(root) = roots_ok.path(&p.engine) else {
+                continue;
+            };
             let f = root.join("lists").join("ipset-all.txt");
             if seen.insert(f.clone()) {
                 v.push(f);
@@ -1350,7 +1688,12 @@ fn test_strategies(
     // остановке) — тест даст мусор («A copy of winws is already running»).
     // Лучше честная ошибка, чем «ни одна стратегия не запустилась».
     if svc::any_winws_running() {
-        logger::log_code("err", "test", "E-TEST-002", "winws всё ещё запущен — тест отменён до остановки");
+        logger::log_code(
+            "err",
+            "test",
+            "E-TEST-002",
+            "winws всё ещё запущен — тест отменён до остановки",
+        );
         return Err(texts::WINWS_RUNNING.into());
     }
     logger::log(
@@ -1409,7 +1752,12 @@ fn test_strategies(
             Err(e) => Err(e.to_string()),
         };
         if let Err(e) = launch {
-            logger::log_code("err", "test", "E-TEST-003", &format!("раннер теста не стартовал: {e}"));
+            logger::log_code(
+                "err",
+                "test",
+                "E-TEST-003",
+                &format!("раннер теста не стартовал: {e}"),
+            );
             set_test(
                 &app2,
                 g2,
@@ -1446,7 +1794,12 @@ fn test_strategies(
             // Отмена (cancel_test) сменила эпоху: поллер прошлого прогона не
             // владеет ни состоянием, ни движком — молча выходим, уборку сделала отмена.
             if g2.test_epoch.load(Ordering::SeqCst) != epoch {
-                logger::log_code("warn", "test", "W-TEST-004", "поллер отменённого прогона завершился — уборку пропускаю");
+                logger::log_code(
+                    "warn",
+                    "test",
+                    "W-TEST-004",
+                    "поллер отменённого прогона завершился — уборку пропускаю",
+                );
                 return;
             }
             if test_marker(&data).0.exists() {
@@ -1511,7 +1864,12 @@ fn test_strategies(
         // Эпоха могла смениться на последней итерации (отмена): тогда не трогаем
         // ни маркеры, ни движок, ни итоговое состояние — это уже не наш прогон.
         if g2.test_epoch.load(Ordering::SeqCst) != epoch {
-            logger::log_code("warn", "test", "W-TEST-004", "поллер отменённого прогона завершился — уборку пропускаю");
+            logger::log_code(
+                "warn",
+                "test",
+                "W-TEST-004",
+                "поллер отменённого прогона завершился — уборку пропускаю",
+            );
             return;
         }
         let stopped = test_marker(&data).0.exists();
@@ -1557,8 +1915,19 @@ fn test_strategies(
         // Диагностика «стратегия не запустилась»: причины уже собраны раннером,
         // но в журнале их не было — при разборе жалоб не хватало фактов.
         for r in results.iter().filter(|r| !r.started) {
-            let err: String = r.error.clone().unwrap_or_default().chars().take(300).collect();
-            logger::log_code("err", "test", "E-TEST-005", &format!("«{}» не запустилась: {}", r.name, err));
+            let err: String = r
+                .error
+                .clone()
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
+            logger::log_code(
+                "err",
+                "test",
+                "E-TEST-005",
+                &format!("«{}» не запустилась: {}", r.name, err),
+            );
         }
 
         // Возвращаем движок, который остановили перед тестом: иначе пользователь
@@ -1570,7 +1939,12 @@ fn test_strategies(
                 &format!("возвращаю прежнюю стратегию «{}»", rt.profile_id),
             );
             if let Err(e) = do_start(&app2, g2, &rt.profile_id) {
-                logger::log_code("err", "test", "E-TEST-006", &format!("не удалось вернуть прежнюю стратегию: {e}"));
+                logger::log_code(
+                    "err",
+                    "test",
+                    "E-TEST-006",
+                    &format!("не удалось вернуть прежнюю стратегию: {e}"),
+                );
                 emit(
                     &app2,
                     "zgui:toast",
@@ -1579,7 +1953,12 @@ fn test_strategies(
             }
         } else if had_service {
             if let Err(e) = svc::start_service(&data) {
-                logger::log_code("err", "test", "E-TEST-007", &format!("не удалось вернуть службу zapret: {e}"));
+                logger::log_code(
+                    "err",
+                    "test",
+                    "E-TEST-007",
+                    &format!("не удалось вернуть службу zapret: {e}"),
+                );
             }
         }
 
@@ -1608,7 +1987,12 @@ fn test_strategies(
             .and_then(|id| results.iter().find(|r| &r.id == id))
             .map(|r| r.name.clone());
         if stopped {
-            logger::log_code("warn", "test", "W-TEST-008", "тест остановлен пользователем");
+            logger::log_code(
+                "warn",
+                "test",
+                "W-TEST-008",
+                "тест остановлен пользователем",
+            );
             // Пользователь резко остановил тест: частичные результаты не считаем итоговыми.
             let msg = texts::TEST_STOPPED.to_string();
             set_test(
@@ -1778,20 +2162,23 @@ fn tg_secret_of(ga: &State<'_, Global>) -> String {
 
 /// 16 случайных байт в hex. RandomState засевается ОС на каждый экземпляр.
 fn gen_tg_secret() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let mut out = String::with_capacity(32);
-    for i in 0..2u64 {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(now_ts());
-        h.write_u64(std::process::id() as u64 + i);
-        out.push_str(&format!("{:016x}", h.finish()));
+    // Криптостойкий источник ОС (CSPRNG); фоллбэк — только при отказе системы.
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        let t = now_ts();
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = ((t >> ((i % 8) * 8)) as u8) ^ (i as u8).wrapping_mul(31);
+        }
     }
-    out
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[tauri::command]
-async fn tg_start(app: AppHandle, ga: State<'_, Global>, port: Option<u16>) -> Result<telegram::TgStatus, String> {
+async fn tg_start(
+    app: AppHandle,
+    ga: State<'_, Global>,
+    port: Option<u16>,
+) -> Result<telegram::TgStatus, String> {
     let st = ga.inner().telegram.clone();
     let port = port.unwrap_or(1443);
     let secret = tg_secret_of(&ga);
@@ -1801,7 +2188,12 @@ async fn tg_start(app: AppHandle, ga: State<'_, Global>, port: Option<u16>) -> R
             logger::log("ok", "telegram", &format!("прокси запущен на порту {port}"));
             emit(&app, "zgui:tg", serde_json::json!({"running": true}));
         }
-        Err(e) => logger::log_code("err", "telegram", "E-TG-002", &format!("не удалось запустить прокси на порту {port}: {e}")),
+        Err(e) => logger::log_code(
+            "err",
+            "telegram",
+            "E-TG-002",
+            &format!("не удалось запустить прокси на порту {port}: {e}"),
+        ),
     }
     result
 }
@@ -1814,7 +2206,11 @@ fn tg_stop(app: AppHandle, ga: State<'_, Global>) -> telegram::TgStatus {
     emit(&app, "zgui:tg", serde_json::json!({"running": false}));
     // Прокси в Telegram удалить программно нельзя — подсказываем, как выключить.
     if was_running {
-        emit(&app, "zgui:toast", serde_json::json!({"kind":"info","text": texts::TG_PROXY_OFF_HINT}));
+        emit(
+            &app,
+            "zgui:toast",
+            serde_json::json!({"kind":"info","text": texts::TG_PROXY_OFF_HINT}),
+        );
     }
     ga.inner().telegram.status()
 }
@@ -1975,7 +2371,11 @@ async fn apply_best_strategy(app: AppHandle, id: String) -> Result<(), String> {
 fn sync_service_state(state: &mut AppState) {
     let (installed, running) = svc::service_state();
     let live = installed.then_some(running);
-    let strat = if installed { svc::service_strategy(&state.data) } else { None };
+    let strat = if installed {
+        svc::service_strategy(&state.data)
+    } else {
+        None
+    };
     if state.service_running != live || state.service_strategy != strat {
         state.service_running = live;
         state.service_strategy = strat;
@@ -1995,7 +2395,12 @@ fn cleanup_legacy_autostart(s: &mut AppState) {
     if rn::boot_task_exists() {
         match rn::remove_boot_task(&s.data) {
             Ok(_) => logger::log("info", "boot", "удалена старая задача автозапуска"),
-            Err(e) => logger::log_code("warn", "boot", "W-BOOT-001", &format!("не удалось снять старую задачу автозапуска: {e}")),
+            Err(e) => logger::log_code(
+                "warn",
+                "boot",
+                "W-BOOT-001",
+                &format!("не удалось снять старую задачу автозапуска: {e}"),
+            ),
         }
     }
     rn::remove_legacy_boot();
@@ -2036,7 +2441,12 @@ async fn net_reset(app: AppHandle) -> Result<netreset::NetResetResult, String> {
                 Ok(r)
             }
             Err(e) => {
-                logger::log_code("err", "netreset", "E-NET-002", &format!("восстановление сети не удалось: {e}"));
+                logger::log_code(
+                    "err",
+                    "netreset",
+                    "E-NET-002",
+                    &format!("восстановление сети не удалось: {e}"),
+                );
                 Err(human::with_context(texts::NET_RESET_FAILED, &e))
             }
         }
@@ -2121,7 +2531,12 @@ async fn hosts_update(app: AppHandle) -> Result<String, String> {
         let r = tools::hosts_update(&data);
         match &r {
             Ok(m) => logger::log("ok", "tools", m),
-            Err(e) => logger::log_code("err", "tools", "E-TOOL-003", &format!("обновление hosts: {e}")),
+            Err(e) => logger::log_code(
+                "err",
+                "tools",
+                "E-TOOL-003",
+                &format!("обновление hosts: {e}"),
+            ),
         }
         r
     })
@@ -2149,9 +2564,17 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
     let (profile, root, args, data) = {
         let s = st(g);
         let p = s.profile(&id).cloned().ok_or(texts::PROFILE_NOT_FOUND)?;
-        let root = s.roots.path(&p.engine).ok_or_else(|| texts::engine_root_missing(&p.engine))?;
+        let root = s
+            .roots
+            .path(&p.engine)
+            .ok_or_else(|| texts::engine_root_missing(&p.engine))?;
         let (tcp, udp) = game_filter_ports_from(&s.settings);
-        (p.clone(), root.clone(), presets::prepare_args(&p.args, &root, &tcp, &udp), s.data.clone())
+        (
+            p.clone(),
+            root.clone(),
+            presets::prepare_args(&p.args, &root, &tcp, &udp, &s.settings.filter_mode),
+            s.data.clone(),
+        )
     };
     // Служба должна остаться единственным движком: гасим текущий движок (профиль
     // или внешний winws) ДО установки — иначе winws службы выходит сразу с
@@ -2159,19 +2582,36 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
     // Тест сюда не попадёт — его держит op-лок. Ошибку уборки не считаем
     // фатальной: пояс по четырём именам в install_service добьёт остатки.
     if let Err(e) = stop_all_own(&app, g) {
-        logger::log_code("warn", "service", "W-SVC-002", &format!("перед установкой службы уборка движков не удалась: {e}"));
+        logger::log_code(
+            "warn",
+            "service",
+            "W-SVC-002",
+            &format!("перед установкой службы уборка движков не удалась: {e}"),
+        );
     }
-    let r = svc::install_service(&root, &profile, &args, &data)
-        .map_err(|e| {
-            logger::log_code("err", "service", "E-SVC-003", &format!("установка службы не удалась: {e}"));
-            human::with_context(texts::SERVICE_INSTALL_CONTEXT, &e)
-        });
+    let r = svc::install_service(&root, &profile, &args, &data).map_err(|e| {
+        logger::log_code(
+            "err",
+            "service",
+            "E-SVC-003",
+            &format!("установка службы не удалась: {e}"),
+        );
+        human::with_context(texts::SERVICE_INSTALL_CONTEXT, &e)
+    });
     r?;
-    logger::log("ok", "service", &format!("служба zapret установлена со стратегией «{}»", profile.name));
+    logger::log(
+        "ok",
+        "service",
+        &format!("служба zapret установлена со стратегией «{}»", profile.name),
+    );
     // Запись стратегии в реестр могла не пройти (см. service.rs): предупреждаем
     // явно, иначе GUI покажет «служба без стратегии» без объяснения.
     if svc::service_strategy(&data).is_none() {
-        emit(&app, "zgui:toast", serde_json::json!({"kind":"warn","text": texts::SERVICE_STRATEGY_MISSING}));
+        emit(
+            &app,
+            "zgui:toast",
+            serde_json::json!({"kind":"warn","text": texts::SERVICE_STRATEGY_MISSING}),
+        );
     }
     {
         let mut s = st(g);
@@ -2181,7 +2621,11 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
         s.settings.autostart_profile = Some(profile.id.clone());
         s.save();
     }
-    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::SERVICE_INSTALLED}));
+    emit(
+        &app,
+        "zgui:toast",
+        serde_json::json!({"kind":"ok","text": texts::SERVICE_INSTALLED}),
+    );
     Ok(())
 }
 
@@ -2192,7 +2636,12 @@ fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
     let _guard = OpGuard::new(&app, "service");
     let data = st(g).data.clone();
     let r = svc::remove_service(&data).map_err(|e| {
-        logger::log_code("err", "service", "E-SVC-004", &format!("удаление службы не удалось: {e}"));
+        logger::log_code(
+            "err",
+            "service",
+            "E-SVC-004",
+            &format!("удаление службы не удалось: {e}"),
+        );
         human::with_context(texts::SERVICE_REMOVE_CONTEXT, &e)
     });
     r?;
@@ -2207,8 +2656,16 @@ fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
         s.settings.autostart_profile = None;
         s.save();
     }
-    emit(&app, "zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
-    emit(&app, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::SERVICE_REMOVED}));
+    emit(
+        &app,
+        "zgui:status",
+        serde_json::json!({"running": false, "pid": null, "profileId": null}),
+    );
+    emit(
+        &app,
+        "zgui:toast",
+        serde_json::json!({"kind":"ok","text": texts::SERVICE_REMOVED}),
+    );
     Ok(())
 }
 
@@ -2240,7 +2697,10 @@ async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, St
                 logger::log(
                     "info",
                     "updates",
-                    &format!("проверка обновлений: {} файлов, требуют обновления {changed}", entries.len()),
+                    &format!(
+                        "проверка обновлений: {} файлов, требуют обновления {changed}",
+                        entries.len()
+                    ),
                 );
                 let ga2 = app2.state::<Global>();
                 let mut s = ga2.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2252,10 +2712,19 @@ async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, St
                 };
                 s.save();
                 emit(&app2, "zgui:updates", updater_view(&s));
-                emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::UPDATES_CHECKED}));
+                emit(
+                    &app2,
+                    "zgui:toast",
+                    serde_json::json!({"kind":"ok","text": texts::UPDATES_CHECKED}),
+                );
             }
             Err(e) => {
-                logger::log_code("err", "updates", "E-UPD-001", &format!("проверка обновлений не удалась: {e}"));
+                logger::log_code(
+                    "err",
+                    "updates",
+                    "E-UPD-001",
+                    &format!("проверка обновлений не удалась: {e}"),
+                );
                 log_updates(&data, &format!("check error: {}", e));
                 // Событие нужно и при ошибке: фронт снимает им блокировку кнопок
                 // (иначе «Проверить обновления» остаётся серой до таймаута).
@@ -2264,7 +2733,11 @@ async fn check_updates(app: AppHandle, ga: State<'_, Global>) -> Result<bool, St
                     let s = st(ga2.inner());
                     emit(&app2, "zgui:updates", updater_view(&s));
                 }
-                emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context(texts::UPDATES_CHECK_CONTEXT, &e)}));
+                emit(
+                    &app2,
+                    "zgui:toast",
+                    serde_json::json!({"kind":"err","text": human::with_context(texts::UPDATES_CHECK_CONTEXT, &e)}),
+                );
             }
         }
     });
@@ -2304,7 +2777,11 @@ fn reload_bats_from_disk(s: &mut AppState) {
 }
 
 #[tauri::command]
-async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) -> Result<bool, String> {
+async fn apply_updates(
+    app: AppHandle,
+    ga: State<'_, Global>,
+    ids: Vec<String>,
+) -> Result<bool, String> {
     let g = ga.inner();
     let _op = ops_try().ok_or(texts::BUSY_OTHER_OP)?;
     // Авто-проверка в фоне держит только BusyGuard: одновременно с ней не
@@ -2335,7 +2812,11 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
         // Файловые записи: id набора пресетов — не файл, исключаем. Если после
         // фильтра список пуст, а выбор был непустой — файловых записей не выбрано,
         // apply_updates не зовём (пустой список у него означает «все»).
-        let file_ids: Vec<String> = ids.iter().filter(|i| *i != up::PRESETS_ENTRY_ID).cloned().collect();
+        let file_ids: Vec<String> = ids
+            .iter()
+            .filter(|i| *i != up::PRESETS_ENTRY_ID)
+            .cloned()
+            .collect();
         let file_applied = if ids.is_empty() || !file_ids.is_empty() {
             up::apply_updates(&data, &roots, &settings, file_ids)
         } else {
@@ -2347,13 +2828,18 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
         let (mut entries, file_err) = match file_applied {
             Ok(e) => (e, None),
             Err(e) => {
-                logger::log_code("err", "updates", "E-UPD-002", &format!("применение файловых обновлений не удалось: {e}"));
+                logger::log_code(
+                    "err",
+                    "updates",
+                    "E-UPD-002",
+                    &format!("применение файловых обновлений не удалось: {e}"),
+                );
                 log_updates(&data, &format!("apply error: {e}"));
                 (Vec::new(), Some(e))
             }
         };
-                let ga2 = app2.state::<Global>();
-                let mut s = ga2.state.lock().unwrap_or_else(|e| e.into_inner());
+        let ga2 = app2.state::<Global>();
+        let mut s = ga2.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut preset_note: Option<String> = None;
         if let Some(set) = &preset_set {
             let (updated, added) = up::apply_presets(&data, &mut s.profiles, set);
@@ -2370,6 +2856,8 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
                 local_hash: None,
                 size: 0,
                 error: None,
+                added: 0,
+                removed: 0,
             });
         } else if let Some(err) = &preset_err {
             entries.push(crate::config::UpdEntry {
@@ -2384,6 +2872,8 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
                 local_hash: None,
                 size: 0,
                 error: Some(err.clone()),
+                added: 0,
+                removed: 0,
             });
         }
         for e in &entries {
@@ -2393,7 +2883,10 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
                 s.updater.entries.push(e.clone());
             }
         }
-        if entries.iter().any(|e| e.group.starts_with("flowseal strategies") && e.status == "ok") {
+        if entries
+            .iter()
+            .any(|e| e.group.starts_with("flowseal strategies") && e.status == "ok")
+        {
             reload_bats_from_disk(&mut s);
         }
         s.updater.last_check = Some(crate::profiles::now_str());
@@ -2406,22 +2899,42 @@ async fn apply_updates(app: AppHandle, ga: State<'_, Global>, ids: Vec<String>) 
             .map(|e| format!("{}: {}", e.label, e.error.clone().unwrap_or_default()))
             .collect();
         logger::log(
-            if failed.is_empty() && file_err.is_none() { "ok" } else { "warn" },
+            if failed.is_empty() && file_err.is_none() {
+                "ok"
+            } else {
+                "warn"
+            },
             "updates",
             &format!(
                 "обновлено записей: {ok_count}{}{}",
                 preset_note.map(|n| format!(" ({n})")).unwrap_or_default(),
-                if failed.is_empty() { String::new() } else { format!(", ошибки: {}", failed.join("; ")) }
+                if failed.is_empty() {
+                    String::new()
+                } else {
+                    format!(", ошибки: {}", failed.join("; "))
+                }
             ),
         );
         if let Some(e) = &file_err {
-            emit(&app2, "zgui:toast", serde_json::json!({"kind":"err","text": human::with_context(texts::UPDATES_APPLY_CONTEXT, e)}));
+            emit(
+                &app2,
+                "zgui:toast",
+                serde_json::json!({"kind":"err","text": human::with_context(texts::UPDATES_APPLY_CONTEXT, e)}),
+            );
         } else if failed.is_empty() {
-            emit(&app2, "zgui:toast", serde_json::json!({"kind":"ok","text": texts::updates_applied(ok_count)}));
+            emit(
+                &app2,
+                "zgui:toast",
+                serde_json::json!({"kind":"ok","text": texts::updates_applied(ok_count)}),
+            );
         } else {
             // Часть записей (в т.ч. набор пресетов) не применилась — иначе тост
             // сообщал бы только «обновлено: N» и ошибка терялась для пользователя.
-            emit(&app2, "zgui:toast", serde_json::json!({"kind":"warn","text": texts::updates_applied_partial(ok_count, &failed.join("; "))}));
+            emit(
+                &app2,
+                "zgui:toast",
+                serde_json::json!({"kind":"warn","text": texts::updates_applied_partial(ok_count, &failed.join("; "))}),
+            );
         }
     });
     Ok(true)
@@ -2460,11 +2973,19 @@ fn set_settings(ga: State<'_, Global>, mut settings: Settings) -> Result<(), Str
         let testing = g.testing.lock().unwrap_or_else(|e| e.into_inner()).running
             || tester::runner_alive(&data);
         if testing {
-            logger::log("info", "settings", "ipsets: смена режима отложена до конца теста");
+            logger::log(
+                "info",
+                "settings",
+                "ipsets: смена режима отложена до конца теста",
+            );
         } else if let Some(root) = root {
             let settings_now = st(g).settings.clone();
             up::sync_ipset(&root, &data, &settings_now);
-            logger::log("info", "settings", &format!("ipsets: режим «{mode}» применён к list/ipset-all.txt"));
+            logger::log(
+                "info",
+                "settings",
+                &format!("ipsets: режим «{mode}» применён к list/ipset-all.txt"),
+            );
         }
     }
     // Тост здесь не показываем: настройки применяются сразу при изменении поля,
@@ -2533,20 +3054,33 @@ fn open_url(url: String) -> Result<(), String> {
 fn open_path(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if !p.exists() {
-        return Ok(());
+        // Папку создаём, а не молчим: кнопка «Открыть папку» должна что-то делать.
+        std::fs::create_dir_all(&p).map_err(|_| "Папка ещё не создана".to_string())?;
     }
-    let _ = std::process::Command::new("explorer.exe").arg(&p).spawn();
+    std::process::Command::new("explorer.exe")
+        .arg(&p)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command(async)]
 fn app_info() -> serde_json::Value {
     serde_json::json!({
-        "name": "Zapret GUI",
+        "name": "Z-GUI",
         "version": env!("CARGO_PKG_VERSION"),
         "portable": true,
         "elevated": rn::is_elevated()
     })
+}
+
+/// Отмечает обучение-тур пройденным (показываем один раз за установку).
+#[tauri::command]
+fn tour_done_set(ga: State<'_, Global>) -> Result<(), String> {
+    let mut s = st(ga.inner());
+    s.settings.tour_done = true;
+    s.save();
+    Ok(())
 }
 
 // ---------------------------------------------------------------- журнал
@@ -2580,7 +3114,8 @@ async fn report_save(app: AppHandle) -> Result<String, String> {
 fn report_save_impl(g: &Global) -> Result<String, String> {
     let s = st(g);
     let dir = logger::dir().unwrap_or_else(|| s.data.join("logs"));
-    std::fs::create_dir_all(&dir).map_err(|e| human::with_context(texts::REPORT_DIR_FAILED, &e.to_string()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| human::with_context(texts::REPORT_DIR_FAILED, &e.to_string()))?;
     let path = dir.join(format!("report-{}.txt", logger::now_stamp()));
 
     // Секция движков: все из реестра (готовность + путь).
@@ -2593,7 +3128,11 @@ fn report_save_impl(g: &Global) -> Result<String, String> {
                 def.label,
                 info.path.unwrap_or_else(|| "не установлен".into()),
                 def.exe,
-                if info.exe.is_some() { "есть" } else { "НЕТ" }
+                if info.exe.is_some() {
+                    "есть"
+                } else {
+                    "НЕТ"
+                }
             )
         })
         .collect();
@@ -2634,7 +3173,7 @@ fn report_save_impl(g: &Global) -> Result<String, String> {
     };
 
     let body = format!(
-        "Zapret GUI — отчёт о состоянии\r\n\
+        "Z-GUI — отчёт о состоянии\r\n\
          ============================================================\r\n\
          Версия программы : {ver}\r\n\
          Время отчёта     : {time}\r\n\
@@ -2676,7 +3215,9 @@ fn report_save_impl(g: &Global) -> Result<String, String> {
         ),
         win = win,
         adm = if rn::is_elevated() { "да" } else { "НЕТ" },
-        exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
         data = s.data.display(),
         engines = engines_lines,
         total = s.profiles.len(),
@@ -2687,10 +3228,22 @@ fn report_save_impl(g: &Global) -> Result<String, String> {
         game = s.settings.game_filter,
         ipset = s.settings.ipset_mode,
         autostart = s.settings.autostart_mode,
-        autostart_profile = s.settings.autostart_profile.clone().unwrap_or_else(|| "нет".into()),
-        always_admin = if s.settings.always_admin { "да" } else { "нет" },
+        autostart_profile = s
+            .settings
+            .autostart_profile
+            .clone()
+            .unwrap_or_else(|| "нет".into()),
+        always_admin = if s.settings.always_admin {
+            "да"
+        } else {
+            "нет"
+        },
         tg_port = s.settings.tg_port,
-        tg_auto = if s.settings.tg_autostart { "да" } else { "нет" },
+        tg_auto = if s.settings.tg_autostart {
+            "да"
+        } else {
+            "нет"
+        },
         count = logger::entries(0).len(),
         tests = {
             let cache = tester::TestCache::load(&s.data);
@@ -2700,9 +3253,16 @@ fn report_save_impl(g: &Global) -> Result<String, String> {
         codes = codes_lines,
     );
 
-    std::fs::write(&path, body).map_err(|e| human::with_context(texts::REPORT_SAVE_FAILED, &e.to_string()))?;
-    logger::log("ok", "report", &format!("отчёт сохранён: {}", path.display()));
-    let _ = std::process::Command::new("explorer.exe").arg(&path).spawn();
+    std::fs::write(&path, body)
+        .map_err(|e| human::with_context(texts::REPORT_SAVE_FAILED, &e.to_string()))?;
+    logger::log(
+        "ok",
+        "report",
+        &format!("отчёт сохранён: {}", path.display()),
+    );
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(&path)
+        .spawn();
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -2721,14 +3281,19 @@ fn test_report_save(ga: State<'_, Global>) -> Result<String, String> {
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
-                .unwrap_or(0)
+                .unwrap_or(0),
         ),
         cache.results.len(),
         &s.data.display().to_string(),
         &tester::results_text(&cache.results, cache.best_id.as_deref()),
     );
-    std::fs::write(&path, body).map_err(|e| human::with_context(texts::RESULTS_SAVE_FAILED, &e.to_string()))?;
-    logger::log("ok", "report", &format!("результаты теста сохранены: {}", path.display()));
+    std::fs::write(&path, body)
+        .map_err(|e| human::with_context(texts::RESULTS_SAVE_FAILED, &e.to_string()))?;
+    logger::log(
+        "ok",
+        "report",
+        &format!("результаты теста сохранены: {}", path.display()),
+    );
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -2738,7 +3303,11 @@ fn dns_providers() -> Vec<dns::DnsProvider> {
 }
 
 #[tauri::command]
-async fn apply_dns(app: AppHandle, provider: String, adapter: Option<String>) -> Result<String, String> {
+async fn apply_dns(
+    app: AppHandle,
+    provider: String,
+    adapter: Option<String>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let g = app.state::<Global>();
         let g = g.inner();
@@ -2752,7 +3321,12 @@ async fn apply_dns(app: AppHandle, provider: String, adapter: Option<String>) ->
                 Ok(msg)
             }
             Err(e) => {
-                logger::log_code("err", "dns", "E-DNS-001", &format!("не удалось применить DNS {provider}: {e}"));
+                logger::log_code(
+                    "err",
+                    "dns",
+                    "E-DNS-001",
+                    &format!("не удалось применить DNS {provider}: {e}"),
+                );
                 Err(human::with_context(texts::DNS_APPLY_FAILED, &e))
             }
         }
@@ -2776,7 +3350,12 @@ async fn reset_dns(app: AppHandle, adapter: Option<String>) -> Result<String, St
                 Ok(msg)
             }
             Err(e) => {
-                logger::log_code("err", "dns", "E-DNS-002", &format!("не удалось сбросить DNS: {e}"));
+                logger::log_code(
+                    "err",
+                    "dns",
+                    "E-DNS-002",
+                    &format!("не удалось сбросить DNS: {e}"),
+                );
                 Err(human::with_context(texts::DNS_RESET_FAILED, &e))
             }
         }
@@ -2840,10 +3419,16 @@ fn spawn_watchers(app: AppHandle) {
                 }
             }
             if changed {
-                let _ = app.emit("zgui:status", serde_json::json!({"running": false, "pid": null, "profileId": null}));
+                let _ = app.emit(
+                    "zgui:status",
+                    serde_json::json!({"running": false, "pid": null, "profileId": null}),
+                );
             }
             if runtime_died {
-                let _ = app.emit("zgui:toast", serde_json::json!({"kind":"warn","text": texts::ENGINE_STOPPED}));
+                let _ = app.emit(
+                    "zgui:toast",
+                    serde_json::json!({"kind":"warn","text": texts::ENGINE_STOPPED}),
+                );
             }
             // Факт «есть ли процесс движка» для шапки: скан раз в 5 с. Переход
             // в любую сторону — событие UI (окно само ничего не опрашивает).
@@ -2852,13 +3437,43 @@ fn spawn_watchers(app: AppHandle) {
                 let any = svc::any_winws_running();
                 if any != had_engines {
                     had_engines = any;
-                    let _ = app.emit("zgui:status", serde_json::json!({"running": any, "pid": null, "profileId": null}));
+                    let _ = app.emit(
+                        "zgui:status",
+                        serde_json::json!({"running": any, "pid": null, "profileId": null}),
+                    );
                     if !any {
                         // Движок закончился (убили извне/сам завершился) — снимаем
                         // загруженный драйвер WinDivert. Если движком владеет служба
                         // (в т.ч. только поднимается), sweep обязан отступить.
                         if !svc::service_active() {
                             std::thread::spawn(maintenance_sweep);
+                        }
+                    }
+                }
+                // Античит-пауза (опция): при обнаружении античита один раз гасим
+                // НАШУ оптимизацию. Берём OPS — не мешаем другой операции; после
+                // остановки runtime пуст, поэтому повторно не срабатывает.
+                if st(&g).settings.anticheat_pause && st(&g).runtime.is_some() {
+                    if let Some(name) = svc::anticheat_running() {
+                        if let Some(_op) = ops_try() {
+                            let ga = app.state::<Global>();
+                            match do_stop(&app, ga.inner(), true) {
+                                Ok(()) => {
+                                    let _ = app.emit("zgui:toast", serde_json::json!({"kind":"warn","text": texts::anticheat_paused(&name)}));
+                                    logger::log(
+                                        "warn",
+                                        "anticheat",
+                                        "обнаружен античит — оптимизация приостановлена",
+                                    );
+                                }
+                                Err(e) => {
+                                    logger::log(
+                                        "warn",
+                                        "anticheat",
+                                        &format!("античит: остановить не удалось: {e}"),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -2928,7 +3543,12 @@ fn spawn_watchers(app: AppHandle) {
                                     let _ = app2.emit("zgui:toast", serde_json::json!({"kind":"info","text": texts::AUTOUPDATE_CHECKED}));
                                 }
                                 Err(e) => {
-                                    logger::log_code("warn", "updates", "W-UPD-003", &format!("автопроверка не удалась: {e}"));
+                                    logger::log_code(
+                                        "warn",
+                                        "updates",
+                                        "W-UPD-003",
+                                        &format!("автопроверка не удалась: {e}"),
+                                    );
                                 }
                             }
                         });
@@ -2946,7 +3566,7 @@ fn fatal_dialog(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
     };
-    let title: Vec<u16> = "Zapret GUI".encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = "Z-GUI".encode_utf16().chain(std::iter::once(0)).collect();
     let body: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         MessageBoxW(
@@ -2987,36 +3607,68 @@ fn apply_native_window_icon(window: &tauri::WebviewWindow) {
     let hwnd = match window.hwnd() {
         Ok(h) => h.0,
         Err(e) => {
-            logger::log_code("warn", "icon", "W-SYS-006", &format!("не удалось получить HWND окна: {e}"));
+            logger::log_code(
+                "warn",
+                "icon",
+                "W-SYS-006",
+                &format!("не удалось получить HWND окна: {e}"),
+            );
             return;
         }
     };
     let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
     if hinst.is_null() {
-        logger::log_code("warn", "icon", "W-SYS-007", "не удалось получить HINSTANCE процесса");
+        logger::log_code(
+            "warn",
+            "icon",
+            "W-SYS-007",
+            "не удалось получить HINSTANCE процесса",
+        );
         return;
     }
     // MAKEINTRESOURCE(32512): имя ресурса — число, упакованное в указатель.
     let name = ICON_GROUP_ID as *const u16;
     let mut hicon: HICON = std::ptr::null_mut();
     let hr = unsafe {
-        LoadIconWithScaleDown(hinst, name, TASKBAR_ICON_SIZE, TASKBAR_ICON_SIZE, &mut hicon)
+        LoadIconWithScaleDown(
+            hinst,
+            name,
+            TASKBAR_ICON_SIZE,
+            TASKBAR_ICON_SIZE,
+            &mut hicon,
+        )
     };
     if hr < 0 || hicon.is_null() {
         // Фолбэк: LoadImage выберет ближайший кадр из группы.
         hicon = unsafe {
-            LoadImageW(hinst, name, IMAGE_ICON, TASKBAR_ICON_SIZE, TASKBAR_ICON_SIZE, 0) as HICON
+            LoadImageW(
+                hinst,
+                name,
+                IMAGE_ICON,
+                TASKBAR_ICON_SIZE,
+                TASKBAR_ICON_SIZE,
+                0,
+            ) as HICON
         };
     }
     if hicon.is_null() {
-        logger::log_code("warn", "icon", "W-SYS-008", "иконка из ресурсов не загрузилась — оставляю иконку Tauri");
+        logger::log_code(
+            "warn",
+            "icon",
+            "W-SYS-008",
+            "иконка из ресурсов не загрузилась — оставляю иконку Tauri",
+        );
         return;
     }
     unsafe {
         SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, hicon as isize);
         SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, hicon as isize);
     }
-    logger::log("info", "icon", "окну поставлена нативная иконка 48×48 из ресурсов exe");
+    logger::log(
+        "info",
+        "icon",
+        "окну поставлена нативная иконка 48×48 из ресурсов exe",
+    );
 }
 
 #[cfg(not(windows))]
@@ -3048,7 +3700,12 @@ fn scanner_page(ga: State<'_, Global>) -> ScannerPage {
     let g = ga.inner();
     let s = st(g);
     ScannerPage {
-        strategies: s.profiles.iter().filter(|p| p.engine == ENGINE_FLOWSEAL).cloned().collect(),
+        strategies: s
+            .profiles
+            .iter()
+            .filter(|p| p.engine == ENGINE_FLOWSEAL)
+            .cloned()
+            .collect(),
         current: s.runtime.as_ref().map(|r| r.profile_id.clone()),
         game_filter: s.settings.game_filter.clone(),
     }
@@ -3056,13 +3713,199 @@ fn scanner_page(ga: State<'_, Global>) -> ScannerPage {
 
 #[tauri::command(async)]
 async fn scanner_capture(name: String, secs: u64) -> Result<Vec<scanner::Endpoint>, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(scanner::capture_process_endpoints(&name, secs.min(120))))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(scanner::capture_process_endpoints(&name, secs.min(120)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Ждёт, пока winws напишет «capture is started» (движок готов к фильтрации).
+fn wait_engine_ready(out_log: &std::path::Path, pid: u32, secs: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if let Ok(t) = std::fs::read_to_string(out_log) {
+            if t.contains("capture is started") {
+                std::thread::sleep(Duration::from_millis(300));
+                return;
+            }
+        }
+        if !rn::pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Перебор `--dpi-desync-ttl` для цели: запускает выбранную стратегию с разными
+/// TTL, проверяет TLS 1.3 к хосту и возвращает таблицу. Профиль не меняется.
+fn ttl_sweep(
+    app: &AppHandle,
+    g: &Global,
+    host: &str,
+    id: &str,
+) -> Result<scanner::TtlReport, String> {
+    let (profile, root, settings, data) = {
+        let s = st(g);
+        let p = s
+            .profile(id)
+            .cloned()
+            .ok_or_else(|| texts::PROFILE_NOT_FOUND.to_string())?;
+        let root = s
+            .roots
+            .path(&p.engine)
+            .ok_or_else(|| texts::engine_root_missing(&p.engine))?;
+        (p, root, s.settings.clone(), s.data.clone())
+    };
+    let exe = locate_exe(&root, profile.exe_name())?;
+    let (tcp, udp) = game_filter_ports_from(&settings);
+    let base = presets::prepare_args(&profile.args, &root, &tcp, &udp, &settings.filter_mode);
+    let wd = {
+        let bin = root.join("bin");
+        if bin.is_dir() {
+            bin
+        } else {
+            exe.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(root.clone())
+        }
+    };
+    let logs = data.join("logs");
+    let _ = std::fs::create_dir_all(&logs);
+    let out_log = logs.join("ttl-sweep.out.txt");
+    let err_log = logs.join("ttl-sweep.err.txt");
+    let pid_file = logs.join("ttl-sweep.pid.txt");
+    let _ = std::fs::remove_file(&out_log);
+    let _ = std::fs::remove_file(&err_log);
+
+    // Прежнюю стратегию вернём после подбора; отмена — через тот же флаг, что у сканера.
+    let prev = st(g).runtime.clone();
+    let flag = data.join("logs").join("scan-stop.flag");
+    let _ = std::fs::remove_file(&flag);
+
+    stop_all_own(app, g)?;
+    let elevated = rn::is_elevated();
+    let mut results = Vec::new();
+    let total = scanner::TTL_CANDIDATES.len();
+    for (idx, ttl) in scanner::TTL_CANDIDATES.iter().enumerate() {
+        if flag.exists() {
+            break;
+        }
+        let ttl = *ttl;
+        emit(
+            app,
+            "zgui:scan",
+            serde_json::json!({"phase": "ttl", "done": idx, "total": total, "msg": format!("TTL {ttl}: проверяю…")}),
+        );
+        let args = scanner::inject_ttl(&base, ttl);
+        let launched = if elevated {
+            rn::spawn_direct(&exe, &wd, &args, &out_log, &err_log)
+        } else {
+            rn::write_launcher(&exe, &wd, &args, &pid_file)
+                .and_then(|l| rn::spawn_and_wait_pid(l.path(), &pid_file, Duration::from_secs(60)))
+        };
+        let pid = match launched {
+            Ok(p) => p,
+            Err(_) => {
+                results.push(scanner::TtlResult {
+                    ttl,
+                    ok: false,
+                    ms: 0,
+                });
+                continue;
+            }
+        };
+        // winws поднимает WinDivert ~2 с: без ожидания готовности все TTL «не сработали».
+        if elevated {
+            wait_engine_ready(&out_log, pid, 8);
+        } else {
+            std::thread::sleep(Duration::from_millis(1800));
+        }
+        let (mut ok, mut ms) = if rn::pid_alive(pid) {
+            tester::tls13_measure(host)
+        } else {
+            (false, 0)
+        };
+        if !ok && rn::pid_alive(pid) {
+            std::thread::sleep(Duration::from_millis(700));
+            let (ok2, ms2) = tester::tls13_measure(host);
+            if ok2 {
+                ok = true;
+                ms = ms2;
+            }
+        }
+        let _ = rn::kill_pid_direct(pid);
+        std::thread::sleep(Duration::from_millis(400));
+        results.push(scanner::TtlResult { ttl, ok, ms });
+    }
+    let _ = std::fs::remove_file(&flag);
+    let _ = stop_all_own(app, g);
+    if let Some(rt) = prev {
+        if let Err(e) = do_start(app, g, &rt.profile_id) {
+            logger::log(
+                "warn",
+                "ttl",
+                &format!(
+                    "не удалось вернуть прежнюю стратегию «{}»: {e}",
+                    rt.profile_id
+                ),
+            );
+        }
+    }
+    emit(
+        app,
+        "zgui:scan",
+        serde_json::json!({"phase": "ttl", "done": total, "total": total, "msg": "Готово"}),
+    );
+    let best = results
+        .iter()
+        .filter(|r| r.ok)
+        .min_by_key(|r| r.ms)
+        .map(|r| r.ttl);
+    Ok(scanner::TtlReport {
+        host: host.to_string(),
+        strategy: profile.name.clone(),
+        results,
+        best,
+    })
 }
 
 #[tauri::command(async)]
-async fn scanner_run(app: AppHandle, kind: String, target: String, strategy_id: String, focus: bool) -> Result<scanner::ScanReport, String> {
+async fn scanner_method(target: String) -> Result<scanner::MethodReport, String> {
+    let host = scanner::parse_site_target(&target)
+        .ok_or_else(|| "Укажите домен или ссылку".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || scanner::diagnose_method(&host))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+async fn scanner_ttl(
+    app: AppHandle,
+    host: String,
+    strategy_id: String,
+) -> Result<scanner::TtlReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = scanner::parse_site_target(&host)
+            .ok_or_else(|| "Укажите домен или ссылку".to_string())?;
+        let ga = app.state::<Global>();
+        let g = ga.inner();
+        let _op = ops_try().ok_or(texts::BUSY_OTHER_OP)?;
+        let _guard = OpGuard::new(&app, "ttl");
+        ttl_sweep(&app, g, &target, &strategy_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command(async)]
+async fn scanner_run(
+    app: AppHandle,
+    kind: String,
+    target: String,
+    strategy_id: String,
+    focus: bool,
+) -> Result<scanner::ScanReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let ga = app.state::<Global>();
         let g = ga.inner();
@@ -3088,7 +3931,10 @@ async fn scanner_apply(app: AppHandle, report: scanner::ScanReport) -> Result<St
 }
 
 #[tauri::command(async)]
-async fn scanner_report_save(app: AppHandle, report: scanner::ScanReport) -> Result<String, String> {
+async fn scanner_report_save(
+    app: AppHandle,
+    report: scanner::ScanReport,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let data = st(app.state::<Global>().inner()).data.clone();
         scanner::save_report(&data, &report)
@@ -3123,6 +3969,93 @@ fn scanner_cancel(ga: State<'_, Global>) -> Result<(), String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Поднимает на передний план главное окно уже запущенной копии (по pid).
+/// Нужно для режима «один экземпляр»: закрытие теперь прячет окно в трей,
+/// поэтому повторный запуск должен вернуть существующее окно, а не плодить
+/// вторую копию и вторую иконку в трее.
+#[cfg(windows)]
+fn focus_window_of_pid(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
+        ShowWindow, GW_OWNER, SW_RESTORE,
+    };
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let t = &mut *(lparam as *mut (u32, bool, HWND));
+        let mut wpid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut wpid);
+        let owned = GetWindow(hwnd, GW_OWNER).is_null();
+        let vis = IsWindowVisible(hwnd) != 0;
+        if wpid == t.0 && owned && (!t.1 || vis) {
+            t.2 = hwnd;
+            return 0;
+        }
+        1
+    }
+    // Проход 1 — видимое окно; проход 2 — любое (копия могла спрятаться в трей),
+    // тогда SW_RESTORE и покажет его.
+    for require_visible in [true, false] {
+        let mut t: (u32, bool, HWND) = (pid, require_visible, std::ptr::null_mut());
+        unsafe {
+            EnumWindows(Some(cb), &mut t as *mut _ as LPARAM);
+            if !t.2.is_null() {
+                ShowWindow(t.2, SW_RESTORE);
+                SetForegroundWindow(t.2);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn focus_window_of_pid(_pid: u32) -> bool {
+    false
+}
+
+/// Закрывает все прочие копии программы (любые папки/сборки) — иначе в трее
+/// копятся иконки старых тестовых версий. Новый процесс всегда от админа,
+/// поэтому вправе снять прежние. Себя и фоновые тест-раннеры не трогаем.
+fn close_other_instances() {
+    let me = std::process::id();
+    let runners = svc::zgui_runner_pids();
+    for pid in svc::zgui_pids() {
+        if pid == me || runners.contains(&pid) {
+            continue;
+        }
+        let _ = rn::hidden_command("taskkill.exe")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+        logger::log(
+            "info",
+            "app",
+            &format!("закрыта прежняя копия программы (pid {pid})"),
+        );
+    }
+}
+
+/// Проверка свежего релиза самой программы (плитка в «Обновлениях»).
+#[tauri::command]
+async fn app_update_info() -> Result<up::AppUpdate, String> {
+    tauri::async_runtime::spawn_blocking(up::app_update_info)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Скачивание архива последнего релиза в `<data>/updates/` (без установки).
+#[tauri::command(async)]
+async fn app_update_download(app: AppHandle, ga: State<'_, Global>) -> Result<String, String> {
+    let data = st(ga.inner()).data.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // OPS-лок берём внутри рабочего потока — guard не пересекает await.
+        let _op = ops_try().ok_or_else(|| texts::BUSY_OTHER_OP.to_string())?;
+        let _guard = OpGuard::new(&app, "app-update");
+        up::app_update_download(&data)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub fn run() {
     logger::install_panic_hook();
     tauri::Builder::default()
@@ -3144,7 +4077,7 @@ pub fn run() {
                 "info",
                 "app",
                 &format!(
-                    "запуск Zapret GUI {} (админ: {}, портативно: {})",
+                    "запуск Z-GUI {} (админ: {}, портативно: {})",
                     env!("CARGO_PKG_VERSION"),
                     if rn::is_elevated() { "да" } else { "нет" },
                     state.data.display()
@@ -3182,21 +4115,27 @@ pub fn run() {
             // могут конфликтовать настройками. Решение юзера 26.09: жёсткое
             // закрытие откатили (старая копия под админом запирала запуск новой).
             let lock_path = state.data.join("zgui.lock");
-            let mut second_instance = false;
+            // Один экземпляр: если жива другая копия — поднимаем её окно и выходим.
             if let Some(pid) = std::fs::read_to_string(&lock_path)
                 .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok())
             {
-                if pid != std::process::id() && rn::pid_alive(pid) {
-                    second_instance = true;
-                    logger::log_code(
-                        "warn",
+                if pid != std::process::id() && svc::pid_is_zgui(pid) {
+                    let focused = focus_window_of_pid(pid);
+                    logger::log(
+                        "info",
                         "app",
-                        "E-SYS-003",
-                        &format!("обнаружена уже запущенная копия программы (pid {pid})"),
+                        &format!(
+                            "уже запущена копия (pid {pid}) — открываю её окно{}",
+                            if focused { "" } else { " (окно не найдено)" }
+                        ),
                     );
+                    std::process::exit(0);
                 }
             }
+            // Живой копии нет — закрываем прежние (тестовые/забытые), не трогая
+            // фоновые тест-раннеры: чтобы в трее не копились иконки старых версий.
+            close_other_instances();
             let _ = std::fs::write(&lock_path, std::process::id().to_string());
             provision_engines(&mut state);
             ensure_presets(&mut state);
@@ -3259,6 +4198,41 @@ pub fn run() {
                 .data_directory(webview_data)
                 .build()?;
             apply_native_window_icon(&window);
+            // Трей-иконка: меню «Показать окно» / «Выход». Закрытие окна (крестик)
+            // по умолчанию прячет его в трей, а не выходит из программы.
+            {
+                use tauri::menu::{MenuBuilder, MenuItemBuilder};
+                use tauri::tray::TrayIconBuilder;
+                let show_item = MenuItemBuilder::with_id("tray_show", "Показать окно").build(app)?;
+                let quit_item = MenuItemBuilder::with_id("tray_quit", "Выход").build(app)?;
+                let menu = MenuBuilder::new(app)
+                    .item(&show_item)
+                    .separator()
+                    .item(&quit_item)
+                    .build()?;
+                let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+                let tray = TrayIconBuilder::with_id("main")
+                    .icon(icon)
+                    .tooltip("Z-GUI")
+                    .menu(&menu)
+                    .on_menu_event(|app, ev| match ev.id().as_ref() {
+                        "tray_show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "tray_quit" => {
+                            QUIT.store(true, Ordering::Relaxed);
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .build(app)?;
+                // Держим иконку живой: при drop она исчезает из трея.
+                app.manage(tray);
+            }
             let handle = app.handle().clone();
             spawn_watchers(handle.clone());
             if let Some(proxy) = healed {
@@ -3272,18 +4246,6 @@ pub fn run() {
                             "kind": "ok",
                             "text": texts::proxy_healed(&proxy)
                         }),
-                    );
-                });
-            }
-            if second_instance {
-                let h = handle.clone();
-                let text = texts::SECOND_COPY;
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(2500));
-                    emit(
-                        &h,
-                        "zgui:toast",
-                        serde_json::json!({ "kind": "warn", "text": text }),
                     );
                 });
             }
@@ -3323,6 +4285,8 @@ pub fn run() {
             reboot_now,
             check_updates,
             apply_updates,
+            app_update_info,
+            app_update_download,
             set_settings,
             set_theme,
             open_path,
@@ -3337,6 +4301,9 @@ pub fn run() {
             scanner_processes,
             scanner_capture,
             scanner_cancel,
+            scanner_method,
+            tour_done_set,
+            scanner_ttl,
             scanner_run,
             scanner_apply,
             scanner_report_save
@@ -3344,12 +4311,31 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building zgui")
         .run(|app, event| {
+            // Крестик главного окна прячет окно в трей (реальный выход — «Выход» в трее).
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } = &event
+            {
+                if label == "main" && !QUIT.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                }
+            }
             // При выходе гасим фоновый тестовый раннер: он elevated и сам по
             // закрытию GUI не умирает, а при следующем старте подхватывался как
             // «тест запустился сам». Единая процедура: стоп-флаг (раннер завершит
             // цикл сам) + попытка kill без эскалации (UAC на выходе не поднимаем).
             if matches!(event, tauri::RunEvent::Exit) {
                 let data = app.state::<Global>().state.lock().unwrap_or_else(|e| e.into_inner()).data.clone();
+                // Снимаем наш lock-файл, чтобы он не остался устаревшим.
+                let lock = data.join("zgui.lock");
+                if std::fs::read_to_string(&lock).ok().map(|s| s.trim() == std::process::id().to_string()).unwrap_or(false) {
+                    let _ = std::fs::remove_file(&lock);
+                }
                 stop_test_runner(&data, false);
                 // Гасим winws, поднятый приложением: без этого он остаётся
                 // сиротой и держит драйвер WinDivert («висящий драйвер»).
@@ -3386,10 +4372,20 @@ mod tests {
     use super::{drop_custom_profiles, ensure_presets, local_proxy_port};
 
     #[test]
+    fn one_line_collapses_whitespace_and_truncates() {
+        assert_eq!(super::one_line("a\n  b\t c ", 100), "a b c");
+        let long = super::one_line(&"x".repeat(500), 10);
+        assert!(long.ends_with('…') && long.chars().count() <= 11);
+    }
+
+    #[test]
     fn local_proxy_port_detects_only_local() {
         assert_eq!(local_proxy_port("127.0.0.1:10809"), Some(10809));
         assert_eq!(local_proxy_port("localhost:8080"), Some(8080));
-        assert_eq!(local_proxy_port("http=127.0.0.1:1080;https=127.0.0.1:1080"), Some(1080));
+        assert_eq!(
+            local_proxy_port("http=127.0.0.1:1080;https=127.0.0.1:1080"),
+            Some(1080)
+        );
         // Внешние/корпоративные прокси не трогаем.
         assert_eq!(local_proxy_port("proxy.corp.example:3128"), None);
         assert_eq!(local_proxy_port("10.0.0.1:8080"), None);
@@ -3421,7 +4417,8 @@ mod tests {
             "GoodbyeDPI · RU + DNS (старое)",
             vec!["-9".into(), "--dns-addr".into(), "77.88.8.8".into()],
         ));
-        let mut own = crate::presets::preset_profile("my-own", "goodbyedpi", "Мой", vec!["-9".into()]);
+        let mut own =
+            crate::presets::preset_profile("my-own", "goodbyedpi", "Мой", vec!["-9".into()]);
         own.builtin = false;
         own.source = None;
         state.profiles.push(own);
@@ -3488,21 +4485,45 @@ mod tests {
             .iter()
             .find(|p| p.id == "preset:goodbyedpi-ru-dns")
             .expect("пресет на месте");
-        assert_eq!(fixed.args[0], "-5", "битый `-9` должен быть заменён на `-5`");
-        assert_eq!(fixed.args.last().map(String::as_str), Some("1253"), "аргументы из таблицы");
+        assert_eq!(
+            fixed.args[0], "-5",
+            "битый `-9` должен быть заменён на `-5`"
+        );
+        assert_eq!(
+            fixed.args.last().map(String::as_str),
+            Some("1253"),
+            "аргументы из таблицы"
+        );
         assert!(fixed.builtin, "пресет остаётся вшитым");
-        let mine = state.profiles.iter().find(|p| p.id == "preset:my-own").expect("свой на месте");
-        assert_eq!(mine.args, vec!["-9".to_string()], "пользовательский профиль не трогаем");
+        let mine = state
+            .profiles
+            .iter()
+            .find(|p| p.id == "preset:my-own")
+            .expect("свой на месте");
+        assert_eq!(
+            mine.args,
+            vec!["-9".to_string()],
+            "пользовательский профиль не трогаем"
+        );
         assert!(
-            !state.profiles.iter().any(|p| p.id == "auto:goodbyedpi:goodbyedpi-9"),
+            !state
+                .profiles
+                .iter()
+                .any(|p| p.id == "auto:goodbyedpi:goodbyedpi-9"),
             "кандидат автоподбора удалён (функционал убран)"
         );
         assert!(
-            !state.profiles.iter().any(|p| p.id == "auto:goodbyedpi:gd-ttl5"),
+            !state
+                .profiles
+                .iter()
+                .any(|p| p.id == "auto:goodbyedpi:gd-ttl5"),
             "любой auto:-профиль удаляется, а не остаётся"
         );
         assert!(
-            !state.profiles.iter().any(|p| p.id == "preset:flowseal-general"),
+            !state
+                .profiles
+                .iter()
+                .any(|p| p.id == "preset:flowseal-general"),
             "вырезанный пресет удалён из профилей"
         );
         assert_eq!(
@@ -3511,7 +4532,10 @@ mod tests {
             "все вшитые пресеты на месте"
         );
         let cache = crate::tester::TestCache::load(&data);
-        assert!(cache.results.is_empty(), "результаты удалённых пресетов вычищены");
+        assert!(
+            cache.results.is_empty(),
+            "результаты удалённых пресетов вычищены"
+        );
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -3552,7 +4576,8 @@ mod tests {
             vec!["--wf-tcp-out=443".into()],
         ));
         // Старый кастомный профиль из прежних версий (source пустой) — удаляется.
-        let mut custom = crate::presets::preset_profile("custom-old", "flowseal", "Мой", vec!["--x".into()]);
+        let mut custom =
+            crate::presets::preset_profile("custom-old", "flowseal", "Мой", vec!["--x".into()]);
         custom.builtin = false;
         custom.source = None;
         state.profiles.push(custom);
@@ -3563,12 +4588,14 @@ mod tests {
             state.profiles.iter().any(|p| p.id == "general (ALT)"),
             "авторский .bat-профиль должен остаться"
         );
-        assert!(state.profiles.iter().any(|p| p.id == "preset:z2-x"), "OTA-пресет остаётся");
+        assert!(
+            state.profiles.iter().any(|p| p.id == "preset:z2-x"),
+            "OTA-пресет остаётся"
+        );
         assert!(
             !state.profiles.iter().any(|p| p.id == "preset:custom-old"),
             "кастом без source удаляется"
         );
         let _ = std::fs::remove_dir_all(&data);
     }
-
 }

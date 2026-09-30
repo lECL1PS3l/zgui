@@ -58,7 +58,12 @@ impl TgState {
     /// `secret` — постоянный MTProto-секрет (32 hex): Telegram переиспользует одну
     /// запись прокси вместо накопления мёртвых. None — крейт сгенерит случайный.
     /// Возвращает статус только после фактического бинда сокета (или ошибку).
-    pub async fn start(&self, port: u16, faketls_domain: Option<String>, secret: Option<String>) -> Result<TgStatus, String> {
+    pub async fn start(
+        &self,
+        port: u16,
+        faketls_domain: Option<String>,
+        secret: Option<String>,
+    ) -> Result<TgStatus, String> {
         // Быстрый stop→start: ждём фактического завершения прошлой задачи, иначе
         // новый бинд ловит «порт занят» (listener старой задачи ещё не закрыт).
         let prev_done = {
@@ -83,7 +88,11 @@ impl TgState {
             "127.0.0.1".into(),
             "--default-domains".into(),
         ];
-        if let Some(d) = faketls_domain.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        if let Some(d) = faketls_domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
             args.push("--listen-faketls-domain".into());
             args.push(d.to_string());
         }
@@ -185,7 +194,10 @@ mod tests {
     async fn start_binds_and_reports_port() {
         let s = TgState::default();
         // Порт 0 — ОС выдаст свободный, тест не конфликтует с реальным 1443.
-        let st = s.start(0, None, None).await.expect("прокси должен запуститься");
+        let st = s
+            .start(0, None, None)
+            .await
+            .expect("прокси должен запуститься");
         assert!(st.running, "статус должен быть running после бинда");
         assert!(st.port.is_some(), "порт должен быть известен после бинда");
         assert!(
@@ -196,7 +208,10 @@ mod tests {
         // Мост слушает только 127.0.0.1 — и ссылка обязана указывать туда же
         // (LAN-адрес в ней не подключился бы к локальному listener).
         assert!(
-            st.link.as_deref().unwrap_or("").contains("server=127.0.0.1"),
+            st.link
+                .as_deref()
+                .unwrap_or("")
+                .contains("server=127.0.0.1"),
             "ссылка должна указывать на 127.0.0.1: {:?}",
             st.link
         );
@@ -213,9 +228,18 @@ mod tests {
         let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("тестовый сокет");
         let port = holder.local_addr().expect("адрес").port();
         let s = TgState::default();
-        let err = s.start(port, None, None).await.expect_err("порт занят — ожидалась ошибка");
-        assert!(err.contains("занят"), "ожидалось сообщение о занятом порте, получено: {err}");
-        assert!(!s.status().running, "упавший старт не должен оставлять статус running");
+        let err = s
+            .start(port, None, None)
+            .await
+            .expect_err("порт занят — ожидалась ошибка");
+        assert!(
+            err.contains("занят"),
+            "ожидалось сообщение о занятом порте, получено: {err}"
+        );
+        assert!(
+            !s.status().running,
+            "упавший старт не должен оставлять статус running"
+        );
         drop(holder);
     }
 
@@ -223,7 +247,10 @@ mod tests {
     async fn start_with_fixed_secret_is_stable() {
         let s = TgState::default();
         let secret = "0123456789abcdef0123456789abcdef";
-        let st = s.start(0, None, Some(secret.to_string())).await.expect("прокси должен запуститься");
+        let st = s
+            .start(0, None, Some(secret.to_string()))
+            .await
+            .expect("прокси должен запуститься");
         assert!(
             st.link.as_deref().unwrap_or("").contains(secret),
             "ссылка должна содержать заданный (постоянный) секрет: {:?}",
