@@ -6,196 +6,26 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)
 ![Last commit](https://img.shields.io/github/last-commit/lECL1PS3l/zgui)
 
-Portable Windows app that runs, tests and manages local traffic-optimization engines
+Портативная графическая оболочка для Windows к движкам локальной оптимизации трафика
 ([Flowseal / zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube),
 [zapret2](https://github.com/bol-van/zapret2), [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI),
-[DPIBreak](https://github.com/dilluti0n/DPIBreak)) from one window — no editing `.bat` files, no console.
+[DPIBreak](https://github.com/dilluti0n/DPIBreak)) — в одном окне, без правки `.bat` и консоли.
 
-> ⚠️ **Не связано с Flowseal, bol-van, ValdikSS и dilluti0n.** Z-GUI — независимая оболочка; названия и товарные знаки движков принадлежат их владельцам. / **Not affiliated with Flowseal, bol-van, ValdikSS or dilluti0n.** Z-GUI is an independent wrapper; engine names and trademarks belong to their owners.
+> ⚠️ **Не связано с Flowseal, bol-van, ValdikSS и dilluti0n.** Z-GUI — независимая оболочка; названия и товарные знаки движков принадлежат их владельцам.
 
-**[English](#english) · [Русский](#russian)**
-
----
-
-<a id="english"></a>
-## English
-
-### What is it
-
-Z-GUI is a portable GUI for local network-optimization engines on Windows. It keeps the app, all
-four engines and their strategies in one folder — the first launch works offline. Everything runs
-locally; nothing is sent to third-party servers.
-
-### Screenshots
-
-| Main panel |
-|---|
-| <img src="screens/zgui-panel.png" width="800" alt="Z-GUI main panel"> |
-
-### Features
-
-| Feature | What it does |
-|---|---|
-| 🟢 Strategies | Profile tiles, start / stop, optional Windows-service autostart |
-| 🟢 Strategy test | Runs strategies one by one against control domains and ranks them |
-| 🟢 Diagnostics | Detects the block type (DNS / address / SNI) and tunes TTL per target |
-| 🟢 Updates | Strategies, lists and presets in one click, with backups before changes |
-| 🟡 Secure DNS | IPv4 + DoH providers with a ping test |
-| 🟡 Telegram proxy | MTProto → WebSocket bridge, one-button setup |
-| 🟡 Tools | Discord cache cleanup, fresh hosts, fake-file replacement |
-| 🟢 Journal | Full action/error log with a one-click report for bug reports |
-| 🟢 Onboarding | Short interactive tour on first launch (repeatable from Settings) |
-
-### How it works
-
-The test scores how many control domains respond for each strategy:
-
-$$\text{Score} = \sum_{d \in D} \mathbb{1}[\text{reply}(d)]$$
-
-A domain group passes if the majority answered; the music group only needs one hit:
-
-$$
-\text{group ok} =
-\begin{cases}
-\text{passed} > 0, & \text{YouTube Music}\\
-2 \cdot \text{passed} \ge \text{total}, & \text{otherwise}
-\end{cases}
-$$
-
-TTL tuning injects `--dpi-desync-ttl=N` for a small candidate set and picks the fastest successful
-handshake:
-
-$$N^* = \arg\min_{N:\ \text{ok}(N)} \text{ms}(N),\quad N \in \{2,4,6,8,10,12,16,20\}$$
-
-### Install
-
-1. Download `Z-GUI Stable <version>.zip` from the [releases page](https://github.com/lECL1PS3l/zgui/releases)
-   and unpack it into a folder **without Cyrillic characters or spaces** (e.g. `D:\Zapret`).
-2. Run `zgui.exe`. The `data/` folder next to it already contains engines, strategies and lists —
-   the first launch works offline.
-3. [WebView2 Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703) is required — it is already
-   present on current Windows 10/11. If it is missing, see FAQ.
-4. The app runs as administrator only. Nothing to enable in advance: on first launch it asks for
-   rights once and restarts.
-
-**Authenticity.** Each release ships `checksums.txt` with SHA-256 of the archive and `zgui.exe`:
-
-```powershell
-Get-FileHash .\zgui.exe -Algorithm SHA256
-```
-
-Download only from this repository — search engines often point to malware builds.
-
-### Privacy
-
-- No telemetry and no analytics.
-- Settings live only next to the app (`data/state.json`).
-- Network is used only for GitHub (updates, preset set) and for the engines themselves.
-- The Telegram bridge binds to `127.0.0.1` only.
-- Administrator rights are required for the traffic driver (WinDivert) and the Windows service.
-
-### FAQ
-
-<details>
-<summary><b>Internet drops during the test — is that normal?</b></summary>
-
-Yes. A strategy may momentarily cut connectivity, up to a full short outage. The app restores the
-previous state after the run.
-</details>
-
-<details>
-<summary><b>“Could not find the WebView2 Runtime”</b></summary>
-
-The UI is drawn by the system WebView2 component. On LTSC / trimmed images / Windows Server it may
-be missing. Install it once from <https://developer.microsoft.com/en-us/microsoft-edge/webview2>
-and run the app again.
-</details>
-
-<details>
-<summary><b>Windows SmartScreen warns about the file</b></summary>
-
-The build is not code-signed. Click “More info” → “Run anyway”, and verify the SHA-256 from
-`checksums.txt`.
-</details>
-
-<details>
-<summary><b>The service stayed after I deleted the app / “WinDivert64.sys is in use”</b></summary>
-
-The `zapret` service lives in Windows, not in the app folder. Uncheck “Enable service” before
-deleting or moving the folder. If the app is already gone, run as administrator:
-
-```powershell
-sc.exe stop zapret
-sc.exe delete zapret
-sc.exe stop windivert
-sc.exe delete windivert
-taskkill /F /IM winws.exe
-```
-</details>
-
-<details>
-<summary><b>Antivirus flags WinDivert</b></summary>
-
-WinDivert is a legitimate traffic-capture driver used by zapret; some antivirus vendors label it a
-risk tool (`Not-a-virus:RiskTool.Multi.WinDivert`). Add the app folder to exclusions or disable PUA
-detection.
-</details>
-
-<details>
-<summary><b>The engine does not help my provider</b></summary>
-
-Effectiveness depends on the ISP. If “method of blocking” reports an address-based block, local
-optimization cannot help — a different route is needed.
-</details>
-
-### Known limitations
-
-- Windows 10 / 11, x64 only (no 32-bit, no ARM).
-- WebView2 Runtime required.
-- Administrator rights required (traffic driver + Windows service).
-- The updater uses GitHub; behind a blocked GitHub it will not update.
-- Only four bundled engines are supported.
-
-### Development
-
-- Stack: Rust (Tauri 2) backend, vanilla JS + Vite frontend.
-- Build: `npm install`, then `powershell -File scripts\build.ps1` (the app must be closed).
-- Tests: `cargo test --lib` in `src-tauri/` and `cargo test` in `src-tauri/crates/tg-ws-proxy-rs`.
-- Security self-check: `powershell -File scripts\security-check.ps1`.
-- Report problems via [issues](https://github.com/lECL1PS3l/zgui/issues) or the in-app
-  “Journal → Save report”.
-
-### License
-
-**MIT** — see [LICENSE](LICENSE). Full third-party attributions and licenses are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); history is in [CHANGELOG.md](CHANGELOG.md).
-
-Credits: engines and strategies — [Flowseal](https://github.com/Flowseal/zapret-discord-youtube),
-[bol-van](https://github.com/bol-van/zapret2), [ValdikSS](https://github.com/ValdikSS/GoodbyeDPI),
-[dilluti0n](https://github.com/dilluti0n/DPIBreak); WinDivert — [Basil](https://github.com/basil00/divert);
-icons — [Lucide](https://github.com/lucide-icons/lucide); “Topography” pattern — Hero Patterns,
-Steve Schoger.
-
-[↑ Back to top](#z-gui)
-
----
-
-<a id="russian"></a>
-## Русский
-
-### Что это
+## Что это
 
 Z-GUI — портативная графическая оболочка для Windows к движкам локальной оптимизации трафика.
 Программа, все четыре движка и стратегии лежат рядом в одной папке; первый запуск работает без
 интернета. Всё выполняется локально, данные никуда не отправляются.
 
-### Скриншоты
+## Скриншоты
 
 | Основная панель |
 |---|
 | <img src="screens/zgui-panel.png" width="800" alt="Основная панель Z-GUI"> |
 
-### Что умеет
+## Что умеет
 
 | Возможность | Что делает |
 |---|---|
@@ -209,7 +39,7 @@ Z-GUI — портативная графическая оболочка для 
 | 🟢 Журнал | Полный журнал действий и ошибок, отчёт одной кнопкой |
 | 🟢 Обучение | Короткий интерактивный тур при первом запуске (повтор — в «Настройках») |
 
-### Как это работает
+## Как это работает
 
 Тест считает, сколько контрольных доменов ответило у каждой стратегии:
 
@@ -230,7 +60,7 @@ $$
 
 $$N^* = \arg\min_{N:\ \text{ok}(N)} \text{ms}(N),\quad N \in \{2,4,6,8,10,12,16,20\}$$
 
-### Установка
+## Установка
 
 1. Скачайте `Z-GUI Stable <версия>.zip` со [страницы релизов](https://github.com/lECL1PS3l/zgui/releases)
    и распакуйте в папку **без кириллицы и пробелов** (например `D:\Zapret`).
@@ -249,7 +79,7 @@ Get-FileHash .\zgui.exe -Algorithm SHA256
 
 Качайте только с этой страницы: поисковики часто выводят на сборки с вредоносами.
 
-### Приватность
+## Приватность
 
 - Никакой телеметрии и аналитики.
 - Настройки хранятся только рядом с программой (`data/state.json`).
@@ -257,7 +87,7 @@ Get-FileHash .\zgui.exe -Algorithm SHA256
 - Telegram-мост слушает только `127.0.0.1`.
 - Права администратора нужны для драйвера трафика (WinDivert) и службы Windows.
 
-### FAQ
+## FAQ
 
 <details>
 <summary><b>Во время теста пропадает интернет — это нормально?</b></summary>
@@ -311,7 +141,7 @@ risk-tool (`Not-a-virus:RiskTool.Multi.WinDivert`). Добавьте папку 
 не поможет, нужен другой маршрут.
 </details>
 
-### Известные ограничения
+## Известные ограничения
 
 - Только Windows 10 / 11, x64 (без 32-бит и ARM).
 - Нужен WebView2 Runtime.
@@ -319,7 +149,7 @@ risk-tool (`Not-a-virus:RiskTool.Multi.WinDivert`). Добавьте папку 
 - Обновления идут через GitHub; при заблокированном GitHub не обновятся.
 - Поддерживаются только четыре встроенных движка.
 
-### Разработка
+## Разработка
 
 - Стек: Rust (Tauri 2) и фронтенд на vanilla JS + Vite.
 - Сборка: `npm install`, затем `powershell -File scripts\build.ps1` (программа должна быть закрыта).
@@ -327,7 +157,7 @@ risk-tool (`Not-a-virus:RiskTool.Multi.WinDivert`). Добавьте папку 
 - Самопроверка безопасности: `powershell -File scripts\security-check.ps1`.
 - О проблемах — через [issues](https://github.com/lECL1PS3l/zgui/issues) или «Журнал → Сохранить отчёт».
 
-### Лицензия
+## Лицензия
 
 **MIT** — см. [LICENSE](LICENSE). Полные указания сторонних компонентов и лицензии —
 в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); история изменений — в [CHANGELOG.md](CHANGELOG.md).
