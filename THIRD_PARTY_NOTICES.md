@@ -68,8 +68,7 @@ Without you this project would not exist.
 - Source: https://github.com/AmantesNihilo/zapret-universal-interface (`crates/tg-ws-proxy-rs`)
 - License: **MIT**
 - Copyright: AmantesNihilo and contributors
-- Used as: Telegram MTProto → WebSocket bridge library (crypto, faketls, splitter, pool,
-  outbound, server, ws_client, stats, runtime, check).
+- Used as: Telegram bridge library (bundled as `crates/tg-ws-proxy-rs`).
 
 ---
 
