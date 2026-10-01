@@ -161,7 +161,7 @@ try {
                 }
             } else {
                 Bad("winws.exe пропал из сандбокса — антивирус удалил движок")
-                $notes.Add("При обновлении движка Defender удаляет winws.exe (PUA). Настройте исключение пути " + $AppDir + " и, при желании, отключите PUA-детект. Читайте docs\antivirus-test.md.")
+                $notes.Add("При обновлении движка Defender удаляет winws.exe (PUA). Настройте исключение пути " + $AppDir + " и, при желании, отключите PUA-детект. Читайте README.md (раздел FAQ).")
                 $ok = $false
                 $stillOk = $false
             }
@@ -227,7 +227,7 @@ try {
                 Ok("winws.exe исполнился (код " + $proc.ExitCode + ") и файл на месте — исполнение не заблокировано")
             } else {
                 Bad("winws.exe пропал после запуска — антивирус убил движок в момент исполнения")
-                $notes.Add("Detector удаляет движок именно при запуске — исключение папки приложения обязательно, см. docs\antivirus-test.md.")
+                $notes.Add("Detector удаляет движок именно при запуске — исключение папки приложения обязательно, см. README.md (раздел FAQ).")
                 $ok = $false
             }
         } catch {
@@ -279,7 +279,7 @@ try {
             if ($needAdminForPaths) {
                 Info("точные пути ресурсов скрыты (нужны права администратора): запустите скрипт от админа, чтобы увидеть их.")
             }
-            $notes.Add("Defender помечал winws/WinDivert (generic/PUA). Рекомендуется исключение папки приложения: Add-MpPreference -ExclusionPath '" + $AppDir + "' — см. docs\antivirus-test.md.")
+            $notes.Add("Defender помечал winws/WinDivert (generic/PUA). Рекомендуется исключение папки приложения: Add-MpPreference -ExclusionPath '" + $AppDir + "' — см. README.md (раздел FAQ).")
         }
     } catch {
         Info("история угроз недоступна (нужны права администратора): " + $_.Exception.Message)
@@ -301,7 +301,7 @@ try {
         Write-Host "     добавить папку приложения; при необходимости отключить PUA-детект."
         Write-Host "  3. Если стоит сторонний антивирус (Касперский и т.п.) — искать его собственные исключения."
         Write-Host ""
-        Write-Host "Подробный чеклист и ожидаемые результаты — в docs\antivirus-test.md."
+        Write-Host "Подробный чеклист и ожидаемые результаты — в README.md (раздел FAQ)."
         $exitCode = $fail
     }
 } catch {
