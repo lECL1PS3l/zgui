@@ -533,25 +533,25 @@ fn latest_release(cli: &reqwest::blocking::Client) -> Result<serde_json::Value, 
     resp.json().map_err(|e| e.to_string())
 }
 
-/// Выбирает из ассетов релиза портативный архив программы (zip; приоритет — `0-*.zip`).
+/// Выбирает из ассетов релиза портативный архив программы.
+/// Приоритет: zip с именем программы (`z-gui`/`stable`), затем любой zip кроме `engine-*.zip`.
 fn pick_zip_asset(rel: &serde_json::Value) -> Option<(String, String, u64)> {
     let arr = rel["assets"].as_array()?;
+    let lname = |a: &&serde_json::Value| a["name"].as_str().unwrap_or("").to_lowercase();
     let a = arr
         .iter()
         .find(|a| {
-            a["name"]
-                .as_str()
-                .map(|n| n.to_lowercase().ends_with(".zip") && n.starts_with("0-"))
-                .unwrap_or(false)
+            let n = lname(a);
+            n.ends_with(".zip") && (n.contains("z-gui") || n.contains("stable"))
         })
         .or_else(|| {
-            arr.iter().find(|a| {
-                a["name"]
-                    .as_str()
-                    .map(|n| n.to_lowercase().ends_with(".zip"))
-                    .unwrap_or(false)
-            })
-        })?;
+            arr.iter()
+                .find(|a| {
+                    let n = lname(a);
+                    n.ends_with(".zip") && !n.contains("engine-")
+                })
+        })
+        .or_else(|| arr.iter().find(|a| lname(a).ends_with(".zip")))?;
     Some((
         a["name"].as_str()?.to_string(),
         a["browser_download_url"].as_str()?.to_string(),
@@ -943,6 +943,26 @@ mod tests {
         assert!(!version_gt("1.5.0", "1.5.0"));
         assert!(!version_gt("1.5.0", "1.6.0"));
         assert!(version_gt("2.0", "1.9.9"));
+    }
+
+    #[test]
+    fn pick_zip_asset_skips_engine_archives() {
+        let rel = serde_json::json!({"assets": [
+            {"name": "checksums.txt", "browser_download_url": "u0", "size": 1},
+            {"name": "engine-zapret2.zip", "browser_download_url": "u1", "size": 2},
+            {"name": "presets.json", "browser_download_url": "u2", "size": 3},
+            {"name": "Z-GUI.Stable.1.2.zip", "browser_download_url": "u3", "size": 4}
+        ]});
+        let (name, url, size) = pick_zip_asset(&rel).expect("архив найден");
+        assert_eq!(name, "Z-GUI.Stable.1.2.zip");
+        assert_eq!(url, "u3");
+        assert_eq!(size, 4);
+        // Без «программного» имени берём любой zip, кроме engine-*.
+        let rel2 = serde_json::json!({"assets": [
+            {"name": "engine-zapret2.zip", "browser_download_url": "u1", "size": 2},
+            {"name": "other.zip", "browser_download_url": "u9", "size": 5}
+        ]});
+        assert_eq!(pick_zip_asset(&rel2).expect("архив найден").0, "other.zip");
     }
 
     #[test]
