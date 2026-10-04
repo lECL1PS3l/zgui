@@ -1,6 +1,6 @@
 [package]
 name = "zgui"
-version = "1.1.0"
+version = "1.2.0"
 description = "Modern GUI for local traffic optimization engines (flowseal zapret, zapret2, GoodbyeDPI, DPIBreak)"
 edition = "2021"
 

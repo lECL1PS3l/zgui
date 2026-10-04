@@ -198,6 +198,41 @@ pub fn remove_boot_task(data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Создаёт (или пересоздаёт) задачу планировщика «ZapretGUI»: при входе
+/// пользователя запускает программу в трей (`--tray`) с наивысшими правами —
+/// без запроса UAC. Требует прав администратора.
+pub fn apply_boot_task(data_dir: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_q = exe.to_string_lossy().replace('\'', "''");
+    let script = LockedScript::write(
+        data_dir.join("logs").join(format!("boot_task_add_{}.ps1", std::process::id())),
+        &format!(
+            "{}\n\
+$exe = '{exe_q}'\n\
+$action = New-ScheduledTaskAction -Execute $exe -Argument '--tray'\n\
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User \"$env:USERNAME\"\n\
+$principal = New-ScheduledTaskPrincipal -UserId \"$env:USERNAME\" -RunLevel Highest -LogonType Interactive\n\
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)\n\
+Register-ScheduledTask -TaskName '{task}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null\n\
+exit 0\n",
+            PS_HEADER,
+            task = BOOT_TASK
+        ),
+    )?;
+    let result = if is_elevated() {
+        run_powershell(&["-File".into(), script.path().to_string_lossy().into_owned()])
+    } else {
+        run_elevated_script(script.path()).map(|_| String::new())
+    };
+    drop(script);
+    result.map(|_| ())?;
+    // Проверяем факт: молчаливая ошибка тут недопустима.
+    if !boot_task_exists() {
+        return Err("не удалось создать задачу автозапуска".into());
+    }
+    Ok(())
+}
+
 /// Пишет .ps1 в UTF-8 с BOM — иначе PowerShell 5.1 читает кириллицу как ANSI
 /// и ломает кавычки/строки (ParserError). Нужен тестам сервиса/сброса сети.
 #[cfg(test)]

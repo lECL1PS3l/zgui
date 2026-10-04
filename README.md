@@ -1,6 +1,6 @@
 # Z-GUI
 
-![Version](https://img.shields.io/badge/version-1.1.0-success)
+![Version](https://img.shields.io/badge/version-1.2.0-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Privacy](https://img.shields.io/badge/privacy-no%20telemetry-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)

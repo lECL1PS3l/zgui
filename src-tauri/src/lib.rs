@@ -2388,13 +2388,23 @@ fn sync_service_state(state: &mut AppState) {
     }
 }
 
-/// Разовая уборка вырезанного программного автозапуска: если с прошлых версий
-/// осталась задача планировщика или запись в HKCU\Run — удаляем. Автозапуск
-/// теперь существует только в виде службы zapret.
-fn cleanup_legacy_autostart(s: &mut AppState) {
-    if rn::boot_task_exists() {
-        match rn::remove_boot_task(&s.data) {
-            Ok(_) => logger::log("info", "boot", "удалена старая задача автозапуска"),
+/// Автозапуск GUI в трей: держит задачу планировщика в согласии с настройкой
+/// `boot_app` (включена — пересоздаём на текущий exe; выключена — снимаем).
+/// Заодно разово убирает запись HKCU\Run от прежних версий.
+fn sync_boot_task(data: &std::path::Path, boot_app: bool) {
+    rn::remove_legacy_boot();
+    if boot_app {
+        if let Err(e) = rn::apply_boot_task(data) {
+            logger::log_code(
+                "warn",
+                "boot",
+                "W-BOOT-001",
+                &format!("автозапуск в трей не подтвердился: {e}"),
+            );
+        }
+    } else if rn::boot_task_exists() {
+        match rn::remove_boot_task(data) {
+            Ok(_) => logger::log("info", "boot", "старая задача автозапуска снята"),
             Err(e) => logger::log_code(
                 "warn",
                 "boot",
@@ -2403,8 +2413,6 @@ fn cleanup_legacy_autostart(s: &mut AppState) {
             ),
         }
     }
-    rn::remove_legacy_boot();
-    s.settings.boot_app = false;
 }
 
 // ---------------------------------------------------------------- VPN
@@ -2619,7 +2627,17 @@ fn install_service(app: AppHandle, ga: State<'_, Global>, id: String) -> Result<
         s.service_strategy = Some(profile.id.clone());
         s.settings.autostart_mode = "profile".into();
         s.settings.autostart_profile = Some(profile.id.clone());
+        // Одна галочка = служба + программа в трее при входе (решение юзера).
+        s.settings.boot_app = true;
         s.save();
+    }
+    if let Err(e) = rn::apply_boot_task(&data) {
+        logger::log_code(
+            "warn",
+            "boot",
+            "W-BOOT-001",
+            &format!("автозапуск в трей не включился: {e}"),
+        );
     }
     emit(
         &app,
@@ -2651,10 +2669,19 @@ fn remove_service(app: AppHandle, ga: State<'_, Global>) -> Result<(), String> {
         s.service_running = None;
         s.service_strategy = None;
         s.runtime = None;
-        // Автозапуска больше нет: единственный механизм (служба) снят.
+        // Автозапуск снят целиком: и служба, и окно в трее при входе.
         s.settings.autostart_mode = "none".into();
         s.settings.autostart_profile = None;
+        s.settings.boot_app = false;
         s.save();
+    }
+    if let Err(e) = rn::remove_boot_task(&data) {
+        logger::log_code(
+            "warn",
+            "boot",
+            "W-BOOT-001",
+            &format!("не удалось снять автозапуск в трей: {e}"),
+        );
     }
     emit(
         &app,
@@ -2958,6 +2985,12 @@ fn set_settings(ga: State<'_, Global>, mut settings: Settings) -> Result<(), Str
     settings.tg_secret = s.settings.tg_secret.clone();
     settings.always_admin = true;
     settings.admin_onboarded = true;
+    // Автозапуск в трей — не поле формы: сохраняем текущее значение, иначе
+    // любое сохранение настроек выключало бы задачу планировщика.
+    settings.boot_app = s.settings.boot_app;
+    // Пройденное обучение — тоже не поле формы: иначе следующее сохранение
+    // настроек сбрасывало бы флаг и тур предлагался бы при каждом запуске.
+    settings.tour_done = s.settings.tour_done;
     // Смена режима ipsets должна сразу пересобрать list/ipset-all.txt движка:
     // иначе переключатель «не работает» до перезапуска или применения обновлений.
     // Сам движок подхватит новый список при следующем запуске стратегии.
@@ -3968,7 +4001,6 @@ fn scanner_cancel(ga: State<'_, Global>) -> Result<(), String> {
     std::fs::write(dir.join("scan-stop.flag"), b"1").map_err(|e| e.to_string())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Поднимает на передний план главное окно уже запущенной копии (по pid).
 /// Нужно для режима «один экземпляр»: закрытие теперь прячет окно в трей,
 /// поэтому повторный запуск должен вернуть существующее окно, а не плодить
@@ -3978,7 +4010,8 @@ fn focus_window_of_pid(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
-        ShowWindow, GW_OWNER, SW_RESTORE,
+        SetWindowPos, ShowWindow, GW_OWNER, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW,
     };
     unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> i32 {
         let t = &mut *(lparam as *mut (u32, bool, HWND));
@@ -3992,14 +4025,20 @@ fn focus_window_of_pid(pid: u32) -> bool {
         }
         1
     }
-    // Проход 1 — видимое окно; проход 2 — любое (копия могла спрятаться в трей),
-    // тогда SW_RESTORE и покажет его.
+    // Проход 1 — видимое окно; проход 2 — любое (копия могла спрятаться в трей).
     for require_visible in [true, false] {
         let mut t: (u32, bool, HWND) = (pid, require_visible, std::ptr::null_mut());
         unsafe {
             EnumWindows(Some(cb), &mut t as *mut _ as LPARAM);
             if !t.2.is_null() {
+                // Крестик прячет окно (SW_HIDE), поэтому именно SW_SHOW; SW_RESTORE
+                // лишь разворачивает свёрнутое. Затем на миг topmost — окно
+                // гарантированно выходит вперёд даже когда Windows блокирует
+                // SetForegroundWindow из чужого процесса.
+                ShowWindow(t.2, SW_SHOW);
                 ShowWindow(t.2, SW_RESTORE);
+                SetWindowPos(t.2, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                SetWindowPos(t.2, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
                 SetForegroundWindow(t.2);
                 return true;
             }
@@ -4056,6 +4095,7 @@ async fn app_update_download(app: AppHandle, ga: State<'_, Global>) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     logger::install_panic_hook();
     tauri::Builder::default()
@@ -4088,6 +4128,10 @@ pub fn run() {
             // нет, и на плитке висит фантомный чип «служба» до первого скана.
             sync_service_state(&mut state);
             let elevated_flag = std::env::args().any(|a| a == "--elevated");
+            // Автозапуск при входе запускает программу скрыто в трей (задача
+            // планировщика «ZapretGUI»). `--tray` — окно не показываем, живёт
+            // только иконка; окно появляется по клику.
+            let tray_flag = std::env::args().any(|a| a == "--tray");
             if !elevated_flag && !rn::is_elevated() {
                 // Без прав администратора программа не работает: один запрос UAC
                 // при запуске, режим закрепляется навсегда (решение юзера 26.09).
@@ -4121,6 +4165,16 @@ pub fn run() {
                 .and_then(|s| s.trim().parse::<u32>().ok())
             {
                 if pid != std::process::id() && svc::pid_is_zgui(pid) {
+                    // Автозапуск (`--tray`): копия уже живёт — молча выходим,
+                    // чтобы не выдёргивать её окно при входе (решение юзера).
+                    if tray_flag {
+                        logger::log(
+                            "info",
+                            "app",
+                            &format!("автозапуск: копия (pid {pid}) уже работает — тихо выхожу"),
+                        );
+                        std::process::exit(0);
+                    }
                     let focused = focus_window_of_pid(pid);
                     logger::log(
                         "info",
@@ -4141,13 +4195,16 @@ pub fn run() {
             ensure_presets(&mut state);
             drop_custom_profiles(&mut state);
             state.save();
-            cleanup_legacy_autostart(&mut state);
+            // Настройка автозапуска в трей не должна держать старт — в фоне.
+            let boot_data = state.data.clone();
+            let boot_app = state.settings.boot_app;
             // Чиним «осиротевший» системный прокси (остался от выгруженного VPN).
             let healed = heal_orphan_proxy();
             // Единый sweep: зависшие движки чужих копий/прошлых сбоев и их
             // драйверы WinDivert, пока оптимизация не запущена.
-            std::thread::spawn(|| {
+            std::thread::spawn(move || {
                 maintenance_sweep();
+                sync_boot_task(&boot_data, boot_app);
                 if rn::is_elevated() {
                     // TCP timestamps — как автор включает при каждом запуске .bat.
                     diag::ensure_tcp_timestamps();
@@ -4196,6 +4253,9 @@ pub fn run() {
                 .ok_or("не найдена конфигурация главного окна")?;
             let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
                 .data_directory(webview_data)
+                // `--tray` (автозапуск при входе): окно создаётся скрытым —
+                // показываем его только по клику на иконку или из меню трея.
+                .visible(!tray_flag)
                 .build()?;
             apply_native_window_icon(&window);
             // Трей-иконка: меню «Показать окно» / «Выход». Закрытие окна (крестик)
@@ -4215,6 +4275,22 @@ pub fn run() {
                     .icon(icon)
                     .tooltip("Z-GUI")
                     .menu(&menu)
+                    // Левый клик по иконке показывает окно — то же, что пункт меню.
+                    .on_tray_icon_event(|tray, event| {
+                        use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            if let Some(w) = tray.app_handle().get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    })
                     .on_menu_event(|app, ev| match ev.id().as_ref() {
                         "tray_show" => {
                             if let Some(w) = app.get_webview_window("main") {

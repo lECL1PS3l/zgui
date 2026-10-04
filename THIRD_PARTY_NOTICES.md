@@ -56,11 +56,13 @@ Without you this project would not exist.
 - License: **Creative Commons Attribution 4.0 International (CC BY 4.0)** —
   https://creativecommons.org/licenses/by/4.0/
 - Copyright (c) Steve Schoger
-- Files used: `src/assets/topo.svg` (dark themes; original export) and
-  `src/assets/topo-light.svg` (light theme; recolored export made with the author's
-  own generator on heropatterns.com).
+- Files used: `src/assets/topo.svg` (default) and `src/assets/patterns/*.svg`
+  (extra patterns: bank-note, bubbles, circuit-board, hideout, plus, random-shapes,
+  texture, tic-tac-toe, wiggle), all generated with the author's own generator on
+  heropatterns.com.
 - Changes made by this project: the pattern is applied as a CSS background layer, with
-  opacity and a slow drift animation configured in `src/styles.css`; no other modification.
+  opacity and a slow drift animation configured in `src/styles.css`; the pattern fill
+  was recolored to white (`#fff`) to match the dark themes. No other modification.
 - This attribution does not imply that Steve Schoger endorses this project.
 
 ## tg-ws-proxy-rs

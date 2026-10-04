@@ -18,6 +18,7 @@ import icoCheck from "./assets/icons/lucide-check.svg?raw";
 import icoScroll from "./assets/icons/lucide-scroll-text.svg?raw";
 import icoWrench from "./assets/icons/lucide-wrench.svg?raw";
 import icoInfo from "./assets/icons/lucide-info.svg?raw";
+import topoUrl from "./assets/topo.svg?url";
 
 const NAV_ICONS = {
   strategies: icoZap,
@@ -272,6 +273,7 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = t;
   try { localStorage.setItem("zgui.theme", t); } catch (_) {}
   $$("#themeGrid .theme-card").forEach((c) => c.classList.toggle("active", c.dataset.theme === t));
+  syncFxEnabled();
 }
 
 function initTheme() {
@@ -304,6 +306,79 @@ async function pickTheme(theme) {
   } catch (e) {
     toast("err", T.theme_err(e));
   }
+}
+
+// ------------------------------------------------------------- узор фона
+const patternMods = import.meta.glob("./assets/patterns/*.svg", { eager: true, query: "?url", import: "default" });
+const PATTERN_URLS = { topo: topoUrl };
+for (const [p, url] of Object.entries(patternMods)) {
+  PATTERN_URLS[p.split("/").pop().replace(".svg", "")] = url;
+}
+// topo — текущий узор, дальше — набор Hero Patterns (тот же автор).
+const PATTERN_ORDER = ["topo", "bubbles", "tic-tac-toe"];
+// Размер тайла в превью (px): подбираем под наглядность каждого узора.
+const PATTERN_PREVIEW = { topo: 360, bubbles: 56, "tic-tac-toe": 44 };
+// Размер тайла в теме (px): узоры «отдалены», как топо. Кратно дельте дрейфа (calc в styles.css).
+const PATTERN_THEME_SIZE = { topo: 600, bubbles: 140, "tic-tac-toe": 95 };
+// Множитель прозрачности узора (доля от базовой темы): новые узоры приглушены.
+const PATTERN_OPACITY = { topo: 1, bubbles: 0.57, "tic-tac-toe": 0.57 };
+
+function currentPattern() {
+  try { return localStorage.getItem("zgui.pattern") || "topo"; } catch (_) { return "topo"; }
+}
+
+function applyPattern(id) {
+  const p = PATTERN_URLS[id] ? id : "topo";
+  document.documentElement.style.setProperty("--topo-image", `url("${PATTERN_URLS[p]}")`);
+  document.documentElement.style.setProperty("--topo-size", `${PATTERN_THEME_SIZE[p] || 600}px`);
+  document.documentElement.style.setProperty("--pat-opacity", `${PATTERN_OPACITY[p] ?? 1}`);
+  try { localStorage.setItem("zgui.pattern", p); } catch (_) {}
+  $$("#patternGrid .pattern-card").forEach((c) => c.classList.toggle("active", c.dataset.pattern === p));
+}
+
+function renderPatternGrid() {
+  const grid = $("#patternGrid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  for (const id of PATTERN_ORDER) {
+    if (!PATTERN_URLS[id]) continue;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "theme-card pattern-card";
+    b.dataset.pattern = id;
+    const sw = document.createElement("span");
+    sw.className = "pattern-swatch";
+    sw.style.backgroundImage = `url("${PATTERN_URLS[id]}")`;
+    const px = PATTERN_PREVIEW[id] || 108;
+    sw.style.backgroundSize = `${px}px ${px}px`;
+    b.append(sw);
+    b.addEventListener("click", () => applyPattern(id));
+    grid.appendChild(b);
+  }
+  applyPattern(currentPattern());
+}
+
+// На светлой теме фона нет: галочки анимации и узора заблокированы.
+function syncFxEnabled() {
+  const light = document.documentElement.dataset.theme === "light";
+  const fx = $("#cfFxOff");
+  if (fx) fx.disabled = light;
+  const pat = $("#cfPatOff");
+  if (pat) pat.disabled = light;
+}
+
+function initFx() {
+  let off = false;
+  try { off = localStorage.getItem("zgui.fx") === "off"; } catch (_) {}
+  document.body.classList.toggle("fx-off", off);
+  const cb = $("#cfFxOff");
+  if (cb) cb.checked = off;
+  let patOff = false;
+  try { patOff = localStorage.getItem("zgui.pat") === "off"; } catch (_) {}
+  document.body.classList.toggle("pat-off", patOff);
+  const pcb = $("#cfPatOff");
+  if (pcb) pcb.checked = patOff;
+  syncFxEnabled();
 }
 
 function toast(kind, text) {
@@ -2089,6 +2164,18 @@ function bindStatic() {
     c.addEventListener("click", () => pickTheme(c.dataset.theme)),
   );
 
+  if ($("#cfFxOff")) $("#cfFxOff").addEventListener("change", () => {
+    const off = $("#cfFxOff").checked;
+    document.body.classList.toggle("fx-off", off);
+    try { localStorage.setItem("zgui.fx", off ? "off" : "on"); } catch (_) {}
+  });
+
+  if ($("#cfPatOff")) $("#cfPatOff").addEventListener("change", () => {
+    const off = $("#cfPatOff").checked;
+    document.body.classList.toggle("pat-off", off);
+    try { localStorage.setItem("zgui.pat", off ? "off" : "on"); } catch (_) {}
+  });
+
   if ($("#btnTgToggle")) $("#btnTgToggle").addEventListener("click", tgToggle);
   if ($("#btnTgConnect")) $("#btnTgConnect").addEventListener("click", tgConnect);
   if ($("#tgAutostart")) $("#tgAutostart").addEventListener("change", tgSavePrefs);
@@ -2517,6 +2604,8 @@ async function wireEvents() {
 }
 
 initTheme();
+renderPatternGrid();
+initFx();
 applyTexts();
 renderNavIcons();
 bindStatic();
