@@ -9,6 +9,7 @@
 
 # Артефакты сборки и релизов
 /release/
+/.test/
 
 # Артефакты Playwright
 /.playwright-mcp/

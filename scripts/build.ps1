@@ -73,7 +73,7 @@ if (Test-Path -LiteralPath $readme) {
     }
 }
 
-$dest = "E:\Base\opencode\.test\$stamp"
+$dest = Join-Path $root ".test\$stamp"
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Copy-Item -LiteralPath "$root\src-tauri\target\release\zgui.exe" -Destination $dest -Force
 New-Item -ItemType Directory -Path (Join-Path $dest 'data') -Force | Out-Null
