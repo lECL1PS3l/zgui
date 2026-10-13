@@ -1,0 +1,32 @@
+# Node / Vite
+/node_modules/
+/dist/
+/.vite/
+
+# Rust / Tauri
+/src-tauri/gen/
+**/target/
+
+# Артефакты сборки и релизов
+/release/
+
+# Артефакты Playwright
+/.playwright-mcp/
+
+# Данные рядом с программой
+/data/
+**/data/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Служебные файлы
+*.log
+.DS_Store
+https%3a%2f%2f*
+
+# Внутренние заметки (не публикуются)
+/Context/
+/opencode.json
+/AGENTS.md

@@ -1,0 +1,881 @@
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+
+pub const ENGINE_FLOWSEAL: &str = "flowseal";
+pub const ENGINE_ZAPRET2: &str = "zapret2";
+pub const ENGINE_GOODBYEDPI: &str = "goodbyedpi";
+pub const SERVICE_NAME: &str = "zapret";
+
+/// Репозиторий самого Z GUI: отсюда качаются движки нашей сборки (self_asset)
+/// и OTA-набор пресетов (presets.json в ассетах последнего релиза).
+pub const SELF_REPO: &str = "lECL1PS3l/zgui";
+
+/// Описание встроенного движка. Единая точка правды: exe, репозиторий релизов,
+/// человекочитаемое имя. Все проверки «какой движок» идут через реестр.
+pub struct EngineDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub repo: &'static str,
+    pub exe: &'static str,
+}
+
+/// Реестр поддерживаемых движков. Все системные (WinDivert), plug-and-play.
+pub fn engines() -> &'static [EngineDef] {
+    &[
+        EngineDef {
+            id: ENGINE_FLOWSEAL,
+            label: "Flowseal (zapret winws)",
+            repo: "Flowseal/zapret-discord-youtube",
+            exe: "winws.exe",
+        },
+        EngineDef {
+            id: ENGINE_ZAPRET2,
+            label: "zapret2 (winws2)",
+            repo: "bol-van/zapret2",
+            exe: "winws2.exe",
+        },
+        EngineDef {
+            id: ENGINE_GOODBYEDPI,
+            label: "GoodbyeDPI",
+            repo: "ValdikSS/GoodbyeDPI",
+            exe: "goodbyedpi.exe",
+        },
+    ]
+}
+
+pub fn engine_def(id: &str) -> Option<&'static EngineDef> {
+    engines().iter().find(|d| d.id == id)
+}
+
+pub fn engine_ids() -> Vec<&'static str> {
+    engines().iter().map(|d| d.id).collect()
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct Roots {
+    /// Сериализуется как ПЛОСКИЙ объект `{"flowseal": "..."}` (см. ручной Serialize).
+    /// Старый state.json (поле flowseal) читается без миграции.
+    map: BTreeMap<String, String>,
+}
+
+/// Плоская сериализация: `{"flowseal":"...","zapret2":"..."}`, а НЕ `{"map":{...}}`.
+/// Раньше derive писал обёртку `map`, из-за чего свой же файл не читался обратно
+/// (кастомный Deserialize ждал плоский объект) — настройки терялись каждый запуск.
+impl Serialize for Roots {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.map.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Roots {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        let map: BTreeMap<String, String> = match &raw {
+            // Формат 1.3.0 (баг): {"map": {"flowseal": "..."}} — читаем внутренний объект.
+            serde_json::Value::Object(o) => match o.get("map") {
+                Some(serde_json::Value::Object(inner)) => {
+                    serde_json::from_value(serde_json::Value::Object(inner.clone()))
+                        .map_err(serde::de::Error::custom)?
+                }
+                // Плоский (текущий и легаси {"flowseal": "..."}).
+                _ => serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?,
+            },
+            _ => serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?,
+        };
+        Ok(Roots { map })
+    }
+}
+
+impl Roots {
+    pub fn path(&self, engine: &str) -> Option<PathBuf> {
+        engine_def(engine).and_then(|_| self.map.get(engine).map(PathBuf::from))
+    }
+    pub fn set(&mut self, engine: &str, p: Option<String>) {
+        if engine_def(engine).is_none() {
+            return;
+        }
+        match p {
+            Some(v) => {
+                self.map.insert(engine.into(), v);
+            }
+            None => {
+                self.map.remove(engine);
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Settings {
+    // Каждое поле обязано иметь `#[serde(default = ...)]`: state.json читается
+    // целиком, и одна недостающая клавиша обнуляет ВСЕ настройки и профили
+    // (AppState::load молча подставляет пустое состояние). Новые поля — с дефолтом.
+    #[serde(default = "default_interval_hours")]
+    pub update_interval_hours: u32,
+    #[serde(default = "default_game_filter")]
+    pub game_filter: String,
+    /// Кастомные диапазоны Game Filter (формат автора: `порт` или `start-end`
+    /// через запятую; пример исключения RTMP: 1024-1934,1936-65535).
+    #[serde(default = "default_port_range")]
+    pub game_filter_tcp: String,
+    #[serde(default = "default_port_range")]
+    pub game_filter_udp: String,
+    #[serde(default = "default_ipset_mode")]
+    pub ipset_mode: String,
+    /// DNS-сервер, выбранный во вкладке «DNS» (id провайдера из dns.rs).
+    #[serde(default = "default_dns_provider")]
+    pub dns_provider: String,
+    #[serde(default = "default_autostart_mode")]
+    pub autostart_mode: String,
+    #[serde(default)]
+    pub autostart_profile: Option<String>,
+    #[serde(default)]
+    pub always_admin: bool,
+    #[serde(default)]
+    pub tg_autostart: bool,
+    #[serde(default = "default_tg_port")]
+    pub tg_port: u16,
+    /// Предлагать автоматически подключить Telegram-прокси, когда запущен Telegram
+    /// и нет VPN/туннеля. По умолчанию выключено (включается галочкой в «Telegram»).
+    #[serde(default)]
+    pub tg_offer: bool,
+/// Постоянный секрет MTProto-бриджа (32 hex). Один и тот же между запусками:
+    /// Telegram переиспользует одну запись прокси вместо накопления мёртвых.
+    /// На диск сериализуется, но в вебвью не отдаётся — см. `bootstrap_impl`.
+    #[serde(default)]
+    pub tg_secret: Option<String>,
+    /// Одноразовая миграция: старый дефолт интервала 6 ч → 72 ч.
+    #[serde(default)]
+    pub interval_migrated: bool,
+    /// Тема оформления: "grey" (графит, по умолчанию), "dark" (космос), "light" (белая).
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Автозапуск GUI при входе: задача планировщика «ZapretGUI» запускает
+    /// программу в трей (`--tray`) с наивысшими правами. Включается вместе со
+    /// службой (одна галочка на карточке автозапуска).
+    #[serde(default)]
+    pub boot_app: bool,
+    /// Первый запуск: предложение «Всегда запускать от администратора» уже показано.
+    #[serde(default)]
+    pub admin_onboarded: bool,
+    /// Античит-пауза: гасить оптимизацию, когда обнаружен клиент античита (EAC/BE/Vanguard).
+    #[serde(default)]
+    pub anticheat_pause: bool,
+    /// Обучение-тур (coach marks) пройден — предлагаем один раз за установку.
+    #[serde(default)]
+    pub tour_done: bool,
+}
+
+fn default_tg_port() -> u16 {
+    1443
+}
+
+fn default_theme() -> String {
+    "grey".into()
+}
+
+fn default_port_range() -> String {
+    "1024-65535".into()
+}
+
+fn default_dns_provider() -> String {
+    "cloudflare".into()
+}
+
+fn default_interval_hours() -> u32 {
+    72
+}
+
+fn default_game_filter() -> String {
+    "off".into()
+}
+
+fn default_ipset_mode() -> String {
+    "loaded".into()
+}
+
+fn default_autostart_mode() -> String {
+    "none".into()
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            update_interval_hours: default_interval_hours(),
+            game_filter: default_game_filter(),
+            game_filter_tcp: default_port_range(),
+            game_filter_udp: default_port_range(),
+            ipset_mode: default_ipset_mode(),
+            dns_provider: default_dns_provider(),
+            autostart_mode: default_autostart_mode(),
+            autostart_profile: None,
+            always_admin: false,
+            tg_autostart: false,
+            tg_port: default_tg_port(),
+            tg_offer: false,
+            tg_secret: None,
+            interval_migrated: false,
+            theme: default_theme(),
+            boot_app: false,
+            admin_onboarded: false,
+            anticheat_pause: false,
+            tour_done: false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub engine: String,
+    pub args: Vec<String>,
+    pub builtin: bool,
+    pub source: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl Profile {
+    pub fn exe_name(&self) -> &'static str {
+        engine_def(&self.engine)
+            .map(|d| d.exe)
+            .unwrap_or("winws.exe")
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Runtime {
+    pub profile_id: String,
+    pub pid: u32,
+    pub started_at: u64,
+    pub via: String,
+    pub alive: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdEntry {
+    pub id: String,
+    pub group: String,
+    pub label: String,
+    pub dest: String,
+    pub exists: bool,
+    pub status: String,
+    pub remote_hash: Option<String>,
+    pub applied_hash: Option<String>,
+    pub local_hash: Option<String>,
+    pub size: u64,
+    pub error: Option<String>,
+    /// Дельта строк текстового списка при обновлении (для показа «+N −M»).
+    #[serde(default)]
+    pub added: u64,
+    #[serde(default)]
+    pub removed: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdaterCache {
+    pub last_check: Option<String>,
+    pub entries: Vec<UpdEntry>,
+    pub last_auto: Option<String>,
+    /// Кулдаун следующей автопроверки (epoch-сек): ставится перед запуском
+    /// фоновой проверки, чтобы неудачная попытка повторялась не каждые 2 с.
+    #[serde(default)]
+    pub next_auto: Option<u64>,
+}
+
+/// Последняя запись `state.json` не удалась (файл занят/нет прав): UI покажет
+/// предупреждение, а не будет молча работать со старым состоянием.
+static SAVE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn save_failed() -> bool {
+    SAVE_FAILED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppState {
+    #[serde(skip)]
+    pub data: PathBuf,
+    #[serde(default)]
+    pub roots: Roots,
+    #[serde(default)]
+    pub settings: Settings,
+    #[serde(default)]
+    pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub runtime: Option<Runtime>,
+    #[serde(default)]
+    pub updater: UpdaterCache,
+    #[serde(default)]
+    pub service_checked_at: u64,
+    #[serde(default)]
+    pub service_running: Option<bool>,
+    #[serde(default)]
+    pub service_strategy: Option<String>,
+}
+
+impl AppState {
+    pub fn load(data: PathBuf) -> Self {
+        let path = data.join("state.json");
+        // Файл не прочитан и файл не разобран — разные вещи. Второй случай мы
+        // чиним копией, первый обязан остановить запуск: иначе миграция ниже
+        // сохранит пустые настройки поверх целого файла.
+        let (raw, read_err) = match fs::read_to_string(&path) {
+            Ok(s) => (Some(s), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        if let Some(e) = read_err.as_ref() {
+            crate::logger::log(
+                "err",
+                "config",
+                &format!("state.json не прочитан — настройки НЕ сброшены: {e}"),
+            );
+        }
+        let parsed = raw
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<AppState>(s).ok());
+        // Битый state.json не должен молча превращаться в «программу без настроек»:
+        // сохраняем копию рядом, чтобы пользователь мог показать её разработчику.
+        if parsed.is_none() {
+            if let Some(text) = raw.as_ref() {
+                if !text.trim().is_empty() {
+                    let stamp = crate::profiles::now_str();
+                    let bad = data.join(format!("state.json.bad-{stamp}"));
+                    let _ = fs::write(&bad, text);
+                    crate::logger::log(
+                        "warn",
+                        "config",
+                        &format!(
+                            "state.json повреждён — копия сохранена как {}",
+                            bad.display()
+                        ),
+                    );
+                }
+            }
+        }
+        let mut st: AppState = parsed.unwrap_or_else(|| AppState {
+            data: data.clone(),
+            roots: Roots::default(),
+            settings: Settings::default(),
+            profiles: Vec::new(),
+            runtime: None,
+            updater: UpdaterCache::default(),
+            service_checked_at: 0,
+            service_running: None,
+            service_strategy: None,
+        });
+        st.data = data;
+        // Одноразовая миграция: старый дефолт автопроверки 6 ч → новый 72 ч.
+        // Пользовательские значения, отличные от 6, не трогаются.
+        // При недоступном чтении файла не мигрируем: сохранение здесь записало
+        // бы пустые настройки поверх непрочитанного state.json.
+        if read_err.is_none() && !st.settings.interval_migrated {
+            if st.settings.update_interval_hours == 6 {
+                st.settings.update_interval_hours = 72;
+            }
+            st.settings.interval_migrated = true;
+            st.save();
+        }
+        st.ensure_dirs();
+        st
+    }
+
+    /// Сохраняет состояние (tmp + rename). Возвращает `false` при ошибке и
+    /// поднимает флаг `save_failed` — UI показывает проблему, вместо того чтобы
+    /// молча работать со старым `state.json`.
+    pub fn save(&self) -> bool {
+        let path = self.data.join("state.json");
+        let json = match serde_json::to_string_pretty(self) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::logger::log_code(
+                    "err",
+                    "state",
+                    "E-SYS-001",
+                    &format!("сериализация настроек: {e}"),
+                );
+                SAVE_FAILED.store(true, Ordering::SeqCst);
+                return false;
+            }
+        };
+        // Через atomic_write: временное имя по pid + sync перед rename. Своё
+        // имя `state.json.tmp` было общим для двух экземпляров (непривилегированный
+        // пишет перед перезапуском с правами, привилегированный — сразу после),
+        // и чужой `rename` утаскивал в цель недописанные байты.
+        // Антивирус/OneDrive иногда держат файл доли секунды — одна повторная
+        // попытка закрывает такие случаи.
+        let mut last = String::new();
+        for attempt in 0..2 {
+            match atomic_write(&path, json.as_bytes()) {
+                Ok(()) => {
+                    SAVE_FAILED.store(false, Ordering::SeqCst);
+                    return true;
+                }
+                Err(e) => {
+                    last = e;
+                    if attempt == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    }
+                }
+            }
+        }
+        crate::logger::log_code(
+            "err",
+            "state",
+            "E-SYS-002",
+            &format!("state.json не сохранён (файл занят или нет прав): {last}"),
+        );
+        SAVE_FAILED.store(true, Ordering::SeqCst);
+        false
+    }
+
+    pub fn ensure_dirs(&self) {
+        let dirs = [
+            self.data.clone(),
+            self.data.join("catalog"),
+            self.data.join("catalog/flowseal/raw"),
+            self.data.join("catalog/flowseal/lists"),
+            self.data.join("catalog/flowseal/.service"),
+            self.data.join("catalog/sources/flowseal"),
+            self.data.join("catalog/geoblock"),
+            self.data.join("logs"),
+            self.data.join("tmp"),
+            self.data.join("engines"),
+            self.data.join("webview"),
+        ];
+        for d in dirs {
+            let _ = fs::create_dir_all(d);
+        }
+    }
+
+    pub fn profile(&self, id: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
+
+    pub fn catalog_dir(&self, engine: &str) -> PathBuf {
+        self.data.join("catalog").join(engine.to_lowercase())
+    }
+
+    pub fn raw_strategies_dir(&self) -> PathBuf {
+        self.data.join("catalog/flowseal/raw")
+    }
+
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data.join("logs")
+    }
+
+    pub fn root_for(&self, engine: &str) -> Option<PathBuf> {
+        self.roots.path(engine)
+    }
+}
+
+pub fn portable_data_dir() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| "не удалось определить папку zgui.exe".to_string())?;
+    let data = directory.join("data");
+    fs::create_dir_all(&data).map_err(|e| {
+        format!(
+            "не удаётся создать portable-папку {}: {}. Поместите zgui.exe в доступную для записи папку.",
+            data.display(),
+            e
+        )
+    })?;
+    Ok(data)
+}
+
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    format!("{:x}", h.finalize())
+}
+
+/// Декодирует текст, автоматически определяя кодировку. Логи и вывод PowerShell/winws
+/// приходят в UTF-16 (Out-File по умолчанию), UTF-8 (BOM/без) или OEM-кодировке (CP866).
+/// Раньше всё читалось как UTF-8 → кириллица превращалась в «иероглифы».
+pub fn decode_text(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let u16s: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&u16s);
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let u16s: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&u16s);
+    }
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+    // UTF-16 без BOM: каждый второй байт — ноль (латиница/цифры/кириллица в BMP).
+    if bytes.len() >= 4 && bytes.len().is_multiple_of(2) {
+        let zeros = bytes.iter().skip(1).step_by(2).filter(|b| **b == 0).count();
+        if zeros * 2 >= bytes.len() / 2 {
+            let u16s: Vec<u16> = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            return String::from_utf16_lossy(&u16s);
+        }
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[cfg(windows)]
+    {
+        return decode_oem(bytes);
+    }
+    #[allow(unreachable_code)]
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Декодирует OEM-кодировку (CP866) — так печатают консольные winws/winws2 и cmd.
+#[cfg(windows)]
+fn decode_oem(bytes: &[u8]) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    const CP_OEMCP: u32 = 1;
+    unsafe {
+        let len = MultiByteToWideChar(
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            std::ptr::null_mut(),
+            0,
+        );
+        if len <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut buf = vec![0u16; len as usize];
+        let n = MultiByteToWideChar(
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            buf.as_mut_ptr(),
+            len,
+        );
+        if n <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        buf.truncate(n as usize);
+        String::from_utf16_lossy(&buf)
+    }
+}
+
+pub fn read_text_auto(path: &Path) -> Option<String> {
+    fs::read(path).ok().map(|b| decode_text(&b))
+}
+
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // Имя временного файла — по pid: приложение пишет state и в непривилегированном
+    // экземпляре (перед перезапуском с правами), и в привилегированном. Общее
+    // имя означало, что один `rename` утаскивал в цель чужие недописанные байты.
+    let tmp = path.with_extension(format!("zgui_tmp.{}", std::process::id()));
+    let res = (|| {
+        let mut f = fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        f.write_all(data).map_err(|e| e.to_string())?;
+        // Без sync переименование может «увидеть» недописанный файл — torn state.json.
+        f.sync_all().map_err(|e| e.to_string())?;
+        drop(f);
+        fs::rename(&tmp, path).map_err(|e| e.to_string())
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
+pub fn tail_file(path: &Path, max_chars: usize) -> String {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let s = decode_text(&bytes);
+            let lines: Vec<&str> = s.lines().collect();
+            let mut out = String::new();
+            let mut count = 0usize;
+            for l in lines.iter().rev() {
+                if out.chars().count() + l.chars().count() + 1 > max_chars {
+                    break;
+                }
+                if count < 400 {
+                    out.insert_str(0, l);
+                    out.insert(0, '\n');
+                    count += 1;
+                }
+            }
+            out.trim_start().to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
+pub fn find_exe(root: &Path, name: &str) -> Option<String> {
+    fn walk(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+        if depth > 5 {
+            return None;
+        }
+        let entries = fs::read_dir(dir).ok()?;
+        for e in entries.flatten() {
+            let p = e.path();
+            let ftype = e.file_type().ok();
+            if ftype.map(|t| t.is_file()).unwrap_or(false) {
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+                {
+                    return Some(p);
+                }
+            } else if ftype.map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(f) = walk(&p, name, depth + 1) {
+                    return Some(f);
+                }
+            }
+        }
+        None
+    }
+    walk(root, name, 0).and_then(|p| {
+        p.strip_prefix(root)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_and_roots_migration() {
+        // Реестр: все три движка, exe-имена корректны.
+        let all = engines();
+        assert_eq!(all.len(), 3);
+        assert!(engine_def("zapret2")
+            .map(|d| d.exe == "winws2.exe")
+            .unwrap_or(false));
+        assert!(engine_def("goodbyedpi")
+            .map(|d| d.exe == "goodbyedpi.exe")
+            .unwrap_or(false));
+        assert!(engine_def("unknown").is_none());
+
+        // Старый state.json: roots {"flowseal": "C:\\z"} → новая map.
+        let legacy = serde_json::json!({"flowseal": "C:\\z"});
+        let roots: Roots = serde_json::from_value(legacy).unwrap();
+        assert_eq!(roots.path("flowseal").unwrap(), PathBuf::from("C:\\z"));
+        assert!(roots.path("zapret2").is_none());
+
+        // set работает для зарегистрированных движков, чужой id игнорируется.
+        let mut r = Roots::default();
+        r.set("zapret2", Some("D:\\e2".into()));
+        r.set("bogus", Some("X".into()));
+        assert_eq!(r.path("zapret2").unwrap(), PathBuf::from("D:\\e2"));
+        assert!(r.path("bogus").is_none());
+        r.set("zapret2", None);
+        assert!(r.path("zapret2").is_none());
+
+        // exe_name через реестр; неизвестный движок — безопасный фоллбек winws.
+        let p = Profile {
+            id: "x".into(),
+            name: "x".into(),
+            engine: "goodbyedpi".into(),
+            args: vec![],
+            builtin: true,
+            source: None,
+            updated_at: None,
+        };
+        assert_eq!(p.exe_name(), "goodbyedpi.exe");
+        let mut q = p.clone();
+        q.engine = "unknown".into();
+        assert_eq!(q.exe_name(), "winws.exe");
+    }
+
+    #[test]
+    fn roots_roundtrips_flat_map_and_legacy() {
+        // Плоская сериализация (не {"map":{...}}) — корень бага с потерей настроек.
+        let mut r = Roots::default();
+        r.set(ENGINE_FLOWSEAL, Some("C:\\z".into()));
+        r.set(ENGINE_ZAPRET2, Some("D:\\e2".into()));
+        let js = serde_json::to_string(&r).unwrap();
+        assert!(js.starts_with('{') && js.contains("\"flowseal\"") && !js.contains("\"map\""));
+        let back: Roots = serde_json::from_str(&js).unwrap();
+        assert_eq!(back.path(ENGINE_FLOWSEAL).unwrap(), PathBuf::from("C:\\z"));
+        assert_eq!(back.path(ENGINE_ZAPRET2).unwrap(), PathBuf::from("D:\\e2"));
+
+        // Формат 1.3.0 с обёрткой map — читаем (обратная совместимость).
+        let wrapped = serde_json::json!({"map": {"zapret2": "D:\\e2"}});
+        let r2: Roots = serde_json::from_value(wrapped).unwrap();
+        assert_eq!(r2.path(ENGINE_ZAPRET2).unwrap(), PathBuf::from("D:\\e2"));
+
+        // Легаси плоский {"flowseal": ...}.
+        let leg = serde_json::json!({"flowseal": "C:\\z"});
+        let r3: Roots = serde_json::from_value(leg).unwrap();
+        assert_eq!(r3.path(ENGINE_FLOWSEAL).unwrap(), PathBuf::from("C:\\z"));
+    }
+
+    #[test]
+    fn appstate_roundtrips_settings_and_roots() {
+        // Регресс: раньше AppState писался без возможности прочитать обратно
+        // (roots: {"map":...}) — каждый запуск «state.json повреждён», настройки
+        // сбрасывались. Проверяем полный round-trip.
+        let mut roots = Roots::default();
+        roots.set(ENGINE_FLOWSEAL, Some("C:\\z".into()));
+        let settings = Settings {
+            admin_onboarded: true,
+            always_admin: true,
+            update_interval_hours: 5,
+            ..Settings::default()
+        };
+        let state = AppState {
+            data: PathBuf::new(), // #[serde(skip)]
+            roots,
+            settings,
+            profiles: vec![],
+            runtime: None,
+            updater: UpdaterCache::default(),
+            service_checked_at: 0,
+            service_running: None,
+            service_strategy: None,
+        };
+        let js = serde_json::to_string(&state).unwrap();
+        let back: AppState = serde_json::from_str(&js).expect("state.json должен читаться обратно");
+        assert_eq!(
+            back.roots.path(ENGINE_FLOWSEAL).unwrap(),
+            PathBuf::from("C:\\z")
+        );
+        assert!(
+            back.settings.admin_onboarded,
+            "admin_onboarded должен сохраниться"
+        );
+        assert!(back.settings.always_admin);
+        assert_eq!(back.settings.update_interval_hours, 5);
+    }
+
+    #[test]
+    fn tg_offer_defaults_to_off() {
+        // Просьба владельца 25.09: предложение TG-моста не выскакивает само,
+        // пока пользователь не включит галочку (и не раньше админ-вопроса).
+        assert!(!Settings::default().tg_offer);
+    }
+
+    /// Секрет моста обязан переживать запись на диск: `skip_serializing` здесь
+    /// обнулил бы его при каждом сохранении и мост получал бы новый ключ.
+    /// В вебвью секрет не отдаётся (см. `bootstrap_impl`) — на диск пишется.
+    #[test]
+    fn tg_secret_survives_serialization_to_disk() {
+        let s = Settings {
+            tg_secret: Some("a".repeat(32)),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(&"a".repeat(32)), "секрет должен писаться на диск");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tg_secret, s.tg_secret);
+    }
+
+    /// Поле Settings без `#[serde(default)]` роняет разбор ВСЕГО state.json —
+    /// пользователь молча получает пустые настройки и ноль профилей. Тест
+    /// выкидывает по очереди каждую клавишу и требует, чтобы дефолт совпал.
+    #[test]
+    fn every_settings_field_survives_being_missing() {
+        let full = serde_json::to_value(Settings::default()).unwrap();
+        let obj = full.as_object().unwrap();
+        assert!(!obj.is_empty());
+        for (key, value) in obj {
+            let mut trimmed = full.clone();
+            let m = trimmed.as_object_mut().unwrap();
+            m.remove(key);
+            let got: Settings = serde_json::from_value(trimmed)
+                .unwrap_or_else(|e| panic!("без ключа {key} разбор падает: {e}"));
+            assert_eq!(
+                &serde_json::to_value(&got).unwrap()[key],
+                value,
+                "без ключа {key} дефолт не совпал с исходным"
+            );
+        }
+    }
+
+    /// Та же мина, но уровнем выше: у `AppState` поле `settings` — самое
+    /// крупное, и без `#[serde(default)]` его отсутствие роняет разбор всего
+    /// файла вместе с профилями.
+    #[test]
+    fn app_state_survives_settings_object_being_missing() {
+        let mut full = serde_json::to_value(AppState {
+            data: PathBuf::new(),
+            ..AppState::load(std::env::temp_dir().join("zgui-empty-probe"))
+        })
+        .unwrap();
+        full.as_object_mut().unwrap().remove("settings");
+        let got: AppState =
+            serde_json::from_value(full).expect("без блока settings разбор падает");
+        assert_eq!(
+            serde_json::to_value(&got.settings).unwrap(),
+            serde_json::to_value(Settings::default()).unwrap()
+        );
+    }
+
+    /// Временное имя файла состояния должно быть уникальным на процесс:
+    /// непривилегированный экземпляр пишет перед перезапуском с правами,
+    /// привилегированный — сразу после. Общее имя давало рваный state.json.
+    #[test]
+    fn save_uses_a_process_scoped_temp_file() {
+        let dir = std::env::temp_dir().join(format!("zgui-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let mut st = AppState::load(dir.clone());
+        st.settings.theme = "dark".into();
+        assert!(st.save(), "сохранение должно удаться: {}", dir.display());
+        assert!(
+            !path.with_extension(format!("zgui_tmp.{}", std::process::id())).exists(),
+            "временный файл не должен оставаться"
+        );
+        let back = AppState::load(dir.clone());
+        assert_eq!(back.settings.theme, "dark");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Файл не прочитался (антивирус/OneDrive держат его доли секунды) — это не
+    /// повод считать настройки пустыми и записывать поверх целого файла дефолты.
+    #[test]
+    fn unreadable_state_is_not_overwritten_with_defaults() {
+        let dir = std::env::temp_dir().join(format!("zgui-locked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        // Нечитаемый файл: `read_to_string` падает на InvalidData, но запись
+        // поверх проходит свободно. Именно этот случай отличает «не прочитали»
+        // от «прочитали и разобрали» — и именно он раньше стирал настройки.
+        // (Эксклюзивная блокировка для проверки не годится: она ломает и запись.)
+        let broken: &[u8] = &[0xFF, 0xFE, 0x00, 0xC0, 0x80, 0x41, 0x42];
+        std::fs::write(&path, broken).unwrap();
+        let _ = AppState::load(dir.clone());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            broken,
+            "непрочитанный state.json нельзя затирать дефолтами"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
